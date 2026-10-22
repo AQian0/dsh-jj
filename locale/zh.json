@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Jujutsu (jj) 支持",
+    "description": "为 DeepSeek Harness 提供一等 Jujutsu (jj) 支持：仓库判别、防 git 混淆 guard 与 jj 原生工具。"
+  }
+}

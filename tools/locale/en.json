@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Jujutsu (jj) tools",
+    "description": "jj-native model tools: status, log, diff, new, describe, squash, undo, operation log, workspaces, bookmarks, and rebase."
+  }
+}

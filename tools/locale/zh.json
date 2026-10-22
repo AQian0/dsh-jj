@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Jujutsu (jj) 工具",
+    "description": "jj 原生的模型工具：status、log、diff、new、describe、squash、undo、operation log、workspace、bookmark 与 rebase。"
+  }
+}

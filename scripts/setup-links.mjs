@@ -6,8 +6,11 @@
  * already-installed DeepSeek Harness packages (and @types/node) to be visible
  * to `tsc` through the normal node_modules lookup:
  *
- *   packages/dsh-jj/node_modules/@deepseek-ai -> <DSH install>/node_modules/@deepseek-ai
- *   packages/dsh-jj/node_modules/@types       -> <DSH install>/node_modules/@types
+ *   node_modules/@deepseek-ai -> <DSH install>/node_modules/@deepseek-ai
+ *   node_modules/@types       -> <DSH install>/node_modules/@types
+ *
+ * This is a development-only bootstrap for `tsc`; it is not part of bundle
+ * installation (DSH resolves shipped packages from the installation itself).
  *
  * The default DSH install root is the global bun install used by this
  * workspace:

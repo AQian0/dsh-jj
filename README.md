@@ -28,21 +28,28 @@
 
 ## 1. 目录结构
 
+仓库根**就是** bundle 包:官方插件格式里,含 `package.json` + `dsh.bundle.patch` 的目录即包,
+因此不再有 `packages/` 外层。安装时把仓库根的绝对路径 `/home/aqian/dsh-jj` 交给 Plugin Manager。
+
 ```
-packages/dsh-jj/
-├── package.json          # 裸包名 dsh-jj;exports: "." / "./tools" / "./guard" / "./detect" / "./git-command"
+/home/aqian/dsh-jj/
+├── package.json          # 裸包名 dsh-jj;exports: "." / "./tools" / "./guard" / locale / icon
 ├── tsconfig.json         # outDir lib/, declarationDir lib/types/ (权威声明在 lib/types/**)
 ├── cordis.patch.yml      # 三条 bundle 行:jj-runtime / jj-tools / jj-guard
-├── scripts/setup-links.mjs  # 离线依赖 symlink(不联网安装)
+├── icon.svg              # 插件展示图标(根行与两个子路径行共用)
+├── locale/               # 根行展示元数据(en.json / zh.json)
+├── tools/locale/         # dsh-jj/tools 行展示元数据
+├── guard/locale/         # dsh-jj/guard 行展示元数据
+├── lib/                  # tsc 产物(lib/*.js + lib/types/*.d.ts);提交入库,保证 linked 安装开箱可用
+├── scripts/setup-links.mjs  # 开发期离线依赖 symlink(仅 tsc 需要,不联网)
 ├── src/
 │   ├── config.ts         # schemastery Config + 默认值 + 构造期校验
 │   ├── types.ts          # VcsKind / VcsDescriptor / VcsNotice / RunCommand / DetectDeps ...
 │   ├── detect.ts         # sniffVcsSync + detectVcs + TPL_WORKSPACE_LIST
 │   ├── git-command.ts    # classifyGitInvocation / gitEquivalence / classifyJjInvocation
 │   ├── guard.ts          # evaluateGitCommand + installGitConfusionGuard + guard 入口
-│   ├── index.ts          # runtime 入口(jj 服务层占位 + guard 装配)
-│   └── tools.ts          # tools 入口(13 个 jj_* 工具的装配位置)
-├── lib/                  # tsc 产物(lib/*.js + lib/types/*.d.ts)
+│   ├── index.ts          # runtime 入口(ctx.jj 服务 + jj 偏好上下文)
+│   └── tools.ts          # tools 入口(13 个 jj_* 工具)
 └── test/                 # node:test 用例(真实 jj/git 进程 + 临时目录夹具)
 ```
 
@@ -56,10 +63,10 @@ packages/dsh-jj/
 | tsc | /usr/bin/tsc(TypeScript 6.0.3) |
 
 **离线依赖(禁止联网安装)**:构建期需要 `@deepseek-ai/*` 与 `@types/node` 可解析。
-在包内建立指向全局安装的 symlink:
+在仓库根建立指向全局安装的 symlink(仅开发/构建需要,不是 bundle 安装步骤):
 
 ```bash
-cd packages/dsh-jj
+cd /home/aqian/dsh-jj
 node scripts/setup-links.mjs
 # 等价手工命令(脚本执行的就是这两条,幂等):
 #   ln -sfn /home/aqian/.cache/.bun/install/global/node_modules/@deepseek-ai node_modules/@deepseek-ai
@@ -71,19 +78,21 @@ node scripts/setup-links.mjs
 ## 3. 构建
 
 ```bash
-cd packages/dsh-jj
+cd /home/aqian/dsh-jj
 tsc -p tsconfig.json          # 产出 lib/*.js 与 lib/types/*.d.ts,无 TS 错误
 node -e "import('dsh-jj').then(m => console.log(m.name, m.inject, typeof m.apply))"
 ```
 
 `lib/types/**` 是权威类型声明(`package.json` 的 `exports.*.types` 指向它)。
+`lib/` 是**提交入库的构建产物**:本 bundle 以本地目录链接方式安装,安装过程不执行构建,
+所以 clone 后必须已有 `lib/`。改动 `src/` 后重新 `npm run build`,并把 `lib/` 的变更一起提交。
 
 ## 4. 测试(单一命令)
 
 ```bash
-cd packages/dsh-jj
+cd /home/aqian/dsh-jj
 node scripts/setup-links.mjs && tsc -p tsconfig.json && node --test "test/**/*.test.js"
-# 实测:224 tests / 224 pass / 0 fail(含 4 类仓库、guard、服务/操作层、13 工具 schema 与 argv 断言)
+# 实测:240 tests / 240 pass / 0 fail(含 4 类仓库、guard、服务/操作层、13 工具 schema 与 argv 断言)
 ```
 
 `npm test` 与上面等价(见 `package.json` scripts)。测试**不需要**先构建也能跑:
@@ -91,7 +100,7 @@ node scripts/setup-links.mjs && tsc -p tsconfig.json && node --test "test/**/*.t
 所以懒人入口 `node --test "test/**/*.test.js"` 也可以单独使用。
 
 > **Node 24 陷阱(实测)**:`node --test test/`(目录参数)在 Node v24.22.1 上会被当成模块路径而失败
-> (`Cannot find module '.../test'`)。请使用 glob(`node --test "test/**/*.test.js"`)或在包目录下用
+> (`Cannot find module '.../test'`)。请使用 glob(`node --test "test/**/*.test.js"`)或在仓库根用
 > 无参 `node --test` 自动发现。契约 §4.2 里写的 `node --test test/` 在这个 Node 版本上不可用。
 
 测试夹具规则(2026-10-22 共享工作区事故后的硬性要求):
@@ -104,25 +113,55 @@ node scripts/setup-links.mjs && tsc -p tsconfig.json && node --test "test/**/*.t
 
 | specifier | 文件 | `name` | `inject` | 职责 |
 |---|---|---|---|---|
-| `dsh-jj` | `lib/index.js` | `jj` | `['subprocess','workingDirectory']` | runtime 入口;当前装配 guard,服务层随后接入 |
-| `dsh-jj/tools` | `lib/tools.js` | `jj-tools` | `['tools']` | 13 个 `jj_*` 工具的装配位置(工具层接入时 inject 增加 `'jj'`) |
-| `dsh-jj/guard` | `lib/guard.js` | `jj-guard` | `['tools']` | 防混淆 guard + `create_worktree` 保护 |
+| `dsh-jj` | `lib/index.js` | `jj` | `['subprocess','workingDirectory']` | runtime 入口:注册 `ctx.jj` 服务与 jj 偏好 prompt context |
+| `dsh-jj/tools` | `lib/tools.js` | `jj-tools` | `['tools','jj','workingDirectory']` | 13 个 `jj_*` 模型工具 |
+| `dsh-jj/guard` | `lib/guard.js` | `jj-guard` | `['tools','jj']` | 防混淆 guard + `create_worktree` 保护 |
 | `dsh-jj/detect`, `dsh-jj/git-command` | 纯函数子入口 | — | — | 供其它插件/测试直接引用检测与分类 |
 
 三个入口都导出**同一个** schemastery `Config`,profile 里的非法配置会在 `apply` 前被 loader 拒绝。
+展示元数据按官方子路径插件规则分别导出:根行用 `locale/en.json`(及 `zh.json`),
+`dsh-jj/tools` 用 `tools/locale/*.json`, `dsh-jj/guard` 用 `guard/locale/*.json`,
+图标统一由 `./icon` 提供。
 
-安装路径(隔离 `DSH_HOME`,不触碰用户 profile):
+### 5.1 安装(官方 bundle 流程)
+
+仓库根现在是 bundle 包,安装时把**仓库根的绝对路径**交给 DSH 的 Plugin Manager;依赖安装、bundle 选择与
+激活都由它完成。**不要**手工写 profile 的 `package.json` / `cordis.patch.yml`,也**不要**手工 `cp` patch
+到 profile(旧版 README 的 symlink + cp 步骤已移除)。
+
+前置:本地目录安装是 **link checkout**(`files` 不会过滤 linked 目录),安装过程不执行构建,所以先构建出
+`lib/`(`lib/` 已提交入库;修改 `src/` 后需要重新构建):
 
 ```bash
-mkdir -p $DSH_HOME/profiles/<name>/node_modules
-ln -sfn <DSH install>/node_modules/@deepseek-ai $DSH_HOME/profiles/<name>/node_modules/@deepseek-ai
-ln -sfn /home/aqian/dsh-jj/packages/dsh-jj       $DSH_HOME/profiles/<name>/node_modules/dsh-jj
-cp packages/dsh-jj/cordis.patch.yml              $DSH_HOME/profiles/<name>/cordis.patch.yml
-DSH_HOME=$DSH_HOME dsh --profile <name> --dump-config   # 三条行可解析
+npm test        # = setup-links + tsc + 单元测试
+# 或只构建:
+npm run build
 ```
 
-本仓库的实测证据:`scratch/implementer/evidence/boot-check.txt`(真实 `dsh --profile jj-e2e --dump-config` 输出含三条行、
-`web --help` exit 0)、`scratch/implementer/dsh-home/`(隔离 profile)。
+安装:
+
+- Web GUI:在 Plugin Manager(设置页插件管理)里安装本地 bundle,spec 填 `/home/aqian/dsh-jj`(绝对路径);
+- Agent 工具:`plugin_manager` 的 `install_bundle`,target 填 `/home/aqian/dsh-jj`。
+
+安装后 bundle 贡献三条行(`jj-runtime` / `jj-tools` / `jj-guard`),并附带 `agent-instructions` 的 `.jj`
+根标记覆盖;用 Plugin 页面或 `list_plugins` 确认三行 enabled。
+
+隔离组合验证(只验证 patch 组合,不安装、不触碰用户 profile):
+
+```bash
+TMP=$(mktemp -d)
+mkdir -p "$TMP/profiles/jjreview/node_modules"
+ln -s /home/aqian/dsh-jj "$TMP/profiles/jjreview/node_modules/dsh-jj"
+cat > "$TMP/profiles/jjreview/package.json" <<'JSON'
+{"name":"dsh-profile-jjreview","private":true,"dependencies":{"dsh-jj":"link:/home/aqian/dsh-jj"},
+ "dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","dsh-jj"]}}}
+JSON
+printf '[]\n' > "$TMP/profiles/jjreview/cordis.yml"
+printf '[]\n' > "$TMP/profiles/jjreview/cordis.patch.yml"
+DSH_HOME="$TMP" dsh --profile jjreview --dump-config | grep -A3 -E "^- id: (jj-runtime|jj-tools|jj-guard|agent-instructions)"
+```
+
+> 开发期历史证据放在 `scratch/`(未入库,clone 后不可见);上面的隔离组合命令可在任意 clone 上复现。
 
 ## 6. 配置键(`Config`,全部可选)
 
@@ -157,7 +196,7 @@ DSH_HOME=$DSH_HOME dsh --profile <name> --dump-config   # 三条行可解析
   (`gitCeilingApplied=true`),并给 notice `jj-native-under-git-parent`(F13)。
 - session cwd 就是工作区根时给 notice `jj-shared-workspace`(F14,事故场景)。
 
-真实证据(四个种类 + 两个嵌套场景,真实 jj/git 输出):
+历史证据(开发期材料,未入库):四个种类 + 两个嵌套场景,真实 jj/git 输出:
 `scratch/implementer/evidence/repo-kinds.txt`(由 `scratch/implementer/evidence/repo-kinds-evidence.mjs` 生成)。
 
 ```
@@ -254,7 +293,7 @@ git 子命令分类表是**表驱动**的(`GIT_SUBCOMMAND_RULES`):`read`(放行)
 
 - **修好了什么**:`@deepseek-ai/dsh-agent-instructions` 的 `projectRootMarkers` 默认是 `['.git']`。
   在 **jj-native** 仓库(根目录没有 `.git`)里,cwd 位于子目录时**工作区根的 `AGENTS.md` 不会被发现**;加入 `.jj` 后根与子目录都能发现。
-  真实证据(`scratch/implementer/evidence/project-root.txt`,脚本用真实 `discoverBaselineInstructionFiles` + `jj git init --no-colocate` 夹具,cwd 自检一致):
+  历史证据(未入库):`scratch/implementer/evidence/project-root.txt`(脚本用真实 `discoverBaselineInstructionFiles` + `jj git init --no-colocate` 夹具,cwd 自检一致):
 
   ```
   cwd=sub,  markers=['.git']        -> AGENTS.md              (只有子目录的,工作区根的丢失)
@@ -262,6 +301,10 @@ git 子命令分类表是**表驱动**的(`GIT_SUBCOMMAND_RULES`):`read`(放行)
   cwd=root, markers=['.git','.jj']  -> AGENTS.md
   ```
 
+- **作用范围(2026-10-22 复核)**:**Web profile 不生效**。`@deepseek-ai/dsh-web-app` 在其 bundle 层把顶层
+  `agent-instructions` 行设为 `disabled: true`,并把 instructions 行放进各 agent preset;本 bundle 只按 id 覆盖
+  `config`、不修改 `disabled`,因此该行仍是 disabled,preset 内的同名行也不受这条 patch 影响。
+  该覆盖只在启用顶层行的 profile(例如 headless/CLI)生效;Web 会话的项目根发现目前仍走 preset 的默认 markers。
 - **没修好什么**:`@deepseek-ai/dsh-skill-filesystem` 的项目 skills 根**硬编码 `.git`**(实现内部,Config 未暴露,本包无法覆盖),
   因此 jj-native 工作区里**项目级 skill 仍可能找不到根**;这是需要上游改造的点(把标记改成可配置或复用同一套 marker)。
   过渡缓解(不属本任务验收):该包的 `customSkillDirs` 是**绝对路径列表**且不经过项目根发现,可在 profile patch 里给 `skill-filesystem` 行加
@@ -273,10 +316,10 @@ git 子命令分类表是**表驱动**的(`GIT_SUBCOMMAND_RULES`):`read`(放行)
   3) 行顺序:profile 的 `cordis.patch.yml` 是“用户层”,在 bundle 层之后应用,因此**用户层优先**;若使用者已有自己的 `agent-instructions` 行,以它为准并自行加上 `.jj`。
 - **默认值依据**:`instructionFileCandidates`、`localInstructionFileCandidates`、`maxSourceBytes` 在包内有默认值,本次 patch 未重复声明(仅重述会被整体替换影响的 `maxBytes`)。
 
-真实组合与 boot 证据(命令 + 片段):
+真实组合与 boot 证据可复现(复用 §5.1 的隔离 profile):
 
 ```bash
-DSH_HOME=/home/aqian/dsh-jj/scratch/lead/dsh-home dsh --profile jj-real --dump-config | grep -A6 '^- id: agent-instructions'
+DSH_HOME="$TMP" dsh --profile jjreview --dump-config | grep -A6 '^- id: agent-instructions'
 # - id: agent-instructions
 #   name: '@deepseek-ai/dsh-agent-instructions'
 #   config:
@@ -285,11 +328,8 @@ DSH_HOME=/home/aqian/dsh-jj/scratch/lead/dsh-home dsh --profile jj-real --dump-c
 #       - .git
 #       - .jj
 
-DSH_HOME=/home/aqian/dsh-jj/scratch/lead/dsh-home dsh --profile jj-real web --help   # exit 0
+DSH_HOME="$TMP" dsh --profile jjreview web --help   # exit 0
 ```
-
-(为完成 task-10 验收,同一行也已写入 `scratch/lead/dsh-home/profiles/jj-real/cordis.patch.yml`——该路径在 task-10 的 write scope 内;
-它属于隔离验收 profile,不是用户 profile。)
 
 ## 9. 与 git 的边界(为什么不能混用)
 
@@ -314,16 +354,17 @@ DSH_HOME=/home/aqian/dsh-jj/scratch/lead/dsh-home dsh --profile jj-real web --he
 4. **缓存**:`peek` 按 `path.resolve` 归一化,不做 realpath(同步路径禁 I/O);同一目录的 symlink 别名可能各缓存一次。
 5. **检测失败不回落 git**:`.jj` 存在但仓库损坏时 `kind='none'` 且保留 `jjRoot`/notices,绝不静默改用 git。
 6. **工具层已实现**(`ctx.jj` + 13 个 `jj_*` 工具);`jj_diff` 的 `paths` 按原样传给 jj(相对 cwd 解析),未做绝对化重写;`jj_workspace_add` 不做路径越界校验(jj 允许任意目标目录,README 建议放仓库根之外)。
-7. **app 级 boot 证据**(已闭环):隔离 profile `jj-e2e` 里在三条行之后追加一个 `inject: ['tools','jj']` 的探针插件,
-   `DSH_HOME=… dsh --profile jj-e2e web --help` → exit 0,探针 apply 执行并观察到 `ctx.jj=object`(证明 runtime 行注册了服务、
-   tools/guard 行的 `['tools','jj']` 依赖已满足);lead 的 `jj-real` profile boot 亦 exit 0。
-   证据:`scratch/implementer/evidence/boot-check.txt`、`apply-order.txt`、`boot-jj-e2e.txt`。
+7. **app 级 boot 证据**(2026-10-22 重构后复核):隔离 profile `jjverify`(非用户 profile)选中
+   `[@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dsh-jj]` 后 `--dump-config` 含三条行;
+   用 `--patch` 追加 `inject: ['tools','jj']` 探针并真实启动 Web
+   (`dsh --profile jjverify --host 127.0.0.1 --port 0 --no-open`),探针 apply 执行并观察到
+   `ctx.jj` 服务对象与 `ctx.tools.guard` 函数(证明 runtime 行注册了服务、tools/guard 行的 `['tools','jj']` 依赖已满足)。
+   历史证据:`scratch/implementer/evidence/boot-check.txt`、`apply-order.txt`、`boot-jj-e2e.txt`(未入库);
    未复现项:给 `dsh-jj/guard` 行传非法 `guardMutatingGit` 值未观察到 loader 报错,待 verifier 用真实 app boot 复核。
 
 ## 11. 与契约的对应
 
-实现与最初契约描述的两处**兼容性扩展**及差异,
-记录在 `scratch/implementer/contract-notes.md`:
+实现与最初契约描述的两处**兼容性扩展**及差异,记录在开发期契约笔记 `scratch/implementer/contract-notes.md`(未入库):
 
 - `detectVcs(cwd, input, signal?)` 同时接受 task-4 的 `RunCommand`(argv 含程序名)与契约 §6.1 的 `DetectDeps`(`runJj`/`runGit`,argv 不含程序名);
 - `VcsDescriptor` 采用契约 §5.3 字段(`jjWorkspaceRoot`/`jjStore`/`workspaces`/`remotes`/`verified`/`notices`/`probedAt`),

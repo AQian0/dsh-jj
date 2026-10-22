@@ -5,12 +5,13 @@
 #       jj file untrack <paths>
 # ─────────────────────────────────────────────────────────────
 
-# 依赖（包内 node_modules 是指向全局安装的 symlink 农场，由
+# 依赖（仓库根 node_modules 是指向全局安装的 symlink 农场，由
 # `node scripts/setup-links.mjs` 生成；离线可用，不入库）
 node_modules/
 
-# 构建产物（tsc 输出；源码在 src/，声明在 lib/types/）
-packages/*/lib/
+# 构建产物 lib/ 提交入库：本仓库是"本地目录链接安装"的 bundle，
+# 安装时不执行构建，因此 lib/ 必须随 checkout 存在。修改 src/ 后
+# 重新 `npm run build` 并把 lib/ 的变更一起提交。
 *.tsbuildinfo
 
 # 过程性目录：实验脚本、夹具与日志

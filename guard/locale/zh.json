@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Jujutsu (jj) guard",
+    "description": "在 jj 工作区提示或拒绝 mutating git，并保护 jj workspace 与仓库级操作。"
+  }
+}
