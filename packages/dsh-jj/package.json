@@ -1,0 +1,61 @@
+{
+  "name": "dsh-jj",
+  "version": "0.1.0",
+  "private": true,
+  "description": "First-class Jujutsu (jj) support for DeepSeek Harness: repository detection, git-confusion guard, and jj-native tools",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./tools": {
+      "types": "./lib/types/tools.d.ts",
+      "default": "./lib/tools.js"
+    },
+    "./guard": {
+      "types": "./lib/types/guard.d.ts",
+      "default": "./lib/guard.js"
+    },
+    "./detect": {
+      "types": "./lib/types/detect.d.ts",
+      "default": "./lib/detect.js"
+    },
+    "./git-command": {
+      "types": "./lib/types/git-command.d.ts",
+      "default": "./lib/git-command.js"
+    },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "src",
+    "test",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "setup": "node scripts/setup-links.mjs",
+    "build": "tsc -p tsconfig.json",
+    "test:unit": "node --test \"test/**/*.test.js\"",
+    "test": "node scripts/setup-links.mjs && tsc -p tsconfig.json && node --test \"test/**/*.test.js\"",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-working-directory": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "~1.0.0"
+  }
+}

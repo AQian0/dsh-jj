@@ -1,0 +1,28 @@
+# dsh-jj bundle patch (design contract §4.4).
+#
+# Three independently loadable entries. Row order is load order: the runtime
+# entry comes first, and the tools/guard entries depend on it once the `ctx.jj`
+# service exists (tools layer). Remove an `insert` block to install only part of
+# the feature.
+- insert:
+    - id: jj-runtime
+      name: 'dsh-jj'
+- insert:
+    - id: jj-tools
+      name: 'dsh-jj/tools'
+- insert:
+    - id: jj-guard
+      name: 'dsh-jj/guard'
+# Project-root discovery must understand jj workspaces (task-10).
+#
+# `@deepseek-ai/dsh-agent-instructions` defaults to `projectRootMarkers: ['.git']`,
+# which loses the workspace-root AGENTS.md in a jj-native repository (no root
+# `.git`). A non-`insert` row REPLACES that row's whole config, so the composed
+# value `maxBytes: 65536` must be restated here; the other keys
+# (instructionFileCandidates / localInstructionFileCandidates / maxSourceBytes)
+# keep their package defaults and are intentionally not repeated.
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+    projectRootMarkers: ['.git', '.jj']

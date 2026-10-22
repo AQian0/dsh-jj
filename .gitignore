@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────
+# dsh-jj 仓库忽略规则（jj 与 git 共用；jj 没有 .jjignore）
+#   * 忽略只影响是否纳入版本控制，不删除磁盘文件
+#   * 已跟踪的文件即使命中规则也不会自动停止跟踪，需要：
+#       jj file untrack <paths>
+# ─────────────────────────────────────────────────────────────
+
+# 依赖（包内 node_modules 是指向全局安装的 symlink 农场，由
+# `node scripts/setup-links.mjs` 生成；离线可用，不入库）
+node_modules/
+
+# 构建产物（tsc 输出；源码在 src/，声明在 lib/types/）
+packages/*/lib/
+*.tsbuildinfo
+
+# 过程性目录：实验脚本、夹具与日志
+scratch/
+
+# 编辑器 / 系统临时文件
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+editor-*.jjdescription
+
+# DSH 检出池（若在仓库内创建）
+.agents/worktrees/
