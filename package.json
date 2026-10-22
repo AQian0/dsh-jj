@@ -1,6 +1,6 @@
 {
   "name": "@aqian0/dsh-jj",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "First-class Jujutsu (jj) support for DeepSeek Harness: repository detection, git-confusion guard, and jj-native tools",
   "license": "MIT",
   "repository": {
