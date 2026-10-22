@@ -8,6 +8,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (e.g. v0.1.1)"
+        required: true
+        type: string
 
 permissions:
   contents: write # 创建 GitHub Release
@@ -21,10 +27,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out the tagged commit
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -47,8 +56,8 @@ jobs:
       - name: Verify tag and package metadata
         run: |
           version="$(node -p "require('./package.json').version")"
-          test "${GITHUB_REF_NAME}" = "v${version}" \
-            || { echo "::error::tag ${GITHUB_REF_NAME} does not match package.json ${version}"; exit 1; }
+          test "${RELEASE_TAG}" = "v${version}" \
+            || { echo "::error::tag ${RELEASE_TAG} does not match package.json ${version}"; exit 1; }
           node -e "const p = require('./package.json'); \
             if (p.private === true) throw new Error('package.json is private'); \
             if (!p.repository?.url) throw new Error('repository.url is required for trusted publishing')"
@@ -73,7 +82,7 @@ jobs:
 
       - name: Publish to npm with OIDC
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           if npm view "@aqian0/dsh-jj@${version}" version >/dev/null 2>&1; then
             echo "::warning::@aqian0/dsh-jj@${version} already published; skipping npm publish"
             exit 0
@@ -88,11 +97,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             exit 0
           fi
-          args=(--verify-tag --generate-notes --title "@aqian0/dsh-jj ${GITHUB_REF_NAME}")
-          if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
+          args=(--verify-tag --generate-notes --title "@aqian0/dsh-jj ${RELEASE_TAG}")
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
             args+=(--prerelease)
           fi
-          gh release create "${GITHUB_REF_NAME}" "${args[@]}"
+          gh release create "${RELEASE_TAG}" "${args[@]}"
