@@ -1,374 +1,113 @@
-# dsh-jj — DeepSeek Harness 的一等 Jujutsu (jj) 支持(基础层)
+# dsh-jj
 
-本包把 jj 当作**一等版本控制语义**接入 DSH:先做**仓库判别**(`git` / `jj-colocated` / `jj-native` / 不可用),
-再做**防 git 混淆 guard**(jj 工作区里优先 jj:默认放行 mutating git 并把 jj 等价命令提示写进工具结果,可配置为拒绝),
-并对 **jj 侧仓库级操作**(`jj undo` / `jj op restore` 等)给出作用域提示。工具层(`jj_*` 工具、`ctx.jj` 服务)
-在后续步骤接入同一插件。
+给 [DeepSeek Harness](https://github.com/deepseek-ai) 的 Jujutsu(jj)一等支持:自动识别 jj 仓库、纠正误用的 git 写入命令,并提供一套 jj 原生工具。
 
-> 本包**不是** git 命令的别名封装:guard 的拒绝文案一律给出 jj 原生命令(revset、change id、bookmark、
-> operation log、workspace),工具层的命令也全部走 jj。
+## 功能
 
-## 策略:一等公民 = 优先 jj,而不是屏蔽 git
+- **仓库识别**:区分 `git` / `jj-colocated` / `jj-native` / 非仓库;jj 与 git 嵌套时给出明确归属,不会把 jj 工作区当成普通 git 仓库。
+- **防混淆 guard**:在 jj 仓库里执行 `git commit`、`git reset` 等会破坏 change graph 的命令时,默认放行并在结果里提示等价 jj 命令,也可配置为直接拒绝。
+- **jj 原生工具**:13 个 `jj_*` 工具(status / log / diff / new / describe / squash / undo / op log / workspace / bookmark / rebase)。
+- **模型上下文**:在 jj 仓库里自动向模型注入「优先用 jj」的上下文;非 jj 仓库不注入。
+- **项目根发现**:让 `agent-instructions` 也能把 `.jj` 当作项目根标记(headless/CLI profile 生效)。
+- **不回退 git**:jj 不可用或目录不是 jj 仓库时明确报错,绝不静默改用 git。
 
-当 `.jj` 与 `.git` **同时存在**(colocated)时,dsh-jj 的做法是**优先 jj、保留 git**:
+## 安装
 
-- jj 原生工具(`jj_*`)与服务(`ctx.jj`)是首选路径;工具描述明确写 "This is jj, not git"。
-- **会话起始就把偏好写进模型上下文**(`preferJjContext: true`,默认):注册一个全局
-  `systemPrompt.context`,其文本提供者读取 `AssembleContext.agent` 并解析该 agent 的当前目录——
-  与 DSH 自带的 `dsh-working-directory` 同一模式,因此**对任何 provider / 任何模型 / 子代理都生效**,
-  不依赖某个模型是否读了工具描述。非 jj 仓库时该上下文为空串(不占位)。
-- mutating git **默认不被拦截**(`guardMutatingGit: warn`):命令照常执行,但 guard 会把一条
-  「本仓库优先用 jj;等价命令是 `jj describe`/`jj new`…;git 写入不会进入 jj 的 operation log」
-  的提示**追加到该次工具结果**里(`tools/post-execute`),让模型从结果中学会偏好。
-- 需要严格拦截时把 `guardMutatingGit` 设为 `deny`;完全不想被打扰设为 `off`。
-- 唯一默认拒绝的两类:①`create_worktree` 在 jj 工作区(它产出的 checkout jj 根本看不见);
-  ②jj 侧**不可逆**操作(`jj restore` 无 pathspec、`jj abandon @`、`jj undo --allow-cross-workspace`)。
+### 本地目录(开发/未发布)
 
----
-
-## 1. 目录结构
-
-仓库根**就是** bundle 包:官方插件格式里,含 `package.json` + `dsh.bundle.patch` 的目录即包,
-因此不再有 `packages/` 外层。安装时把仓库根的绝对路径 `/home/aqian/dsh-jj` 交给 Plugin Manager。
-
-```
-/home/aqian/dsh-jj/
-├── package.json          # 裸包名 dsh-jj;exports: "." / "./tools" / "./guard" / locale / icon
-├── tsconfig.json         # outDir lib/, declarationDir lib/types/ (权威声明在 lib/types/**)
-├── cordis.patch.yml      # 三条 bundle 行:jj-runtime / jj-tools / jj-guard
-├── icon.svg              # 插件展示图标(根行与两个子路径行共用)
-├── locale/               # 根行展示元数据(en.json / zh.json)
-├── tools/locale/         # dsh-jj/tools 行展示元数据
-├── guard/locale/         # dsh-jj/guard 行展示元数据
-├── lib/                  # tsc 产物(lib/*.js + lib/types/*.d.ts);提交入库,保证 linked 安装开箱可用
-├── scripts/setup-links.mjs  # 开发期离线依赖 symlink(仅 tsc 需要,不联网)
-├── src/
-│   ├── config.ts         # schemastery Config + 默认值 + 构造期校验
-│   ├── types.ts          # VcsKind / VcsDescriptor / VcsNotice / RunCommand / DetectDeps ...
-│   ├── detect.ts         # sniffVcsSync + detectVcs + TPL_WORKSPACE_LIST
-│   ├── git-command.ts    # classifyGitInvocation / gitEquivalence / classifyJjInvocation
-│   ├── guard.ts          # evaluateGitCommand + installGitConfusionGuard + guard 入口
-│   ├── index.ts          # runtime 入口(ctx.jj 服务 + jj 偏好上下文)
-│   └── tools.ts          # tools 入口(13 个 jj_* 工具)
-└── test/                 # node:test 用例(真实 jj/git 进程 + 临时目录夹具)
-```
-
-## 2. 环境前提
-
-| 组件 | 本工作区实测版本 |
-|---|---|
-| jj | 0.46.0 |
-| git | 2.56.0 |
-| node | v24.22.1(用内置 TypeScript 类型擦除直接跑 `src/*.ts`) |
-| tsc | /usr/bin/tsc(TypeScript 6.0.3) |
-
-**离线依赖(禁止联网安装)**:构建期需要 `@deepseek-ai/*` 与 `@types/node` 可解析。
-在仓库根建立指向全局安装的 symlink(仅开发/构建需要,不是 bundle 安装步骤):
+先在仓库根构建(`lib/` 已提交入库,clone 后可直接装):
 
 ```bash
-cd /home/aqian/dsh-jj
-node scripts/setup-links.mjs
-# 等价手工命令(脚本执行的就是这两条,幂等):
-#   ln -sfn /home/aqian/.cache/.bun/install/global/node_modules/@deepseek-ai node_modules/@deepseek-ai
-#   ln -sfn /home/aqian/.cache/.bun/install/global/node_modules/@types        node_modules/@types
+npm test        # 构建 + 测试;只想构建用 npm run build
 ```
 
-其它 DSH 安装位置:`DSH_NODE_MODULES=/path/to/node_modules node scripts/setup-links.mjs`。
+然后在 DSH 的 Plugin Manager 里安装本地 bundle:
 
-## 3. 构建
-
-```bash
-cd /home/aqian/dsh-jj
-tsc -p tsconfig.json          # 产出 lib/*.js 与 lib/types/*.d.ts,无 TS 错误
-node -e "import('dsh-jj').then(m => console.log(m.name, m.inject, typeof m.apply))"
-```
-
-`lib/types/**` 是权威类型声明(`package.json` 的 `exports.*.types` 指向它)。
-`lib/` 是**提交入库的构建产物**:本 bundle 以本地目录链接方式安装,安装过程不执行构建,
-所以 clone 后必须已有 `lib/`。改动 `src/` 后重新 `npm run build`,并把 `lib/` 的变更一起提交。
-
-## 4. 测试(单一命令)
-
-```bash
-cd /home/aqian/dsh-jj
-node scripts/setup-links.mjs && tsc -p tsconfig.json && node --test "test/**/*.test.js"
-# 实测:240 tests / 240 pass / 0 fail(含 4 类仓库、guard、服务/操作层、13 工具 schema 与 argv 断言)
-```
-
-`npm test` 与上面等价(见 `package.json` scripts)。测试**不需要**先构建也能跑:
-`test/*.test.js` 通过 Node 内置类型擦除直接 import `src/*.ts`,而所有 DSH import 都是 `import type`(运行时被擦除),
-所以懒人入口 `node --test "test/**/*.test.js"` 也可以单独使用。
-
-> **Node 24 陷阱(实测)**:`node --test test/`(目录参数)在 Node v24.22.1 上会被当成模块路径而失败
-> (`Cannot find module '.../test'`)。请使用 glob(`node --test "test/**/*.test.js"`)或在仓库根用
-> 无参 `node --test` 自动发现。契约 §4.2 里写的 `node --test test/` 在这个 Node 版本上不可用。
-
-测试夹具规则(2026-10-22 共享工作区事故后的硬性要求):
-
-1. 所有仓库夹具都用 `mkdtemp` 建在 `/tmp` 下,**绝不**在 `/home/aqian/dsh-jj`(colocated 仓库根)执行 mutating jj/git;
-2. 每个夹具创建后自检 `jj root` / `git rev-parse --show-toplevel` 必须等于夹具目录,否则抛错(见 `test/helpers/fixtures.js`);
-3. 破坏性命令一律用 `cwd`/`-R` 指定夹具,不依赖进程 cwd。
-
-## 5. 四个入口(bundle 行)
-
-| specifier | 文件 | `name` | `inject` | 职责 |
-|---|---|---|---|---|
-| `dsh-jj` | `lib/index.js` | `jj` | `['subprocess','workingDirectory']` | runtime 入口:注册 `ctx.jj` 服务与 jj 偏好 prompt context |
-| `dsh-jj/tools` | `lib/tools.js` | `jj-tools` | `['tools','jj','workingDirectory']` | 13 个 `jj_*` 模型工具 |
-| `dsh-jj/guard` | `lib/guard.js` | `jj-guard` | `['tools','jj']` | 防混淆 guard + `create_worktree` 保护 |
-| `dsh-jj/detect`, `dsh-jj/git-command` | 纯函数子入口 | — | — | 供其它插件/测试直接引用检测与分类 |
-
-三个入口都导出**同一个** schemastery `Config`,profile 里的非法配置会在 `apply` 前被 loader 拒绝。
-展示元数据按官方子路径插件规则分别导出:根行用 `locale/en.json`(及 `zh.json`),
-`dsh-jj/tools` 用 `tools/locale/*.json`, `dsh-jj/guard` 用 `guard/locale/*.json`,
-图标统一由 `./icon` 提供。
-
-### 5.1 安装(官方 bundle 流程)
-
-仓库根现在是 bundle 包,安装时把**仓库根的绝对路径**交给 DSH 的 Plugin Manager;依赖安装、bundle 选择与
-激活都由它完成。**不要**手工写 profile 的 `package.json` / `cordis.patch.yml`,也**不要**手工 `cp` patch
-到 profile(旧版 README 的 symlink + cp 步骤已移除)。
-
-前置:本地目录安装是 **link checkout**(`files` 不会过滤 linked 目录),安装过程不执行构建,所以先构建出
-`lib/`(`lib/` 已提交入库;修改 `src/` 后需要重新构建):
-
-```bash
-npm test        # = setup-links + tsc + 单元测试
-# 或只构建:
-npm run build
-```
-
-安装:
-
-- Web GUI:在 Plugin Manager(设置页插件管理)里安装本地 bundle,spec 填 `/home/aqian/dsh-jj`(绝对路径);
+- Web GUI:设置页 → 插件管理 → 安装本地 bundle,spec 填仓库绝对路径 `/home/aqian/dsh-jj`;
 - Agent 工具:`plugin_manager` 的 `install_bundle`,target 填 `/home/aqian/dsh-jj`。
 
-安装后 bundle 贡献三条行(`jj-runtime` / `jj-tools` / `jj-guard`),并附带 `agent-instructions` 的 `.jj`
-根标记覆盖;用 Plugin 页面或 `list_plugins` 确认三行 enabled。
+### 从 npm(发布后)
 
-隔离组合验证(只验证 patch 组合,不安装、不触碰用户 profile):
-
-```bash
-TMP=$(mktemp -d)
-mkdir -p "$TMP/profiles/jjreview/node_modules"
-ln -s /home/aqian/dsh-jj "$TMP/profiles/jjreview/node_modules/dsh-jj"
-cat > "$TMP/profiles/jjreview/package.json" <<'JSON'
-{"name":"dsh-profile-jjreview","private":true,"dependencies":{"dsh-jj":"link:/home/aqian/dsh-jj"},
- "dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","dsh-jj"]}}}
-JSON
-printf '[]\n' > "$TMP/profiles/jjreview/cordis.yml"
-printf '[]\n' > "$TMP/profiles/jjreview/cordis.patch.yml"
-DSH_HOME="$TMP" dsh --profile jjreview --dump-config | grep -A3 -E "^- id: (jj-runtime|jj-tools|jj-guard|agent-instructions)"
-```
-
-> 开发期历史证据放在 `scratch/`(未入库,clone 后不可见);上面的隔离组合命令可在任意 clone 上复现。
-
-## 6. 配置键(`Config`,全部可选)
-
-| 键 | 默认 | 语义 |
-|---|---|---|
-| `jjCommand` / `gitCommand` | `jj` / `git` | 可执行名;`gitCommand` 只用于 git 探测与提示,不用于 jj 操作 |
-| `timeoutMs` / `graceMs` | 30000 / 3000 | 子进程超时与终止宽限 |
-| `maxOutputBytes` | 262144 | 单流输出上限 |
-| `detectCacheTtlMs` | 10000 | 检测缓存 TTL(guard 的同步 cache 依据) |
-| `guardMutatingGit` | `warn`(v3 策略) | jj 工作区内 mutating git 的处置:`warn` 放行 + 把「优先用 jj」提示**追加到工具结果**(模型可见) / `deny` 拒绝 / `off` 不干预 |
-| `preferJjContext` | `true` | 会话起始把「这是 jj 仓库,优先用 jj」作为**模型可见上下文**注入(每个 agent 生效;非 jj 仓库注入空串) |
-| `guardGitInJjNative` | `warn`(v3 策略) | **仅 jj-native** 内 git 的处置:`warn` 放行 + 一次性 notice / `deny` 拒绝 / `off` 忽略 |
-| `guardJjRepositoryWide` | `warn` | jj 侧仓库级操作(`jj undo`/`jj op restore`/`jj redo`/`jj op revert`/`jj abandon <rev>`/`jj edit <rev>`/`jj new <rev>`/`jj workspace forget <自己>`)的处置;**默认放行**(它是首选恢复路径)+ `jj/repo-wide-op` 事件与一次性 notice(含 head op id 与回滚命令) |
-| (硬拒绝,不可配置) | — | `jj restore`(无 pathspec)、`jj abandon @`、`jj undo --allow-cross-workspace`、`jj -R <祖先/外部仓库>`、`jj workspace forget <他人>` 一律拒绝 |
-| `guardTools` | `['bash','pwsh','terminal_send']` | guard 检查的工具名 |
-| `guardCreateWorktree` | `true` | 在 jj 仓库拒绝 `create_worktree` |
-| `readOnlyGitNotice` | `true` | colocated 只读 git 的一次性 notice |
-| `defaultLogLimit` / `maxLogLimit` | 30 / 200 | 日志工具参数(工具层) |
-| `defaultCwd` | `''`(空 ⇒ `process.cwd()`) | 无 `workdir`/无 `workingDirectory` 时的回退 cwd |
-
-## 7. 仓库判别(检测算法)
-
-优先级:**文件嗅探(同步、无副作用)→ jj CLI 权威确认 → git 探测**。
-
-- 嗅探向上遍历,记录**最近 `.jj` 目录**(普通文件 `.jj` 不算,F3)与**最近 `.git`**(目录或文件)的**深度**;
-  **更近者胜**:git 仓库嵌在 jj 工作区内 ⇒ `kind='git'` + notice `jj-ancestor-shadowed`(F6);
-  jj 工作区嵌在 git 仓库内 ⇒ jj 优先(F5)。
-- 权威确认用 `jj --ignore-working-copy --no-pager --color=never workspace list -T <TPL_WORKSPACE_LIST>`,**不用 `jj root`**:
-  空的 `.jj` 目录会让 `jj root` exit 0 误报,而 `workspace list` exit 255(F2);`.jj/repo` 断链 ⇒ exit 1 + `Cannot access`。
-- 只读 jj 命令默认会**快照工作副本**,所以检测/peek 路径一律带 `--ignore-working-copy`。
-- git 探测单独进行,尊重 `GIT_CEILING_DIRECTORIES`;jj-native 工作区上方的 git 仓库不会被当作本目录的仓库
-  (`gitCeilingApplied=true`),并给 notice `jj-native-under-git-parent`(F13)。
-- session cwd 就是工作区根时给 notice `jj-shared-workspace`(F14,事故场景)。
-
-历史证据(开发期材料,未入库):四个种类 + 两个嵌套场景,真实 jj/git 输出:
-`scratch/implementer/evidence/repo-kinds.txt`(由 `scratch/implementer/evidence/repo-kinds-evidence.mjs` 生成)。
+在 Plugin Manager 里把 spec 填成精确版本(避免下次发版改变已装内容):
 
 ```
-jj-colocated  verified=true  confidence=high   colocated (jj git init --colocate)
-jj-native     verified=true  confidence=high   jj-native (jj git init --no-colocate)
-git           verified=true  confidence=high   plain git (git init)
-none          verified=true  confidence=high   none (empty directory)
-jj-native     verified=true  confidence=high   jj-native inside parent git repo   (gitCeilingApplied=true)
-git           verified=true  confidence=high   nested git repo inside a jj workspace
+@aqian0/dsh-jj@0.1.0
 ```
 
-> **注意**:jj 0.46 的 `git.colocate` 默认为 `true` —— `jj git init` 得到的是 **colocated** 仓库;
-> 造 jj-native 夹具必须 `jj git init --no-colocate`。
+也可以只安装依赖:`dsh plugin --profile <name> add @aqian0/dsh-jj@0.1.0`。
 
-## 8. 防混淆 guard
+安装后 bundle 自动贡献 `jj-runtime` / `jj-tools` / `jj-guard` 三行,并给 `agent-instructions` 加上 `.jj` 根标记;用 Plugin 页面或 `list_plugins` 确认三行 enabled。
 
-`ctx.tools.guard(...)` 是**同步**的,检测是异步的,所以分两段(契约 §8.1):
+## 使用
 
-- **预热段**(可选):宿主提供 `on('tools/pre-execute')` 且传入 `service`/`warm` 时,先 `await warm(cwd)` 并把决策缓存到
-  `Map<callId, reason>`;DSH 保证 pre-execute 跑完才评估 guard,因此不会"首次调用漏判"。
-- **决策段**:`check(execution)` 取缓存,否则退回**同步文件嗅探**(独立可用;预热抛错时 fail-open,永不阻断调用)。
+安装后自动生效,无需手工写 profile。典型的 agent 用法:
 
-决策矩阵要点:
-
-| 条件 | 动作 |
+| 你说 | 模型调用 |
 |---|---|
-| mutating git + `kind=jj-*` | `guardMutatingGit`:**`warn` 默认**——命令照常执行,同时在 `tools/post-execute` 把 jj 优先提示追加到结果(模型可见)/`deny` 拒绝(文案含 jj 等价命令)/`off` 不干预 |
-| git + `kind=jj-native` | `guardGitInJjNative`:`warn`(默认)放行 + 一次性 notice / `deny` 拒绝 / `off` 忽略 |
-| 只读 git + `kind=jj-colocated` | 放行;`readOnlyGitNotice` 时发一次性 notice |
-| `safety==='unknown'` 或无子命令 | **放行**(不得误判为 mutating) |
-| `kind=git` / `none` / F6 遮蔽 | 不干预 |
-| `create_worktree` + `kind=jj-*` | `guardCreateWorktree` 拒绝,指向 `jj workspace add`(含 4 条实测事实) |
-| `jj undo` / `jj op restore` / `jj redo` / `jj abandon` / `jj op revert` | `guardJjRepositoryWide`:`warn`(默认)放行 + `jj/repo-wide-op` 事件 + 一次性 notice / `deny` 拒绝(文案含 `--at-op` 与 `jj_undo` 工具)/`off` 忽略 |
-| `jj workspace forget <他人 workspace>` | **始终拒绝** |
-| `jj -R <祖先/外部仓库> …`(scope creep) | **始终拒绝** |
+| "看下当前 jj 状态" | `jj_status` |
+| "列出最近 10 个提交" | `jj_log` |
+| "把当前改动并进上一个提交" | `jj_squash` |
+| "改一下当前 change 的描述" | `jj_describe` |
+| "撤销刚才那次 jj 操作" | `jj_undo` |
+| "新建一个 workspace 放到 /tmp/wt" | `jj_workspace_add` |
 
-拒绝文案示例(真实输出):
+在 jj 仓库里直接让 agent 跑 `git commit` 之类的命令时,默认会在工具结果里追加「优先用 jj」的提示;
+把 `guardMutatingGit` 设为 `deny` 后会直接拒绝并给出等价命令:
 
 ```
-Blocked: `git commit` in a Jujutsu (jj) workspace (jj-colocated: /tmp/.../colo).
-This is a colocated repository: git and jj share one working copy, but only jj knows the real change graph. ...
+Blocked: `git commit` in a Jujutsu (jj) workspace (jj-colocated: /path/to/repo).
 Use the jj equivalent instead:
   jj commit -m "…"      (or: jj describe -m "…" then jj new)
-Read-only git commands are still allowed for inspection (for example `git log`, `git diff`, `git show`, `git rev-parse`).
-If raw git is genuinely required here, your user can set the dsh-jj setting guardMutatingGit to "warn" or "off".
 ```
 
-git 子命令分类表是**表驱动**的(`GIT_SUBCOMMAND_RULES`):`read`(放行)/`mutate`(拒绝)/`unknown`(放行);
-`contextual` 子命令(`branch`/`tag`/`config`/`remote`/`stash`/`worktree`/`reflog`/`symbolic-ref`/`bisect`/`notes`/`add`/`apply`/`push`/`fetch`/`bundle`/`hash-object`/`submodule`)按 flag/位置参数判定。
-识别形态:`git X`、`/usr/bin/git X`、`"git" X`、`git.exe X`、`sudo/env/nohup/time/nice/stdbuf/xargs/timeout git X`、
-`A=1 git X`、`git -C p X`、`--git-dir=`/`--work-tree=`、`cd x && git X`、`;`/`|`/`||`/换行串联、`$(git X)`、反引号、`bash -c "git X"`。
+### 工具一览
 
-## 8.1 工具层:`ctx.jj` 服务与 13 个 `jj_*` 工具(task-6)
+| 工具 | 作用 |
+|---|---|
+| `jj_status` | 工作副本 `@` 的状态 |
+| `jj_log` | 按 revset 查看提交(`@`、`@-`、`bookmarks()` 等) |
+| `jj_diff` | 指定 revset 的 diff |
+| `jj_new` | 新建 change 并设为 `@` |
+| `jj_describe` | 就地修改提交描述(代替 `git commit --amend`) |
+| `jj_squash` | 把改动并进另一个提交 |
+| `jj_undo` | 撤销/恢复到某个 operation |
+| `jj_op_log` | operation 历史,用于找 `jj_undo` 的目标 |
+| `jj_workspace_add` / `jj_workspace_list` | 新建/列出 jj workspace |
+| `jj_bookmark_list` / `jj_bookmark_set` | 列出/设置 bookmark |
+| `jj_rebase` | rebase 提交及其后代 |
 
-`src/service.ts` 提供 `ctx.jj`(`JjService extends Service`,`static inject = ['subprocess','workingDirectory']`,`static Config = Config`):
+非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj;不会回退到 git。
 
-- **检测**:`detect(cwd, signal)`(TTL 缓存)/ `warm`(强制刷新)/ `peek`(同步,供 guard)/ `describe(target)`;
-- **操作**(全部走注入的 `RunJj`,真实运行时绑定 `ctx.subprocess`):
-  `status` · `log` · `diff` · `newChange` · `describeChange` · `squash` · `undo`(`jj undo` / `jj op restore`,先记录 head op id)· `opLog` · `workspaceAdd` · `workspaceList` · `bookmarkList` · `bookmarkSet` · `rebase` · `version`;
-- **生命周期**:`ctx.effect` disposer 先 abort → `await Promise.allSettled(pending)` → 清缓存(契约 §5.6)。
+## 配置
 
-`src/tools.ts` 注册 13 个模型工具(英文描述逐字取自契约 §7.3,首句均点明 “Jujutsu (jj)”):
+所有配置键可选,写在 profile 中对应 bundle 行的 `config` 里:
 
-| 工具 | 作用 | 关键 jj 语义 |
+| 键 | 默认 | 说明 |
 |---|---|---|
-| `jj_status` | 工作副本状态(`@`) | 无暂存区;`@` 就是提交 |
-| `jj_log` | revset 选提交 | `@`/`@-`/`::@`/`bookmarks()`,不是 git 分支/范围语法 |
-| `jj_diff` | `-r <revset>` 的 stat/patch | 没有 index/stash |
-| `jj_new` | 新建 change 并设为 `@` | 上一个 change 保持身份,无需 commit |
-| `jj_describe` | 就地改描述 | 取代 `git commit --amend` |
-| `jj_squash` | 把改动搬进另一个提交 | 取代交互式暂存;后代自动 rebase |
-| `jj_undo` | 撤销/恢复到某个 operation | operation log 是图级恢复;**返回 head op id** 供回滚 |
-| `jj_op_log` | operation 历史 | 找 `jj_undo` 的 op id |
-| `jj_workspace_add` | 新建 jj workspace | 与 `git worktree` 不同,登记在 jj;**建议放仓库根之外、支持绝对路径** |
-| `jj_workspace_list` | 列出 workspace | 每个 workspace 有自己的 `@` |
-| `jj_bookmark_list` / `jj_bookmark_set` | bookmark | bookmark 可选,不像 git 分支必需 |
-| `jj_rebase` | rebase + 后代 | 无分支重放、无 merge 步骤 |
+| `jjCommand` / `gitCommand` | `jj` / `git` | 可执行文件名;`gitCommand` 只用于探测和提示 |
+| `guardMutatingGit` | `warn` | jj 仓库内 mutating git 的处置:`warn`(放行+提示)/ `deny`(拒绝)/ `off` |
+| `guardGitInJjNative` | `warn` | 仅 jj-native 仓库内 git 的处置 |
+| `guardJjRepositoryWide` | `warn` | `jj undo` / `jj op restore` 等仓库级 jj 操作的处置 |
+| `guardCreateWorktree` | `true` | 在 jj 仓库里拒绝 `create_worktree`,引导用 `jj workspace add` |
+| `preferJjContext` | `true` | 会话开始时注入「优先用 jj」的模型可见上下文 |
+| `defaultCwd` | `''` | 工具没有 `workdir` 时的回退目录(空 = 进程 cwd) |
+| `timeoutMs` / `maxOutputBytes` | `30000` / `262144` | 子进程超时与单流输出上限 |
 
-**非 jj 仓库的拒绝**(契约 §7.4,英文多行):git-only 仓库指出“这是 Git 仓库 + `jj git init` 共存路径”;空目录给 `jj git init` / `--no-colocate`;`.jj` 损坏给出 `jj --ignore-working-copy workspace list` 与修复建议;jj 未安装说明**绝不回退 git**。拒绝发生在任何 jj 子进程启动之前(有测试断言)。
+## 已知限制
 
-**argv 纪律**:所有选择参数(revset / bookmark 名 / path)都是独立 argv 元素,不做 shell 拼接;工具从不传 `-R`(禁止在别的仓库上操作);元数据只读(`jj op log`/`workspace list`/`bookmark list`)带 `--ignore-working-copy`,而内容型只读(`jj_status`/`jj_log`/`jj_diff`)**故意快照**,否则 `@` 反映不出当前文件内容。
+- jj 未安装或目录不是 jj 仓库时,`jj_*` 工具会报错并给出处理建议,不会退回 git。
+- `agent-instructions` 的 `.jj` 根标记覆盖在 Web profile 不生效(Web 在 bundle 层禁用了顶层该行),headless/CLI profile 生效。
+- jj-native 工作区里项目级 skill 根仍按 `.git` 查找(上游硬编码),暂不可用。
 
-## 8.2 与 DSH 现有 git-only 组件的边界(task-10)
-
-本包的 `cordis.patch.yml` 除了三条 `insert` 行,还带一条 **id-targeted patch**,让 DSH 的项目根发现理解 jj workspace:
-
-```yaml
-- id: agent-instructions
-  name: '@deepseek-ai/dsh-agent-instructions'
-  config:
-    maxBytes: 65536
-    projectRootMarkers: ['.git', '.jj']
-```
-
-- **修好了什么**:`@deepseek-ai/dsh-agent-instructions` 的 `projectRootMarkers` 默认是 `['.git']`。
-  在 **jj-native** 仓库(根目录没有 `.git`)里,cwd 位于子目录时**工作区根的 `AGENTS.md` 不会被发现**;加入 `.jj` 后根与子目录都能发现。
-  历史证据(未入库):`scratch/implementer/evidence/project-root.txt`(脚本用真实 `discoverBaselineInstructionFiles` + `jj git init --no-colocate` 夹具,cwd 自检一致):
-
-  ```
-  cwd=sub,  markers=['.git']        -> AGENTS.md              (只有子目录的,工作区根的丢失)
-  cwd=sub,  markers=['.git','.jj']  -> AGENTS.md, sub/AGENTS.md (根的被发现)
-  cwd=root, markers=['.git','.jj']  -> AGENTS.md
-  ```
-
-- **作用范围(2026-10-22 复核)**:**Web profile 不生效**。`@deepseek-ai/dsh-web-app` 在其 bundle 层把顶层
-  `agent-instructions` 行设为 `disabled: true`,并把 instructions 行放进各 agent preset;本 bundle 只按 id 覆盖
-  `config`、不修改 `disabled`,因此该行仍是 disabled,preset 内的同名行也不受这条 patch 影响。
-  该覆盖只在启用顶层行的 profile(例如 headless/CLI)生效;Web 会话的项目根发现目前仍走 preset 的默认 markers。
-- **没修好什么**:`@deepseek-ai/dsh-skill-filesystem` 的项目 skills 根**硬编码 `.git`**(实现内部,Config 未暴露,本包无法覆盖),
-  因此 jj-native 工作区里**项目级 skill 仍可能找不到根**;这是需要上游改造的点(把标记改成可配置或复用同一套 marker)。
-  过渡缓解(不属本任务验收):该包的 `customSkillDirs` 是**绝对路径列表**且不经过项目根发现,可在 profile patch 里给 `skill-filesystem` 行加
-  `config: { customSkillDirs: ['/abs/path/to/workspace/.agents/skills'] }`;代价是**路径写死、每个工作区各配一次**,上游修好后应移除。
-- **如何与他人的 patch 合并(避免覆盖)**:非 `insert` 的 patch 会**整体替换**该行的 `config`,所以
-  1) 必须重述你想要保留的既有键(本包重述了组合配置里的 `maxBytes: 65536`);
-  2) 如果使用者自己的 profile patch 里**已经**有 `- id: agent-instructions` 行,请把它合并成一条(在 `config` 里同时写 `maxBytes`、`projectRootMarkers` 以及你自己的键),
-     **不要**保留两条同名行——后写的整条替换前面的,容易静默丢键;
-  3) 行顺序:profile 的 `cordis.patch.yml` 是“用户层”,在 bundle 层之后应用,因此**用户层优先**;若使用者已有自己的 `agent-instructions` 行,以它为准并自行加上 `.jj`。
-- **默认值依据**:`instructionFileCandidates`、`localInstructionFileCandidates`、`maxSourceBytes` 在包内有默认值,本次 patch 未重复声明(仅重述会被整体替换影响的 `maxBytes`)。
-
-真实组合与 boot 证据可复现(复用 §5.1 的隔离 profile):
+## 开发
 
 ```bash
-DSH_HOME="$TMP" dsh --profile jjreview --dump-config | grep -A6 '^- id: agent-instructions'
-# - id: agent-instructions
-#   name: '@deepseek-ai/dsh-agent-instructions'
-#   config:
-#     maxBytes: 65536
-#     projectRootMarkers:
-#       - .git
-#       - .jj
-
-DSH_HOME="$TMP" dsh --profile jjreview web --help   # exit 0
+node scripts/setup-links.mjs   # 离线链接全局 DSH 依赖(仅构建需要,幂等)
+npm test                       # tsc 构建 + 240 个测试
 ```
 
-## 9. 与 git 的边界(为什么不能混用)
+`lib/` 是提交入库的构建产物;改动 `src/` 后运行 `npm run build`,并把 `lib/` 的变更一起提交。
 
-- **工作副本即提交**:jj 没有暂存区,`@` 就是当前 change;`git commit` 不会产生 jj change,也不进 operation log。
-- **change id vs commit id**:jj 用 change id(稳定)标识变更,git 只有 SHA。
-- **operation log vs reflog**:jj 的恢复路径是 `jj undo` / `jj op restore` / `jj --at-op=<id> <read-cmd>`;
-  git 侧写操作对 jj 不可见。
-- **仓库级爆炸半径**:`jj undo` / `jj op restore` 会**重写当前工作区的整个工作副本**
-  (2026-10-22 事故:共享工作区里一次 `jj undo` 删掉了约 28 个文件)。因此 guard 默认**放行但告警**,
-  而不是一刀切拒绝——它们同样是首选的救援路径。**不要在共享工作区根目录执行这些命令。**
-- **colocated 的 `.git` 与 jj 共用对象库**:`git gc` / `git prune` 可能清理 jj 仅通过 operation log 可达的对象,
-  分类为 mutate 并推荐 `jj util gc`。
+## License
 
-## 10. 已知限制
-
-1. **hygiene**:库层的 guard 目前只覆盖 `guardTools` 名单里的 shell/终端工具与 `create_worktree`;
-   其它工具(如未来新增的终端/执行类工具)需要加入配置。
-2. **别名与包装脚本**:`git` 别名、shell 函数、`eval`、指向 git 的自定义脚本无法静态识别(返回 `unknown` → 放行)。
-   heredoc 体会按行扫描,但未建模 heredoc 结构;**未闭合引号的行直接不分类**(shell 本身会拒绝执行该行)。
-3. **cwd 近似**:guard 用 `workdir` 参数 → `workingDirectory.get(agent)` → `defaultCwd` → `process.cwd()` 解析 base cwd;
-   `cd`/`-C` 会被跟随,但子 shell 分组 `( cd x && … )` 之后的 cwd 变化属于近似处理。
-4. **缓存**:`peek` 按 `path.resolve` 归一化,不做 realpath(同步路径禁 I/O);同一目录的 symlink 别名可能各缓存一次。
-5. **检测失败不回落 git**:`.jj` 存在但仓库损坏时 `kind='none'` 且保留 `jjRoot`/notices,绝不静默改用 git。
-6. **工具层已实现**(`ctx.jj` + 13 个 `jj_*` 工具);`jj_diff` 的 `paths` 按原样传给 jj(相对 cwd 解析),未做绝对化重写;`jj_workspace_add` 不做路径越界校验(jj 允许任意目标目录,README 建议放仓库根之外)。
-7. **app 级 boot 证据**(2026-10-22 重构后复核):隔离 profile `jjverify`(非用户 profile)选中
-   `[@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dsh-jj]` 后 `--dump-config` 含三条行;
-   用 `--patch` 追加 `inject: ['tools','jj']` 探针并真实启动 Web
-   (`dsh --profile jjverify --host 127.0.0.1 --port 0 --no-open`),探针 apply 执行并观察到
-   `ctx.jj` 服务对象与 `ctx.tools.guard` 函数(证明 runtime 行注册了服务、tools/guard 行的 `['tools','jj']` 依赖已满足)。
-   历史证据:`scratch/implementer/evidence/boot-check.txt`、`apply-order.txt`、`boot-jj-e2e.txt`(未入库);
-   未复现项:给 `dsh-jj/guard` 行传非法 `guardMutatingGit` 值未观察到 loader 报错,待 verifier 用真实 app boot 复核。
-
-## 11. 与契约的对应
-
-实现与最初契约描述的两处**兼容性扩展**及差异,记录在开发期契约笔记 `scratch/implementer/contract-notes.md`(未入库):
-
-- `detectVcs(cwd, input, signal?)` 同时接受 task-4 的 `RunCommand`(argv 含程序名)与契约 §6.1 的 `DetectDeps`(`runJj`/`runGit`,argv 不含程序名);
-- `VcsDescriptor` 采用契约 §5.3 字段(`jjWorkspaceRoot`/`jjStore`/`workspaces`/`remotes`/`verified`/`notices`/`probedAt`),
-  并追加基础层扩展字段(`confidence`/`confirmedBy`/`jjAvailable`/`gitAvailable`/`gitCeilingApplied`/`jjRepoPath`);
-- 契约 §4.2 的 `node --test test/` 在 Node v24.22.1 不可用(见 §4);
-- `installGitConfusionGuard(host, options)` 同时接受裸 `JjPluginConfig`(task-4 用法)与契约 §8.1 的 `{service, config, warm}`;
-  返回的句柄**本身可当 disposer 调用**(契约签名),并附带 `check`/`warnings`/`config`/`peek` 测试钩子。
+[MIT](./LICENSE)

@@ -1,8 +1,21 @@
 {
-  "name": "dsh-jj",
+  "name": "@aqian0/dsh-jj",
   "version": "0.1.0",
-  "private": true,
   "description": "First-class Jujutsu (jj) support for DeepSeek Harness: repository detection, git-confusion guard, and jj-native tools",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AQian0/dsh-jj.git"
+  },
+  "homepage": "https://github.com/AQian0/dsh-jj#readme",
+  "bugs": {
+    "url": "https://github.com/AQian0/dsh-jj/issues"
+  },
+  "keywords": [
+    "jujutsu",
+    "jj",
+    "deepseek-harness"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -63,5 +76,8 @@
     "@deepseek-ai/dsh-subprocess": "0.2.1-rc.2",
     "@deepseek-ai/dsh-working-directory": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,0 +1,88 @@
+name: release
+
+# 推 v<version> tag 触发：校验 tag 与 package.json 版本一致 → 跑测试 →
+# 用 npm 可信发布（GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成。
+# 首次 0.1.0 由本机 Bun 手动发布（Bun 不支持 npm OIDC）。
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # 创建 GitHub Release
+  id-token: write # npm trusted publishing (OIDC)
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Verify tag and package metadata
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${version}" \
+            || { echo "::error::tag ${GITHUB_REF_NAME} does not match package.json ${version}"; exit 1; }
+          node -e "const p = require('./package.json'); \
+            if (p.private === true) throw new Error('package.json is private'); \
+            if (!p.repository?.url) throw new Error('repository.url is required for trusted publishing')"
+
+      - name: Install test-only dependencies
+        # 仓库本身保持零依赖、离线构建；CI 临时安装公开 peer 依赖和固定版本 tsc。
+        run: |
+          npm install --no-package-lock --ignore-scripts --no-audit --no-fund
+          npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
+            typescript@6.0.3 @types/node@26.6.5
+
+      - name: Run tests
+        run: npm run test:unit
+
+      - name: Fail if committed lib/ is stale
+        run: |
+          if [ -n "$(git status --porcelain -- lib)" ]; then
+            git status --porcelain -- lib
+            echo "::error::lib/ is stale; run npm test locally and commit the rebuilt lib/"
+            exit 1
+          fi
+
+      - name: Publish to npm with OIDC
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if npm view "@aqian0/dsh-jj@${version}" version >/dev/null 2>&1; then
+            echo "::warning::@aqian0/dsh-jj@${version} already published; skipping npm publish"
+            exit 0
+          fi
+          if [[ "${version}" == *-* ]]; then
+            npm publish --tag next
+          else
+            npm publish
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          args=(--verify-tag --generate-notes --title "@aqian0/dsh-jj ${GITHUB_REF_NAME}")
+          if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}"

@@ -28,3 +28,11 @@ editor-*.jjdescription
 
 # DSH 检出池（若在仓库内创建）
 .agents/worktrees/
+
+# npm 发包过程产物
+#   * tarball 由 `npm pack` / `bun publish` 生成，不入库
+#   * 本仓库刻意不提交 lockfile（本地构建离线，CI 临时安装测试依赖）
+#   * .npmrc 可能含 npm token，凭据只放 ~/.npmrc
+*.tgz
+package-lock.json
+.npmrc

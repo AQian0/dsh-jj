@@ -60,9 +60,9 @@ test('all three entries import under plain Node with name/inject/apply/Config', 
 });
 
 test('the bare package name resolves each documented export', async () => {
-  const root = await import('dsh-jj');
-  const tools = await import('dsh-jj/tools');
-  const guard = await import('dsh-jj/guard');
+  const root = await import('@aqian0/dsh-jj');
+  const tools = await import('@aqian0/dsh-jj/tools');
+  const guard = await import('@aqian0/dsh-jj/guard');
   assert.equal(root.name, 'jj');
   assert.equal(tools.name, 'jj-tools');
   assert.equal(guard.name, 'jj-guard');
@@ -78,7 +78,7 @@ test('the built guard entry installs a working guard against a real jj workspace
   const fx = makeFixture(t, 'dsh-jj-build');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
 
-  const guardEntry = await import('dsh-jj/guard');
+  const guardEntry = await import('@aqian0/dsh-jj/guard');
   const harness = createGuardContext();
   guardEntry.apply(harness.ctx, { guardMutatingGit: 'deny', defaultCwd: colo });
   const reason = harness.runGuard({ name: 'bash', arguments: { command: 'git commit -m x' } });
@@ -87,7 +87,7 @@ test('the built guard entry installs a working guard against a real jj workspace
 
 test('the built runtime entry registers the ctx.jj service on a real Cordis context', async () => {
   const { Context } = await import('@deepseek-ai/cordis');
-  const runtimeEntry = await import('dsh-jj');
+  const runtimeEntry = await import('@aqian0/dsh-jj');
   const ctx = new Context();
   assert.doesNotThrow(() => runtimeEntry.apply(ctx, {}));
   const service = ctx.jj;
@@ -104,7 +104,7 @@ function entryFile(specifier) {
   return 'index.js';
 }
 test('assembleBaseLayer still returns undefined (with one warning) without a tool registry', async () => {
-  const runtimeEntry = await import('dsh-jj');
+  const runtimeEntry = await import('@aqian0/dsh-jj');
   const warnings = [];
   const bareContext = { logger: { warn: (message) => warnings.push(message) } };
   assert.equal(runtimeEntry.assembleBaseLayer(/** @type {never} */ (bareContext)), undefined);
@@ -114,9 +114,9 @@ test('assembleBaseLayer still returns undefined (with one warning) without a too
 
 test('bundle patch carries the jj-aware project-root row (task-10)', () => {
   const patch = readFileSync(join(packageDir, 'cordis.patch.yml'), 'utf8');
-  assert.match(patch, /- insert:[\s\S]*name: 'dsh-jj'/, 'the runtime row is declared');
-  assert.match(patch, /name: 'dsh-jj\/tools'/, 'the tools row is declared');
-  assert.match(patch, /name: 'dsh-jj\/guard'/, 'the guard row is declared');
+  assert.match(patch, /- insert:[\s\S]*name: '@aqian0\/dsh-jj'/, 'the runtime row is declared');
+  assert.match(patch, /name: '@aqian0\/dsh-jj\/tools'/, 'the tools row is declared');
+  assert.match(patch, /name: '@aqian0\/dsh-jj\/guard'/, 'the guard row is declared');
   assert.match(patch, /^- id: agent-instructions$/m, 'the id-targeted agent-instructions row is declared');
   assert.match(patch, /name: '@deepseek-ai\/dsh-agent-instructions'/);
   assert.match(patch, /maxBytes: 65536/, 'the composed maxBytes value must be restated (whole-config replacement)');

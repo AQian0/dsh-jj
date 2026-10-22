@@ -6,13 +6,13 @@
 # the feature.
 - insert:
     - id: jj-runtime
-      name: 'dsh-jj'
+      name: '@aqian0/dsh-jj'
 - insert:
     - id: jj-tools
-      name: 'dsh-jj/tools'
+      name: '@aqian0/dsh-jj/tools'
 - insert:
     - id: jj-guard
-      name: 'dsh-jj/guard'
+      name: '@aqian0/dsh-jj/guard'
 # Project-root discovery must understand jj workspaces (task-10).
 #
 # `@deepseek-ai/dsh-agent-instructions` defaults to `projectRootMarkers: ['.git']`,
