@@ -9,9 +9,10 @@
 # `node scripts/setup-links.ts` 生成；离线可用，不入库）
 node_modules/
 
-# 构建产物 lib/ 提交入库：本仓库是"本地目录链接安装"的 bundle，
-# 安装时不执行构建，因此 lib/ 必须随 checkout 存在。修改 src/ 后
-# 重新 `npm run build` 并把 lib/ 的变更一起提交。
+# 构建产物（不入库，与官方上游一致）：`npm run build` 生成 lib/。
+# DSH 安装 bundle 时不执行构建，所以本地安装 / npm 发布之前都需要
+# 先构建一次（npm 发布由 prepack 自动构建）。
+lib/
 *.tsbuildinfo
 
 # 过程性目录：实验脚本、夹具与日志

@@ -17,7 +17,7 @@
 
 ### 本地目录(开发/未发布)
 
-`lib/` 已提交入库,clone 后可直接安装;只有改过源码才需要重新构建:
+`lib/` 是构建产物、不入库,所以本地安装前先在仓库根构建一次:
 
 ```bash
 npm run build   # 构建 lib/;完整校验(构建 + 类型检查 + 242 个测试)用 npm test
@@ -115,7 +115,7 @@ Use the jj equivalent instead:
 | `src/**/*.ts` | 插件实现(构建入口) |
 | `test/**/*.test.ts` | 测试套件(`node:test`,由 Node 原生类型擦除直接运行) |
 | `scripts/*.ts` | 开发脚本(离线依赖链接) |
-| `lib/**/*.js` + `lib/types/**/*.d.ts` | `tsc` 构建产物,随 npm 包发布(官方插件包同样只发布构建输出) |
+| `lib/**/*.js` + `lib/types/**/*.d.ts` | `tsc` 构建产物,不入库;npm 发布包中包含(官方插件包同样只发布构建输出) |
 
 测试与脚本直接以 TS 运行,因此开发/CI 需要 **Node 24+**(内置类型擦除)。
 
@@ -126,7 +126,7 @@ npm run typecheck              # 类型检查 src/ + test/ + scripts/(tsconfig.t
 npm test                       # 构建 + 类型检查 + 242 个测试
 ```
 
-`lib/` 是提交入库的构建产物;改动 `src/` 后运行 `npm run build`,并把 `lib/` 的变更一起提交。
+`lib/` 是构建产物且不入库;改动 `src/` 后运行 `npm run build`。npm 发布由 `prepack` 自动构建,CI 也会在测试前显式构建。
 
 ## License
 

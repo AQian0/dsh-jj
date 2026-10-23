@@ -72,16 +72,13 @@ jobs:
       - name: Type-check implementation, tests, and scripts
         run: npm run typecheck
 
+      - name: Build the published output
+        # lib/ is not committed: build it here so the published tarball and the
+        # bundle loadability tests both see the real artifacts.
+        run: npm run build
+
       - name: Run tests
         run: npm run test:unit
-
-      - name: Fail if committed lib/ is stale
-        run: |
-          if [ -n "$(git status --porcelain -- lib)" ]; then
-            git status --porcelain -- lib
-            echo "::error::lib/ is stale; run npm test locally and commit the rebuilt lib/"
-            exit 1
-          fi
 
       - name: Publish to npm with OIDC
         run: |
