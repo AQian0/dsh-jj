@@ -1,6 +1,6 @@
 # dsh-jj
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai) 的 Jujutsu(jj)一等支持:自动识别 jj 仓库、纠正误用的 git 写入命令,并提供一套 jj 原生工具。
+为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供 Jujutsu (jj) 一等支持。
 
 ## 功能
 
@@ -13,28 +13,30 @@
 
 ## 安装
 
+运行插件需要 DSH 与 `jj` CLI(`jj` 需在 `PATH` 中,或用 `jjCommand` 指向可执行文件);插件本身没有额外的运行时依赖。
+
 ### 本地目录(开发/未发布)
 
-先在仓库根构建(`lib/` 已提交入库,clone 后可直接装):
+`lib/` 已提交入库,clone 后可直接安装;只有改过源码才需要重新构建:
 
 ```bash
-npm test        # 构建 + 测试;只想构建用 npm run build
+npm run build   # 构建 lib/;完整校验(构建 + 类型检查 + 242 个测试)用 npm test
 ```
 
 然后在 DSH 的 Plugin Manager 里安装本地 bundle:
 
-- Web GUI:设置页 → 插件管理 → 安装本地 bundle,spec 填仓库绝对路径 `/home/aqian/dsh-jj`;
-- Agent 工具:`plugin_manager` 的 `install_bundle`,target 填 `/home/aqian/dsh-jj`。
+- Web GUI:设置页 → 插件管理 → 安装本地 bundle,spec 填本仓库的绝对路径(如 `/path/to/dsh-jj`);
+- Agent 工具:`plugin_manager` 的 `install_bundle`,target 填同一个绝对路径。
 
 ### 从 npm(发布后)
 
 在 Plugin Manager 里把 spec 填成精确版本(避免下次发版改变已装内容):
 
 ```
-@aqian0/dsh-jj@0.1.0
+@aqian0/dsh-jj@0.1.1
 ```
 
-也可以只安装依赖:`dsh plugin --profile <name> add @aqian0/dsh-jj@0.1.0`。
+也可以只安装依赖:`dsh plugin --profile <name> add @aqian0/dsh-jj@0.1.1`。
 
 安装后 bundle 自动贡献 `jj-runtime` / `jj-tools` / `jj-guard` 三行,并给 `agent-instructions` 加上 `.jj` 根标记;用 Plugin 页面或 `list_plugins` 确认三行 enabled。
 
@@ -85,13 +87,18 @@ Use the jj equivalent instead:
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `jjCommand` / `gitCommand` | `jj` / `git` | 可执行文件名;`gitCommand` 只用于探测和提示 |
+| `timeoutMs` / `graceMs` | `30000` / `3000` | 子进程超时,以及超时后强制结束前的宽限时间 |
+| `maxOutputBytes` | `262144` | 单个输出流(stdout / stderr)的上限 |
+| `detectCacheTtlMs` | `10000` | 仓库检测结果的缓存时长 |
 | `guardMutatingGit` | `warn` | jj 仓库内 mutating git 的处置:`warn`(放行+提示)/ `deny`(拒绝)/ `off` |
 | `guardGitInJjNative` | `warn` | 仅 jj-native 仓库内 git 的处置 |
 | `guardJjRepositoryWide` | `warn` | `jj undo` / `jj op restore` 等仓库级 jj 操作的处置 |
+| `guardTools` | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名 |
 | `guardCreateWorktree` | `true` | 在 jj 仓库里拒绝 `create_worktree`,引导用 `jj workspace add` |
+| `readOnlyGitNotice` | `true` | colocated 仓库内只读 git 命令是否附「优先用 jj」提示 |
 | `preferJjContext` | `true` | 会话开始时注入「优先用 jj」的模型可见上下文 |
+| `defaultLogLimit` / `maxLogLimit` | `30` / `200` | `jj_log` 的默认与最大返回条数 |
 | `defaultCwd` | `''` | 工具没有 `workdir` 时的回退目录(空 = 进程 cwd) |
-| `timeoutMs` / `maxOutputBytes` | `30000` / `262144` | 子进程超时与单流输出上限 |
 
 ## 已知限制
 
