@@ -6,6 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { detectVcs, sniffVcsSync, parseWorkspaceList, TPL_WORKSPACE_LIST } from '../src/detect.ts';
 import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, realpath } from './helpers/fixtures.ts';
@@ -141,6 +142,29 @@ test('detection from a subdirectory resolves the workspace root', async (t) => {
   assert.equal(descriptor.kind, 'jj-colocated');
   assertSamePath(descriptor.root, colo);
   assert.equal(descriptor.workspaceName, 'default');
+});
+
+test('a symlinked workspace path keeps the colocated identity (canonical comparison)', async (t) => {
+  // Regression: `jj`/`git` report the canonical path while a caller can hand us a
+  // symlinked spelling (macOS `/var -> /private/var`, or any symlinked parent).
+  // Comparing the raw strings made a colocated workspace look jj-native.
+  const fx = makeFixture(t, 'dsh-jj-detect-symlink');
+  await assertToolchain(fx.run, fx.root);
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const alias = join(fx.root, 'colo-alias');
+  symlinkSync(colo, alias, 'dir');
+
+  const descriptor = await detectVcs(alias, fx.run);
+  assert.equal(descriptor.kind, 'jj-colocated');
+  assert.equal(descriptor.colocated, true);
+  assertSamePath(descriptor.root, colo);
+  assertSamePath(descriptor.jjWorkspaceRoot, colo);
+  assertSamePath(descriptor.jjRoot, colo);
+  assert.equal(
+    descriptor.notices.some((entry) => entry.code === 'jj-native-under-git-parent'),
+    false,
+    'a colocated workspace must not be reported as a jj-native workspace under a Git parent',
+  );
 });
 
 test('jj workspace inside a parent Git repository: Git does not escape the jj boundary', async (t) => {

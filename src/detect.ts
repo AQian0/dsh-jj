@@ -21,7 +21,7 @@
  * @module dsh-jj/detect
  */
 
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import {
   type DetectionConfidence,
@@ -144,6 +144,32 @@ function isInside(ancestor: string, candidate: string): boolean {
 
 function notice(code: VcsNoticeCode, severity: VcsNotice['severity'], message: string, detail = ''): VcsNotice {
   return { code, severity, message, detail };
+}
+
+/**
+ * Canonical identity of a path (`realpath` when it exists, else the resolved
+ * absolute path).
+ *
+ * Repository roots reach detection from three sources that can spell the same
+ * directory differently: the caller's `cwd`, `jj` output, and `git` output. On
+ * macOS `/var` is a symlink to `/private/var`; Git reports the canonical
+ * spelling while a caller-supplied temp path (and jj output derived from it)
+ * keeps the symlinked one. Comparing — and, for workspace selection, matching —
+ * canonical paths keeps the colocated/native decision identical to platforms
+ * that have no such indirection.
+ */
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/** True when both paths name the same directory, symlinks resolved. */
+function samePath(left: string, right: string): boolean {
+  return canonicalPath(left) === canonicalPath(right);
 }
 
 /** Filesystem device id of a path, or `undefined` when it cannot be read. */
@@ -809,20 +835,20 @@ export async function detectVcs(
   confirmedBy.push('jj-cli');
   if (gitRoot !== undefined) confirmedBy.push('git-cli');
 
-  const canonicalJjRoot = resolve(jjRoot);
+  const canonicalJjRoot = canonicalPath(jjRoot);
   const ancestors = new Set<string>();
-  for (let dir = resolve(start); ; dir = dirname(dir)) {
+  for (let dir = canonicalPath(start); ; dir = dirname(dir)) {
     ancestors.add(dir);
     const parent = dirname(dir);
     if (parent === dir) break;
   }
   let best: JjWorkspaceInfo | undefined;
   for (const workspace of workspaces) {
-    const root = resolve(workspace.root);
+    const root = canonicalPath(workspace.root);
     if (!ancestors.has(root)) continue;
-    if (best === undefined || root.length > resolve(best.root).length) best = workspace;
+    if (best === undefined || root.length > canonicalPath(best.root).length) best = workspace;
   }
-  if (best === undefined) best = workspaces.find((workspace) => resolve(workspace.root) === canonicalJjRoot);
+  if (best === undefined) best = workspaces.find((workspace) => canonicalPath(workspace.root) === canonicalJjRoot);
   jjWorkspaceRoot = best?.root ?? canonicalJjRoot;
   workspaceName = best?.name;
 
@@ -832,7 +858,7 @@ export async function detectVcs(
   }
 
   let colocated = fileLayerKind === 'jj-colocated';
-  if (gitRoot !== undefined) colocated = (await statKind(join(jjWorkspaceRoot, '.git'))) !== 'missing' && resolve(gitRoot) === resolve(jjWorkspaceRoot);
+  if (gitRoot !== undefined) colocated = (await statKind(join(jjWorkspaceRoot, '.git'))) !== 'missing' && samePath(gitRoot, jjWorkspaceRoot);
   const kind: VcsKind = colocated ? 'jj-colocated' : 'jj-native';
   jjStore = readJjStore(jjRoot, sniff.jjRepoPath);
 
@@ -847,7 +873,7 @@ export async function detectVcs(
   // F13: a jj-native workspace that sits inside a parent Git repository — Git
   // would act on that unrelated repository (the root cause of the git-only
   // workspace-changes card describing `.jj` metadata as "changes").
-  if (kind === 'jj-native' && (sniff.gitRelation === 'ancestor-of-jj-root' || (gitRoot !== undefined && resolve(gitRoot) !== resolve(jjWorkspaceRoot)))) {
+  if (kind === 'jj-native' && (sniff.gitRelation === 'ancestor-of-jj-root' || (gitRoot !== undefined && !samePath(gitRoot, jjWorkspaceRoot)))) {
     notices.push(
       notice(
         'jj-native-under-git-parent',
@@ -859,7 +885,7 @@ export async function detectVcs(
   }
   // F14: the session directory *is* the workspace root — repository-wide jj
   // commands rewrite this whole working copy (2026-10-22 incident).
-  if (resolve(start) === resolve(jjWorkspaceRoot)) {
+  if (samePath(start, jjWorkspaceRoot)) {
     notices.push(
       notice(
         'jj-shared-workspace',

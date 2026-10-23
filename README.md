@@ -116,7 +116,7 @@ Use the jj equivalent instead:
 node scripts/setup-links.ts    # 离线链接全局 DSH 依赖(仅类型检查/构建需要,幂等)
 npm run build                  # tsc: src/ -> lib/(提交入库的产物)
 npm run typecheck              # 类型检查 src/ + test/ + scripts/(tsconfig.test.json)
-npm test                       # 构建 + 类型检查 + 241 个测试
+npm test                       # 构建 + 类型检查 + 242 个测试
 ```
 
 `lib/` 是提交入库的构建产物;改动 `src/` 后运行 `npm run build`,并把 `lib/` 的变更一起提交。
