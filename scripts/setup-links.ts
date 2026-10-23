@@ -17,14 +17,14 @@
  *   /home/aqian/.cache/.bun/install/global/node_modules
  * Override it with DSH_NODE_MODULES=/path/to/node_modules.
  *
- * Runtime tests do NOT need these links: `node --test` loads src/*.ts through
+ * Runtime tests do NOT need these links: `node --test` loads test/*.ts through
  * Node's built-in type stripping, and every DSH import in src/ is type-only.
  * Only `tsc` needs them.
  *
  * Idempotent: re-running replaces an existing link only when it points
  * elsewhere; a real directory is never deleted (the script fails loudly).
  */
-import { existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,8 +33,8 @@ const defaultRoot = '/home/aqian/.cache/.bun/install/global/node_modules';
 const sourceRoot = resolve(process.env.DSH_NODE_MODULES ?? defaultRoot);
 const nodeModules = join(packageDir, 'node_modules');
 
-/** @param {string} label @param {string} target @param {string} link */
-function ensureLink(label, target, link) {
+/** Point `link` at `target` (symlink) or fail loudly instead of clobbering a real path. */
+function ensureLink(label: string, target: string, link: string): void {
   if (!existsSync(target)) {
     throw new Error(
       `[dsh-jj] missing ${label} at ${target}. ` +

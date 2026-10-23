@@ -1,0 +1,28 @@
+{
+  // Type-check project for everything that is not build output: the TypeScript
+  // implementation under src/ plus the TypeScript test suite and dev scripts.
+  //
+  // `tsconfig.json` stays the emit project (src -> lib/) because lib/ is the
+  // published artifact, exactly like the official DSH plugin packages. This
+  // second project never emits; it only proves the tests and scripts type-check
+  // under the same strict flags (and `erasableSyntaxOnly` keeps them runnable by
+  // Node's built-in type stripping).
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
+}

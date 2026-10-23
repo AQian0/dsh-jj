@@ -13,12 +13,18 @@ import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj } from '../src/jj-command.ts';
 import { JjOperations, TPL_STATUS } from '../src/service.ts';
-import { jjRefusalText, jjToolDefinitions, registerJjTools } from '../src/tools.ts';
-import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun } from './helpers/fixtures.js';
+import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
+import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, type Fixture } from './helpers/fixtures.ts';
+import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools';
+
+/** Canonical JSON value a tool output renderer accepts. */
+type JsonValueLike = Parameters<ToolDefinition['output']['render']>[1];
+/** Execution context handed to a tool body (only `signal` is exercised here). */
+type ExecContext = Parameters<ToolDefinition['execute']>[1];
 
 /** Runner that records every argv so the suite can prove "jj only". */
-function recordingRunner(fx) {
-  const calls = [];
+function recordingRunner(fx: Fixture) {
+  const calls: string[][] = [];
   const runJj = createCommandRunJj(async (argv, options) => {
     calls.push([...argv]);
     return await fx.run(argv, options);
@@ -26,12 +32,12 @@ function recordingRunner(fx) {
   return { runJj, calls, jjCalls: () => calls.filter((argv) => argv[0] === 'jj') };
 }
 
-function fakeExec() {
-  return { signal: new AbortController().signal };
+function fakeExec(): ExecContext {
+  return { signal: new AbortController().signal } as unknown as ExecContext;
 }
 
 /** A tool service backed by real operations plus real detection. */
-function toolService(fx, operations, extraEnv = {}) {
+function toolService(fx: Fixture, operations: JjOperations, _extraEnv: Readonly<Record<string, string>> = {}): JjToolService {
   return {
     operations,
     detect: (cwd, signal) => detectVcs(cwd, fx.run, signal),
@@ -39,17 +45,18 @@ function toolService(fx, operations, extraEnv = {}) {
   };
 }
 
-function toolContext(fx, service, config = resolveConfig({})) {
+function toolContext(fx: Fixture, service: JjToolService, config = resolveConfig({})) {
   return {
     service,
     config,
     host: { tools: { register: () => () => {} } },
-    cwdFor: async () => fx.cwd,
+    // Every tool-calling test assigns `fx.cwd` first; the refusal test overrides this.
+    cwdFor: async () => fx.cwd as string,
   };
 }
 
-function definitionsByName(definitions) {
-  return new Map(definitions.map((definition) => [definition.name, definition]));
+function definitionsByName(definitions: readonly ToolDefinition[]): Map<string, ToolDefinition> {
+  return new Map(definitions.map((definition) => [definition.name, definition] as const));
 }
 
 test('operation layer: status, new, describe, log, diff, op log, bookmarks, workspace, undo', async (t) => {
@@ -192,7 +199,7 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
   const operations = new JjOperations({ runJj, config: {} });
   const definitions = jjToolDefinitions(toolContext(fx, toolService(fx, operations)));
 
-  const calls = {
+  const calls: Record<string, Record<string, unknown> | undefined> = {
     jj_status: {},
     jj_log: { revset: '@', limit: 3 },
     jj_diff: { revset: '@', format: 'stat', paths: [] },
@@ -211,19 +218,19 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
     const args = calls[definition.name];
     if (args === undefined) continue; // jj_workspace_add is exercised separately (it creates a directory)
     // `ToolDefinition.parameters` / `output.schema` are the compiled JSON Schemas.
-    const violations = validateJsonSchemaValue(definition.parameters, args);
+    const violations = validateJsonSchemaValue(definition.parameters as JsonSchemaNode, args);
     assert.deepEqual(violations, [], `${definition.name} rejects its own example args`);
     const value = await definition.execute(args, fakeExec());
     const outputViolations = validateJsonSchemaValue(definition.output.schema, value);
     assert.deepEqual(outputViolations, [], `${definition.name} output must satisfy its own schema: ${JSON.stringify(value)}`);
-    const rendered = definition.output.render(args, value);
+    const rendered = definition.output.render(args, value as JsonValueLike);
     assert.equal(rendered[0]?.type, 'text');
     assert.ok(rendered[0].text.length > 0);
   }
 
   // invalid args are reported by the same validator path
-  const logDefinition = definitionsByName(definitions).get('jj_log');
-  assert.ok(validateJsonSchemaValue(logDefinition.parameters, { revset: 42 }).length > 0, 'type violations are surfaced');
+  const logDefinition = definitionsByName(definitions).get('jj_log')!;
+  assert.ok(validateJsonSchemaValue(logDefinition.parameters as JsonSchemaNode, { revset: 42 }).length > 0, 'type violations are surfaced');
 });
 
 test('T20: every tool path runs jj only, never git', async (t) => {
@@ -236,12 +243,12 @@ test('T20: every tool path runs jj only, never git', async (t) => {
   const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
 
   for (const name of ['jj_status', 'jj_log', 'jj_diff', 'jj_op_log', 'jj_workspace_list', 'jj_bookmark_list']) {
-    const definition = definitions.get(name);
+    const definition = definitions.get(name)!;
     await definition.execute(name === 'jj_log' ? { revset: '@', limit: 2 } : {}, fakeExec());
   }
-  await definitions.get('jj_bookmark_set').execute({ name: 'argv-bookmark', revset: '@' }, fakeExec());
-  await definitions.get('jj_new').execute({ message: 'argv new' }, fakeExec());
-  await definitions.get('jj_describe').execute({ message: 'argv described' }, fakeExec());
+  await definitions.get('jj_bookmark_set')!.execute({ name: 'argv-bookmark', revset: '@' }, fakeExec());
+  await definitions.get('jj_new')!.execute({ message: 'argv new' }, fakeExec());
+  await definitions.get('jj_describe')!.execute({ message: 'argv described' }, fakeExec());
 
   assert.ok(calls.length >= 8, `expected many jj calls, saw ${calls.length}`);
   for (const argv of calls) {
@@ -281,14 +288,17 @@ test('refusal paths: git-only, no repository, and broken jj metadata are all dia
   const definitions = definitionsByName(
     jjToolDefinitions({ ...toolContext(fx, toolService(fx, operations)), cwdFor: async () => gitRepo }),
   );
-  await assert.rejects(() => definitions.get('jj_status').execute({}, fakeExec()), /No Jujutsu \(jj\) workspace was found/);
+  await assert.rejects(() => definitions.get('jj_status')!.execute({}, fakeExec()), /No Jujutsu \(jj\) workspace was found/);
   assert.equal(calls.length, 0, 'refusal happens before any jj process starts');
 
   // In the jj-native workspace the same tool succeeds.
   const nativeDefinitions = definitionsByName(
     jjToolDefinitions({ ...toolContext(fx, toolService(fx, operations)), cwdFor: async () => native }),
   );
-  const status = await nativeDefinitions.get('jj_status').execute({}, fakeExec());
+  const status = (await nativeDefinitions.get('jj_status')!.execute({}, fakeExec())) as {
+    readonly kind: string;
+    readonly changeId: string;
+  };
   assert.equal(status.kind, 'jj-native');
   assert.ok(status.changeId.length > 0);
 });
@@ -299,10 +309,10 @@ test('registerJjTools registers and disposes every tool', async (t) => {
   fx.cwd = repo;
   const { runJj } = recordingRunner(fx);
   const operations = new JjOperations({ runJj, config: {} });
-  const registered = [];
+  const registered: string[] = [];
   const host = {
     tools: {
-      register: (definition) => {
+      register: (definition: ToolDefinition) => {
         registered.push(definition.name);
         return () => {
           const index = registered.indexOf(definition.name);

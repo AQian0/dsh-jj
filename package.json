@@ -24,6 +24,7 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./src/*": "./src/*",
     "./tools": {
       "types": "./lib/types/tools.d.ts",
       "default": "./lib/tools.js"
@@ -56,14 +57,16 @@
     "locale/*.json",
     "tools/locale/*.json",
     "guard/locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "src/**/*.ts"
   ],
   "scripts": {
-    "setup": "node scripts/setup-links.mjs",
+    "setup": "node scripts/setup-links.ts",
     "build": "tsc -p tsconfig.json",
-    "test:unit": "node --test \"test/**/*.test.js\"",
-    "test": "node scripts/setup-links.mjs && tsc -p tsconfig.json && node --test \"test/**/*.test.js\"",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "test:unit": "node --test \"test/**/*.test.ts\"",
+    "test": "node scripts/setup-links.ts && tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test \"test/**/*.test.ts\"",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "dsh": {
     "bundle": {

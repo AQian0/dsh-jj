@@ -8,29 +8,52 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installJjPromptContext, jjPreferenceContextText, JJ_CONTEXT_NAME } from '../src/prompt-context.ts';
-import { initGit, initJjColocated, initJjNative, makeFixture } from './helpers/fixtures.js';
+import type { VcsSniff } from '../src/types.ts';
+import { initGit, initJjColocated, initJjNative, makeFixture } from './helpers/fixtures.ts';
+
+/** Session identity used as the working-directory service key. */
+interface FakeSession {
+  readonly id: string;
+}
+
+/** One registered prompt context, structurally typed for the assertions below. */
+interface CapturedContext {
+  readonly name: string;
+  readonly order: number;
+  readonly interpolate: boolean;
+  readonly required: boolean;
+  readonly text: (context: { readonly agent?: { readonly session?: unknown } } | undefined) => string;
+}
 
 /** Host double: only the inject-free `get` accessor and the two services are needed. */
-function fakeHost({ cwdBySession, withSystemPrompt = true, order = 100 }) {
-  const captured = [];
-  const disposers = [];
-  const services = {
-    workingDirectory: { get: (session) => cwdBySession.get(session) },
+function fakeHost({
+  cwdBySession,
+  withSystemPrompt = true,
+  order = 100,
+}: {
+  readonly cwdBySession: { get(session: FakeSession): string | undefined };
+  readonly withSystemPrompt?: boolean;
+  readonly order?: number;
+}): { host: { get(name: string): unknown }; captured: CapturedContext[]; disposers: CapturedContext[] } {
+  const captured: CapturedContext[] = [];
+  const disposers: CapturedContext[] = [];
+  const services: Record<string, unknown> = {
+    workingDirectory: { get: (session: FakeSession) => cwdBySession.get(session) },
     systemPrompt: withSystemPrompt
       ? {
-          context: (context) => {
+          context: (context: CapturedContext) => {
             captured.push(context);
             const dispose = () => disposers.push(context);
             return dispose;
           },
-          getContextOrder: (name) => {
+          getContextOrder: (name: string) => {
             assert.equal(name, 'WORKING_DIRECTORY', 'the canonical sibling slot is requested');
             return order;
           },
         }
       : undefined,
   };
-  return { host: { get: (name) => services[name] }, captured, disposers };
+  return { host: { get: (name: string) => services[name] }, captured, disposers };
 }
 
 test('registers one global context at the WORKING_DIRECTORY slot', async (t) => {
@@ -85,13 +108,14 @@ test('a warm cache wins over the sniff, and a missing systemPrompt is harmless',
   const session = { id: 'c1' };
   const { host, captured } = fakeHost({ cwdBySession: new Map([[session, colo]]) });
   installJjPromptContext(host, {
-    sniff: () => ({ cwd: '/nowhere', kind: 'none' }),
+    // The peek answers first, so this deliberately partial sniff result is never read.
+    sniff: () => ({ cwd: '/nowhere', kind: 'none' }) as unknown as VcsSniff,
     peek: (cwd) => ({ kind: 'jj-colocated', root: cwd, workspaceName: 'default' }),
   });
   const text = captured[0].text({ agent: { session } });
   assert.match(text, /workspace "default"/, 'the cached descriptor supplies the workspace name');
 
-  const bare = fakeHost({ cwdBySession: new Map() , withSystemPrompt: false });
+  const bare = fakeHost({ cwdBySession: new Map(), withSystemPrompt: false });
   const dispose = installJjPromptContext(bare.host);
   assert.equal(bare.captured.length, 0);
   dispose();

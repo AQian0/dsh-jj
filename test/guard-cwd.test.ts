@@ -19,11 +19,20 @@ import assert from 'node:assert/strict';
 import { Context } from '@deepseek-ai/cordis';
 import SessionProjectionService from '@deepseek-ai/dsh-session-projection';
 import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory';
+import type { JjPluginConfig } from '../src/config.ts';
 import { installGitConfusionGuard } from '../src/guard.ts';
-import { createGuardContext, initGit, initJjColocated, makeFixture } from './helpers/fixtures.js';
+import type { GitConfusionGuardHandle } from '../src/guard.ts';
+import { createGuardContext, initGit, initJjColocated, makeFixture } from './helpers/fixtures.ts';
+import type { GuardHarness } from './helpers/fixtures.ts';
+
+/** Structural slice of the real working-directory service these tests exercise. */
+interface WorkingDirectoryLike {
+  /** Resolve the committed directory for a Session key (the real service is keyed by Session). */
+  get(session: unknown): string;
+}
 
 /** Build the real working-directory stack the way the Host does. */
-function realWorkingDirectory(defaultDirectory) {
+function realWorkingDirectory(defaultDirectory: string): WorkingDirectoryLike {
   const ctx = new Context();
   ctx.provide('systemPrompt', {
     tools: () => () => {},
@@ -31,13 +40,22 @@ function realWorkingDirectory(defaultDirectory) {
     context: () => {},
     getContextOrder: () => 0,
   });
-  ctx.provide('fs', { resolve: async (path) => path, stat: async () => undefined, processPath: (path) => path });
+  ctx.provide('fs', { resolve: async (path: string) => path, stat: async () => undefined, processPath: (path: string) => path });
   new SessionProjectionService(ctx);
   return new WorkingDirectoryService(ctx, { defaultDirectory });
 }
 
 /** Faithful minimal live Session shape (`cellFor` needs header + snapshotEvents). */
-function fakeSession(cwd) {
+interface FakeSession {
+  readonly id: string;
+  readonly header: { readonly cwd: string };
+  readonly inheritedEventCount: number;
+  readonly seq: number;
+  readonly snapshotEvents: () => readonly unknown[];
+  readonly eventAt: () => undefined;
+}
+
+function fakeSession(cwd: string): FakeSession {
   return {
     id: 'v1-session',
     header: { cwd },
@@ -49,11 +67,20 @@ function fakeSession(cwd) {
 }
 
 /** Live Agent shape: it carries the session but is not itself a Session key. */
-function fakeAgent(session) {
+interface FakeAgent {
+  readonly id: string;
+  readonly session: FakeSession;
+}
+
+function fakeAgent(session: FakeSession): FakeAgent {
   return { id: session.id, session };
 }
 
-function guardWithRealCwdResolver(harness, workingDirectory, config = {}) {
+function guardWithRealCwdResolver(
+  harness: GuardHarness,
+  workingDirectory: WorkingDirectoryLike,
+  config: JjPluginConfig = {},
+): GitConfusionGuardHandle {
   return installGitConfusionGuard(
     { tools: harness.ctx.tools, workingDirectory, emit: harness.ctx.emit, logger: harness.ctx.logger },
     config,
@@ -89,7 +116,7 @@ test('V1(b): session in a jj workspace is refused even when the host started els
   guardWithRealCwdResolver(harness, workingDirectory, { guardMutatingGit: 'deny' });
   const execution = { name: 'bash', callId: 'v1b', arguments: { command: 'git commit -m x' }, agent, signal: new AbortController().signal };
   const reason = harness.runGuard(execution);
-  assert.equal(typeof reason, 'string', 'a Git commit inside a jj session must be blocked');
+  assert.ok(typeof reason === 'string', 'a Git commit inside a jj session must be blocked');
   assert.match(reason, /^Blocked: `git commit`/);
   assert.ok(reason.includes(sessionRepo), `the refusal must name the session workspace, got: ${reason.split('\n')[0]}`);
 });
@@ -102,7 +129,7 @@ test('V1(c): without an agent the guard falls back to defaultCwd, not the host d
   const workingDirectory = realWorkingDirectory(otherRepo);
   guardWithRealCwdResolver(harness, workingDirectory, { defaultCwd: jjRepo, guardMutatingGit: 'deny' });
   const reason = harness.runGuard({ name: 'bash', arguments: { command: 'git commit -m x' } });
-  assert.equal(typeof reason, 'string');
+  assert.ok(typeof reason === 'string');
   assert.ok(reason.includes(jjRepo), 'the configured defaultCwd is used');
 });
 
@@ -110,7 +137,7 @@ test('V1(d) §5.10: a broken working-directory resolution degrades to fail-open 
   const fx = makeFixture(t, 'dsh-jj-v1d');
   const jjRepo = await initJjColocated(fx.run, fx.path('jj'));
   const harness = createGuardContext();
-  const broken = {
+  const broken: WorkingDirectoryLike = {
     get: () => {
       throw new TypeError('session.snapshotEvents is not a function');
     },

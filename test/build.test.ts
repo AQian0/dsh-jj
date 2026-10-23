@@ -9,26 +9,54 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { createGuardContext, initJjColocated, makeFixture } from './helpers/fixtures.js';
+import { createGuardContext, initJjColocated, makeFixture } from './helpers/fixtures.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const execFileAsync = promisify(execFile);
 
+/** Dynamic import over a URL, typed loosely because the target is build output. */
+interface BuiltModule {
+  readonly name?: unknown;
+  readonly inject?: unknown;
+  readonly apply?: unknown;
+  readonly Config?: unknown;
+}
+
+/** Structural view of the `ctx.jj` service the runtime entry must register. */
+interface BuiltJjService {
+  readonly peek: unknown;
+  readonly warm: unknown;
+  readonly operations: Record<string, unknown>;
+  describe(kind: string): string;
+}
+
 /** Ensure the offline @deepseek-ai symlinks exist before building. */
-async function ensureLinks() {
+async function ensureLinks(): Promise<void> {
   if (!existsSync(join(packageDir, 'node_modules', '@deepseek-ai'))) {
-    await execFileAsync('node', ['scripts/setup-links.mjs'], { cwd: packageDir, timeout: 60_000 });
+    await execFileAsync('node', ['scripts/setup-links.ts'], { cwd: packageDir, timeout: 60_000 });
   }
+}
+
+/**
+ * Compiler the build test must use.
+ *
+ * Prefer the workspace-local `tsc` so a direct `node --test test/build.test.ts`
+ * produces the same emit as `npm test`/CI (a different global compiler preserves
+ * different string quotes and would make the committed lib/ look stale).
+ */
+function tscCommand(): string {
+  const local = join(packageDir, 'node_modules', '.bin', 'tsc');
+  return existsSync(local) ? local : 'tsc';
 }
 
 test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', async () => {
   await ensureLinks();
-  const result = await execFileAsync('tsc', ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
-  assert.equal(result.stderr.trim(), '', `tsc stderr: ${result.stderr}`);
+  const result = await execFileAsync(tscCommand(), ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
+  assert.equal(String(result.stderr).trim(), '', `tsc stderr: ${String(result.stderr)}`);
   for (const file of ['index.js', 'tools.js', 'guard.js', 'detect.js', 'git-command.js', 'types.js', 'config.js']) {
     assert.ok(existsSync(join(packageDir, 'lib', file)), `missing build artifact lib/${file}`);
   }
@@ -45,15 +73,15 @@ test('pure modules stay free of runtime @deepseek-ai imports', () => {
 });
 
 test('all three entries import under plain Node with name/inject/apply/Config', async () => {
-  const entries = [
+  const entries: ReadonlyArray<readonly [string, string, readonly string[]]> = [
     ['.', 'jj', ['subprocess', 'workingDirectory']],
     ['./tools', 'jj-tools', ['tools', 'jj', 'workingDirectory']],
     ['./guard', 'jj-guard', ['tools', 'jj']],
   ];
   for (const [specifier, expectedName, expectedInject] of entries) {
-    const module = await import(pathToFileURL(join(packageDir, 'lib', entryFile(specifier))).href);
+    const module = (await import(pathToFileURL(join(packageDir, 'lib', entryFile(specifier))).href)) as BuiltModule;
     assert.equal(module.name, expectedName, `${specifier} name`);
-    assert.deepEqual([...module.inject], expectedInject, `${specifier} inject`);
+    assert.deepEqual([...((module.inject as readonly string[] | undefined) ?? [])], expectedInject, `${specifier} inject`);
     assert.equal(typeof module.apply, 'function', `${specifier} apply`);
     assert.ok(module.Config !== undefined, `${specifier} must export Config`);
   }
@@ -82,6 +110,7 @@ test('the built guard entry installs a working guard against a real jj workspace
   const harness = createGuardContext();
   guardEntry.apply(harness.ctx, { guardMutatingGit: 'deny', defaultCwd: colo });
   const reason = harness.runGuard({ name: 'bash', arguments: { command: 'git commit -m x' } });
+  assert.ok(typeof reason === 'string', 'the built guard must refuse the git write');
   assert.match(reason, /^Blocked: `git commit`/);
 });
 
@@ -90,7 +119,7 @@ test('the built runtime entry registers the ctx.jj service on a real Cordis cont
   const runtimeEntry = await import('@aqian0/dsh-jj');
   const ctx = new Context();
   assert.doesNotThrow(() => runtimeEntry.apply(ctx, {}));
-  const service = ctx.jj;
+  const service = (ctx as unknown as { jj: BuiltJjService }).jj;
   assert.ok(service !== undefined, 'ctx.jj must be registered by the runtime entry');
   assert.equal(typeof service.peek, 'function');
   assert.equal(typeof service.warm, 'function');
@@ -98,18 +127,38 @@ test('the built runtime entry registers the ctx.jj service on a real Cordis cont
   assert.equal(service.describe('jj-native'), 'Jujutsu (jj) native repository');
 });
 
-function entryFile(specifier) {
+/** Map a subpath step in the loadability loop to the emitted entry file. */
+function entryFile(specifier: string): string {
   if (specifier === './tools') return 'tools.js';
   if (specifier === './guard') return 'guard.js';
   return 'index.js';
 }
+
 test('assembleBaseLayer still returns undefined (with one warning) without a tool registry', async () => {
   const runtimeEntry = await import('@aqian0/dsh-jj');
-  const warnings = [];
-  const bareContext = { logger: { warn: (message) => warnings.push(message) } };
-  assert.equal(runtimeEntry.assembleBaseLayer(/** @type {never} */ (bareContext)), undefined);
+  const warnings: string[] = [];
+  const bareContext = { logger: { warn: (message: string) => warnings.push(message) } };
+  assert.equal(runtimeEntry.assembleBaseLayer(bareContext as unknown as never), undefined);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /tools service is unavailable/);
+  assert.match(warnings[0] ?? '', /tools service is unavailable/);
+});
+
+/** Recursively collect hand-written JavaScript files under one source directory. */
+function collectJavaScript(dir: string, found: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectJavaScript(path, found);
+    } else if (/\.(?:js|mjs|cjs)$/.test(entry.name)) {
+      found.push(relative(packageDir, path));
+    }
+  }
+  return found;
+}
+
+test('all hand-written source is TypeScript (only built lib/ may contain JavaScript)', () => {
+  const offenders = ['src', 'test', 'scripts'].flatMap((dir) => collectJavaScript(join(packageDir, dir)));
+  assert.deepEqual(offenders, [], `hand-written JavaScript must be migrated to TypeScript: ${offenders.join(', ')}`);
 });
 
 test('bundle patch carries the jj-aware project-root row (task-10)', () => {

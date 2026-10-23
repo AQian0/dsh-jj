@@ -4,15 +4,21 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyGitInvocation, gitEquivalence, hasMutatingGitInvocation, GIT_SUBCOMMAND_RULES } from '../src/git-command.ts';
+import {
+  classifyGitInvocation,
+  gitEquivalence,
+  hasMutatingGitInvocation,
+  GIT_SUBCOMMAND_RULES,
+  type GitInvocation,
+} from '../src/git-command.ts';
 
-function only(commandLine) {
+function only(commandLine: string): GitInvocation {
   const classification = classifyGitInvocation(commandLine);
   assert.equal(classification.invocations.length, 1, `expected exactly one invocation in: ${commandLine}`);
   return classification.invocations[0];
 }
 
-const MUTATING_CASES = [
+const MUTATING_CASES: ReadonlyArray<readonly [string, string]> = [
   ['git commit -m "msg"', 'commit'],
   ['git commit --amend', 'commit'],
   ['git checkout main', 'checkout'],
@@ -128,7 +134,7 @@ test('key equivalence lines match contract §8.6', () => {
   assert.match(gitEquivalence(only('git gc')), /jj util gc/);
 });
 
-const READ_CASES = [
+const READ_CASES: readonly string[] = [
   'git status',
   'git log --oneline -5',
   'git diff HEAD',
@@ -192,7 +198,7 @@ for (const commandLine of READ_CASES) {
   });
 }
 
-const PROGRAM_FORMS = [
+const PROGRAM_FORMS: readonly string[] = [
   '/usr/bin/git commit -m x',
   './git commit -m x',
   '"git" commit -m x',
@@ -303,7 +309,7 @@ test('classification is a pure, repeatable function', () => {
 
 test('classifyJjInvocation: repository-wide commands', async () => {
   const { classifyJjInvocation } = await import('../src/git-command.ts');
-  const cases = [
+  const cases: ReadonlyArray<readonly [string, string]> = [
     ['jj undo', 'undo'],
     ['jj redo', 'redo'],
     ['jj abandon xyz', 'abandon'],

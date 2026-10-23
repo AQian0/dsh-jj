@@ -13,15 +13,29 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj, jjNonInteractiveEnv } from '../src/jj-command.ts';
 import { JjOperations } from '../src/service.ts';
 import { jjToolDefinitions } from '../src/tools.ts';
-import { assertToolchain, initJjColocated, makeFixture, mustRun } from './helpers/fixtures.js';
+import type { RunCommand } from '../src/types.ts';
+import { assertToolchain, initJjColocated, makeFixture, mustRun, type Fixture } from './helpers/fixtures.ts';
+
+/** The recorder-editor files installed for one fixture root. */
+interface RecorderEditor {
+  readonly recorder: string;
+  readonly calls: string;
+  readonly called: () => number;
+}
+
+/** Canonical `jj_squash` value as this suite inspects it. */
+interface SquashValue {
+  readonly changeId: unknown;
+}
 
 /** A recorder "editor": if jj ever launches it, it writes a line to calls.txt. */
-function installRecorderEditor(root) {
+function installRecorderEditor(root: string): RecorderEditor {
   const recorder = join(root, 'editor-recorder.sh');
   const calls = join(root, 'editor-calls.txt');
   writeFileSync(recorder, `#!/bin/sh\necho "EDITOR-CALLED $@" >> ${calls}\nexit 0\n`);
@@ -30,12 +44,24 @@ function installRecorderEditor(root) {
 }
 
 /** Prepare a change with content on top of a described parent so squash has work to do. */
-async function prepareSquashableRepo(fx, repo) {
+async function prepareSquashableRepo(fx: Fixture, repo: string): Promise<void> {
   await mustRun(fx.run, ['jj', 'describe', '-r', '@', '-m', 'first'], repo);
   writeFileSync(join(repo, 'file.txt'), 'one\n');
   await mustRun(fx.run, ['jj', 'new', '-m', 'second'], repo);
   writeFileSync(join(repo, 'file.txt'), 'one\ntwo\n');
   await mustRun(fx.run, ['jj', 'status'], repo);
+}
+
+/** Fetch one `jj_*` tool definition; a missing definition fails the test loudly. */
+function toolDefinition(definitions: ReadonlyMap<string, ToolDefinition>, name: string): ToolDefinition {
+  const definition = definitions.get(name);
+  assert.ok(definition !== undefined, `missing tool definition: ${name}`);
+  return definition;
+}
+
+/** Minimal execution context: the tool bodies read only `exec.signal`. */
+function toolRunContext(): ToolRunContext {
+  return { signal: new AbortController().signal } as unknown as ToolRunContext;
 }
 
 test('V2 §5.9: the non-interactive environment shields every editor and prompt hook', () => {
@@ -59,7 +85,7 @@ test('V2: `jj_squash` with no message never launches an editor (operation layer)
   await prepareSquashableRepo(fx, repo);
   const editor = installRecorderEditor(fx.root);
 
-  const calls = [];
+  const calls: string[][] = [];
   const runJj = createCommandRunJj(
     async (argv, options) => {
       calls.push([...argv]);
@@ -96,7 +122,7 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   await prepareSquashableRepo(fx, repo);
   const editor = installRecorderEditor(fx.root);
-  const calls = [];
+  const calls: string[][] = [];
   const runJj = createCommandRunJj(async (argv, options) => {
     calls.push([...argv]);
     return await fx.run(argv, { ...options, env: { ...(options.env ?? {}), JJ_EDITOR: editor.recorder } });
@@ -108,16 +134,16 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
       config: resolveConfig({}),
       host: { tools: { register: () => () => {} } },
       cwdFor: async () => repo,
-    }).map((definition) => [definition.name, definition]),
+    }).map((definition) => [definition.name, definition] as const),
   );
   await assert.rejects(
-    () => definitions.get('jj_squash').execute({}, { signal: new AbortController().signal }),
+    () => toolDefinition(definitions, 'jj_squash').execute({}, toolRunContext()),
     /jj_squash needs a message path/,
   );
   assert.equal(calls.filter((argv) => argv.includes('squash')).length, 0, 'no jj squash process was spawned');
   assert.equal(editor.called(), 0, 'the tool path must not launch an editor either');
 
-  const value = await definitions.get('jj_squash').execute({ useDestinationMessage: true }, { signal: new AbortController().signal });
+  const value = (await toolDefinition(definitions, 'jj_squash').execute({ useDestinationMessage: true }, toolRunContext())) as SquashValue;
   assert.equal(typeof value.changeId, 'string');
   assert.equal(editor.called(), 0);
   assert.ok(calls.some((argv) => argv.includes('--use-destination-message')));
@@ -126,10 +152,10 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
 test('V4: probe argv carries each non-interactive flag exactly once', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-v4');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
-  const calls = [];
+  const calls: string[][] = [];
   // `detectVcs(cwd, run)` takes the task-4 RunCommand form (argv includes the program);
   // the runner prepends the non-interactive flags exactly once.
-  const run = async (argv, options) => {
+  const run: RunCommand = async (argv, options) => {
     calls.push([...argv]);
     return await fx.run(argv, options);
   };

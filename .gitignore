@@ -6,7 +6,7 @@
 # ─────────────────────────────────────────────────────────────
 
 # 依赖（仓库根 node_modules 是指向全局安装的 symlink 农场，由
-# `node scripts/setup-links.mjs` 生成；离线可用，不入库）
+# `node scripts/setup-links.ts` 生成；离线可用，不入库）
 node_modules/
 
 # 构建产物 lib/ 提交入库：本仓库是"本地目录链接安装"的 bundle，

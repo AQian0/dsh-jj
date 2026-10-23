@@ -101,9 +101,22 @@ Use the jj equivalent instead:
 
 ## 开发
 
+仓库里的手写代码全部是 TypeScript,和 DSH 本身及官方插件包的组织方式一致:
+
+| 位置 | 内容 |
+|---|---|
+| `src/**/*.ts` | 插件实现(构建入口) |
+| `test/**/*.test.ts` | 测试套件(`node:test`,由 Node 原生类型擦除直接运行) |
+| `scripts/*.ts` | 开发脚本(离线依赖链接) |
+| `lib/**/*.js` + `lib/types/**/*.d.ts` | `tsc` 构建产物,随 npm 包发布(官方插件包同样只发布构建输出) |
+
+测试与脚本直接以 TS 运行,因此开发/CI 需要 **Node 24+**(内置类型擦除)。
+
 ```bash
-node scripts/setup-links.mjs   # 离线链接全局 DSH 依赖(仅构建需要,幂等)
-npm test                       # tsc 构建 + 240 个测试
+node scripts/setup-links.ts    # 离线链接全局 DSH 依赖(仅类型检查/构建需要,幂等)
+npm run build                  # tsc: src/ -> lib/(提交入库的产物)
+npm run typecheck              # 类型检查 src/ + test/ + scripts/(tsconfig.test.json)
+npm test                       # 构建 + 类型检查 + 241 个测试
 ```
 
 `lib/` 是提交入库的构建产物;改动 `src/` 后运行 `npm run build`,并把 `lib/` 的变更一起提交。

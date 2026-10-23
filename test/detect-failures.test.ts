@@ -8,12 +8,17 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { detectVcs, sniffVcsSync } from '../src/detect.ts';
-import { initJjColocated, initJjNative, makeFixture } from './helpers/fixtures.js';
+import type { DetectDeps, DetectInput, RunCommand, RunResult } from '../src/types.ts';
+import { initJjColocated, initJjNative, makeFixture } from './helpers/fixtures.ts';
 
 /** Wrap a runner so one argv condition returns a synthetic outcome. */
-function intercept(baseRun, predicate, outcome) {
+function intercept(
+  baseRun: RunCommand,
+  predicate: (argv: readonly string[]) => boolean,
+  outcome: Partial<RunResult>,
+): { wrapped: RunCommand; count: () => number } {
   let intercepted = 0;
-  const wrapped = async (argv, options) => {
+  const wrapped: RunCommand = async (argv, options) => {
     if (predicate(argv)) {
       intercepted += 1;
       return { argv, exitCode: null, signal: null, stdout: '', stderr: '', timedOut: false, durationMs: 0, ...outcome };
@@ -118,7 +123,7 @@ test('an already-aborted signal skips every probe', async (t) => {
 test('a runner that throws never escapes detectVcs', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-fail-throw');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
-  const throwing = async () => {
+  const throwing: RunCommand = async () => {
     throw new Error('runner exploded');
   };
   const descriptor = await detectVcs(colo, throwing);
@@ -129,15 +134,18 @@ test('a runner that throws never escapes detectVcs', async (t) => {
 
 test('detectVcs rejects a non-runner input as a programmer error', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-fail-input');
-  await assert.rejects(() => detectVcs(fx.root, /** @type {never} */ (undefined)), TypeError);
-  await assert.rejects(() => detectVcs(fx.root, /** @type {never} */ ({})), TypeError);
+  // Deliberately invalid values: this test exercises the programmer-error path.
+  const notARunner = undefined as unknown as DetectInput;
+  const emptyDeps = {} as unknown as DetectInput;
+  await assert.rejects(() => detectVcs(fx.root, notARunner), TypeError);
+  await assert.rejects(() => detectVcs(fx.root, emptyDeps), TypeError);
 });
 
 test('contract-shaped DetectDeps input works (runJj/runGit, argv without the program)', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-fail-deps');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
-  const calls = [];
-  const deps = {
+  const calls: string[][] = [];
+  const deps: DetectDeps = {
     runJj: async ({ cwd, argv, timeoutMs }) => {
       calls.push(['jj', ...argv]);
       const result = await fx.run(['jj', ...argv], { cwd, timeoutMs });

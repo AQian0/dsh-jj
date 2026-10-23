@@ -9,15 +9,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
+import type { JjPluginConfig } from '../src/config.ts';
 import { evaluateGitCommand, installGitConfusionGuard } from '../src/guard.ts';
-import { createGuardContext, initGit, initJjColocated, initJjNative, makeFixture } from './helpers/fixtures.js';
+import type {
+  GitConfusionGuardHandle,
+  GuardDescriptorLike,
+  GuardExecutionLike,
+  GuardOptions,
+  GuardServiceLike,
+} from '../src/guard.ts';
+import { createGuardContext, initGit, initJjColocated, initJjNative, makeFixture } from './helpers/fixtures.ts';
+import type { GuardHarness, HarnessToolResult } from './helpers/fixtures.ts';
 
-function install(harness, options = {}) {
+function install(harness: GuardHarness, options: JjPluginConfig | GuardOptions = {}): GitConfusionGuardHandle {
   const guard = installGitConfusionGuard(harness.ctx, options);
   return guard;
 }
 
-function bash(command, workdir) {
+function bash(command: string, workdir?: string): GuardExecutionLike {
   return { name: 'bash', arguments: workdir === undefined ? { command } : { command, workdir } };
 }
 
@@ -38,7 +47,7 @@ test('deny (explicit): mutating git in a colocated jj workspace is blocked with 
   const harness = createGuardContext();
   install(harness, { guardMutatingGit: 'deny', defaultCwd: colo });
   const reason = harness.runGuard(bash('git commit -m "x"', colo));
-  assert.equal(typeof reason, 'string');
+  assert.ok(typeof reason === 'string');
   assert.match(reason, /^Blocked: `git commit` in a Jujutsu \(jj\) workspace \(jj-colocated: /);
   assert.match(reason, /jj commit -m "…"/);
   assert.match(reason, /Use the jj equivalent instead:/);
@@ -71,9 +80,9 @@ test('deny: jj-native refusal uses the jj-native reason and a jj workspace equiv
   const harness = createGuardContext();
   install(harness, { guardMutatingGit: 'deny', defaultCwd: native });
   const reason = harness.runGuard(bash('git worktree add ../wt', native));
-  assert.match(reason, /jj-native: /);
-  assert.match(reason, /jj workspace add <path>/);
-  assert.match(reason, /no root \.git/);
+  assert.match(reason ?? '', /jj-native: /);
+  assert.match(reason ?? '', /jj workspace add <path>/);
+  assert.match(reason ?? '', /no root \.git/);
 });
 
 test('deny: `-C` and `cd` retarget the effective directory', async (t) => {
@@ -129,8 +138,8 @@ test('guardGitInJjNative (explicit deny): read-only git in a jj-native workspace
   const defaultHarness = createGuardContext();
   install(defaultHarness, { guardGitInJjNative: 'deny', defaultCwd: native });
   const defaultReason = defaultHarness.runGuard(bash('git status', native));
-  assert.match(defaultReason, /^Blocked: `git status` in a Jujutsu \(jj\) workspace \(jj-native: /);
-  assert.match(defaultReason, /jj log \/ jj status/);
+  assert.match(defaultReason ?? '', /^Blocked: `git status` in a Jujutsu \(jj\) workspace \(jj-native: /);
+  assert.match(defaultReason ?? '', /jj log \/ jj status/);
 
   const warnHarness = createGuardContext();
   install(warnHarness, { guardGitInJjNative: 'warn', defaultCwd: native });
@@ -165,9 +174,9 @@ test('create_worktree is blocked in a jj workspace and allowed in a Git reposito
   const inJj = createGuardContext();
   install(inJj, { defaultCwd: colo });
   const reason = inJj.runGuard({ name: 'create_worktree', arguments: { name: 'feature' } });
-  assert.match(reason, /^Blocked: `create_worktree` in a Jujutsu \(jj\) workspace \(jj-colocated: /);
-  assert.match(reason, /jj_workspace_add/);
-  assert.match(reason, /working-directory tool/);
+  assert.match(reason ?? '', /^Blocked: `create_worktree` in a Jujutsu \(jj\) workspace \(jj-colocated: /);
+  assert.match(reason ?? '', /jj_workspace_add/);
+  assert.match(reason ?? '', /working-directory tool/);
 
   const inGit = createGuardContext();
   install(inGit, { defaultCwd: git });
@@ -220,7 +229,7 @@ test('the async warm-up seam precomputes the decision before guards run', async 
   const fx = makeFixture(t, 'dsh-jj-guard-warm');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
   const harness = createGuardContext();
-  const warmed = [];
+  const warmed: string[] = [];
   install(harness, {
     config: { guardMutatingGit: 'deny' },
     warm: async (cwd) => {
@@ -230,13 +239,13 @@ test('the async warm-up seam precomputes the decision before guards run', async 
   const execution = { name: 'bash', callId: 'call-1', arguments: { command: 'git commit -m x', workdir: colo } };
   const reason = await harness.runPipeline(execution);
   assert.deepEqual(warmed, [colo], 'the warm-up listener ran before the guard');
-  assert.match(reason, /^Blocked: `git commit`/);
+  assert.match(reason ?? '', /^Blocked: `git commit`/);
   // The cached decision short-circuits even if the working directory disappears.
-  assert.match(harness.runGuard(execution), /^Blocked: `git commit`/);
+  assert.match(harness.runGuard(execution) ?? '', /^Blocked: `git commit`/);
 });
 
 test('evaluateGitCommand is a pure classifier with an injectable sniff', () => {
-  const layouts = {
+  const layouts: Readonly<Record<string, GuardDescriptorLike>> = {
     '/jj': { kind: 'jj-colocated', jjRoot: '/jj', root: '/jj', workspaceName: 'default' },
     '/git': { kind: 'git', jjRoot: undefined, root: '/git' },
   };
@@ -286,7 +295,7 @@ test('T19b: guardJjRepositoryWide=deny blocks with --at-op and the jj_undo tool 
   install(harness, { guardJjRepositoryWide: 'deny', defaultCwd: colo });
   for (const command of ['jj undo', 'jj op restore abcdef', 'jj redo', 'jj abandon xyz']) {
     const reason = harness.runGuard(bash(command, colo));
-    assert.equal(typeof reason, 'string', `${command} must be blocked in deny mode`);
+    assert.ok(typeof reason === 'string', `${command} must be blocked in deny mode`);
     assert.match(reason, /^Blocked: `jj /);
     assert.match(reason, /--at-op=<op-id>/);
     assert.match(reason, /jj_undo tool/);
@@ -310,7 +319,7 @@ test('T19d: scope creep (`jj -R <ancestor> undo`) is always denied', async (t) =
   const harness = createGuardContext();
   install(harness, { defaultCwd: inner });
   const reason = harness.runGuard(bash(`jj -R ${outer} undo`, inner));
-  assert.equal(typeof reason, 'string');
+  assert.ok(typeof reason === 'string');
   assert.match(reason, /targets `.*outer`, which is not the repository this session is working in/);
 
   const okHarness = createGuardContext();
@@ -326,7 +335,7 @@ test('T19e: `jj workspace forget <other>` is denied regardless of mode', async (
   const harness = createGuardContext();
   install(harness, { defaultCwd: native });
   const reason = harness.runGuard(bash('jj workspace forget other', native));
-  assert.equal(typeof reason, 'string', 'forgetting another workspace is denied even in warn mode');
+  assert.ok(typeof reason === 'string', 'forgetting another workspace is denied even in warn mode');
   assert.match(reason, /^Blocked: `jj workspace forget`/);
 });
 
@@ -339,7 +348,7 @@ test('T20 (base layer): the decision path is synchronous and spawns nothing', as
   const reason = harness.runGuard(bash('git commit -m x', colo));
   completed = true;
   assert.equal(completed, true);
-  assert.match(reason, /^Blocked/);
+  assert.match(reason ?? '', /^Blocked/);
   // The guard API has no runner injection at all: the decision uses the sniff
   // cache, so the tool path cannot spawn a git subprocess (the tools-layer T20
   // assertion additionally checks tool argv).
@@ -353,16 +362,17 @@ test('T20 (base layer): the decision path is synchronous and spawns nothing', as
 test('T21: hard-deny jj calls are refused and cannot be enabled by config', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-guard-harddeny');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
-  for (const mode of ['warn', 'off']) {
+  const hardDenies: ReadonlyArray<readonly [string, RegExp]> = [
+    ['jj restore', /removed 1 files/],
+    ['jj abandon @', /working copy/],
+    ['jj undo --allow-cross-workspace', /cross-workspace/],
+  ];
+  for (const mode of ['warn', 'off'] as const) {
     const harness = createGuardContext();
     install(harness, { guardJjRepositoryWide: mode, defaultCwd: colo });
-    for (const [command, detail] of [
-      ['jj restore', /removed 1 files/],
-      ['jj abandon @', /working copy/],
-      ['jj undo --allow-cross-workspace', /cross-workspace/],
-    ]) {
+    for (const [command, detail] of hardDenies) {
       const reason = harness.runGuard(bash(command, colo));
-      assert.equal(typeof reason, 'string', `${command} must be refused even with guardJjRepositoryWide=${mode}`);
+      assert.ok(typeof reason === 'string', `${command} must be refused even with guardJjRepositoryWide=${mode}`);
       assert.match(reason, /^Blocked: `jj /);
       assert.match(reason, /jj --at-op=<op-id>/);
       assert.match(reason, detail);
@@ -405,18 +415,20 @@ test('T21d: repo-wide warnings name the head operation when the service provides
   install(harness, {
     defaultCwd: colo,
     warm: async () => {},
+    // Deliberately partial service double: the guard only reads kind/jjRoot/root/
+    // workspaceName from `peek`, while the real service returns a full descriptor.
     service: {
       peek: () => ({ kind: 'jj-colocated', jjRoot: colo, root: colo, workspaceName: 'default' }),
       warm: async () => {},
       operations: { headOperationId: async () => 'deadbeefcafe' },
-    },
+    } as unknown as GuardServiceLike,
   });
   const execution = { name: 'bash', callId: 'call-head', arguments: { command: 'jj undo', workdir: colo } };
   await harness.runPipeline(execution);
   const event = harness.events.find((entry) => entry.event === 'jj/repo-wide-op');
   assert.ok(event !== undefined, 'the repo-wide warning was emitted');
-  assert.match(event.payload.message, /Head operation before this call: deadbeefcafe/);
-  assert.match(event.payload.message, /jj op restore deadbeefcafe/);
+  assert.match(event.payload.message ?? '', /Head operation before this call: deadbeefcafe/);
+  assert.match(event.payload.message ?? '', /jj op restore deadbeefcafe/);
 });
 
 test('default (warn): a git write runs and the MODEL gets a jj-preference notice', async (t) => {
@@ -435,9 +447,9 @@ test('default (warn): a git write runs and the MODEL gets a jj-preference notice
   const list = harness.listeners.get('tools/post-execute') ?? [];
   assert.equal(list.length, 1, 'the guard registers exactly one post-execute listener');
   let index = 0;
-  const next = async () =>
+  const next = async (): Promise<unknown> =>
     index < list.length ? await list[index++](execution, { content: [{ type: 'text', text: 'ok' }] }, next) : { kind: 'accept' };
-  const decision = await next();
+  const decision = (await next()) as HarnessToolResult;
   assert.equal(decision.kind, 'accept');
   const texts = (decision.content ?? []).map((block) => block.text ?? '').join('\n');
   assert.match(texts, /ok/, 'the original tool output is preserved');
@@ -445,4 +457,3 @@ test('default (warn): a git write runs and the MODEL gets a jj-preference notice
   assert.match(texts, /git commit/, 'the notice names the command');
   assert.match(texts, /jj (describe|new|commit)/, 'the notice names the jj equivalent');
 });
-

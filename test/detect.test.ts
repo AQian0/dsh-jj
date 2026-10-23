@@ -8,10 +8,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { detectVcs, sniffVcsSync, parseWorkspaceList, TPL_WORKSPACE_LIST } from '../src/detect.ts';
-import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, realpath } from './helpers/fixtures.js';
+import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, realpath } from './helpers/fixtures.ts';
 
-function assertSamePath(actual, expected, message) {
-  assert.equal(realpath(actual), realpath(expected), message);
+/**
+ * Compare two paths by their canonical realpath.
+ *
+ * `actual` is often an optional descriptor field; the non-null assertion is
+ * deliberate: a missing path must fail inside `realpath`, exactly like the
+ * original untyped helper, instead of being silently defaulted.
+ */
+function assertSamePath(actual: string | undefined, expected: string, message?: string): void {
+  if (message === undefined) {
+    assert.equal(realpath(actual!), realpath(expected));
+  } else {
+    assert.equal(realpath(actual!), realpath(expected), message);
+  }
 }
 
 test('colocated repository: kind, roots, versions, remote list, and CLI evidence', async (t) => {
@@ -64,7 +75,10 @@ test('jj-native repository: no Git metadata at the workspace root', async (t) =>
   assert.equal(descriptor.gitDir, undefined);
   assert.equal(descriptor.gitCeilingApplied, false);
   assert.equal(descriptor.verified, true);
-  assert.equal(descriptor.diagnostics?.length ?? descriptor.notices.filter((entry) => entry.severity === 'error').length, 0);
+  // `VcsDescriptor` intentionally does not declare `diagnostics`; the check still
+  // tolerates it if a descriptor ever carries one.
+  const diagnostics = (descriptor as { readonly diagnostics?: readonly unknown[] }).diagnostics;
+  assert.equal(diagnostics?.length ?? descriptor.notices.filter((entry) => entry.severity === 'error').length, 0);
 });
 
 test('plain Git repository: git kind, no jj fields', async (t) => {
@@ -113,7 +127,7 @@ test('filesystem sniff agrees with detectVcs on all four kinds', async (t) => {
     [native, 'jj-native'],
     [git, 'git'],
     [empty, 'none'],
-  ]) {
+  ] as const) {
     assert.equal(sniffVcsSync(dir).kind, kind, `sniff of ${dir}`);
     assert.equal((await detectVcs(dir, fx.run)).kind, kind, `detect of ${dir}`);
   }

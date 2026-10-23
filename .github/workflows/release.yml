@@ -69,6 +69,9 @@ jobs:
           npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
             typescript@6.0.3 @types/node@26.6.5
 
+      - name: Type-check implementation, tests, and scripts
+        run: npm run typecheck
+
       - name: Run tests
         run: npm run test:unit
 
