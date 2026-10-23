@@ -33,10 +33,10 @@ npm run build   # 构建 lib/;完整校验(构建 + 类型检查 + 242 个测试
 在 Plugin Manager 里把 spec 填成精确版本(避免下次发版改变已装内容):
 
 ```
-@aqian0/dsh-jj@0.2.0
+@aqian0/dsh-jj@0.2.1
 ```
 
-也可以只安装依赖:`dsh plugin --profile <name> add @aqian0/dsh-jj@0.2.0`。
+也可以只安装依赖:`dsh plugin --profile <name> add @aqian0/dsh-jj@0.2.1`。
 
 安装后 bundle 自动贡献 `jj-runtime` / `jj-tools` / `jj-guard` 三行,并给 `agent-instructions` 加上 `.jj` 根标记;用 Plugin 页面或 `list_plugins` 确认三行 enabled。
 
