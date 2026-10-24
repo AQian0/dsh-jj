@@ -2,7 +2,7 @@ name: release
 
 # 推 v<version> tag 触发：校验 tag 与 package.json 版本一致 → 跑测试 →
 # 用 npm 可信发布（GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成。
-# 首次 0.1.0 由本机 Bun 手动发布（Bun 不支持 npm OIDC）。
+# 首次发布由本机 Bun 手动完成（Bun 不支持 npm OIDC）。
 
 on:
   push:
@@ -11,7 +11,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to publish (e.g. v0.2.1)"
+        # 有意不写具体版本号：格式示例保持与版本无关，发版时无需修改此处。
+        description: "Existing release tag to publish (format: vX.Y.Z)"
         required: true
         type: string
 
