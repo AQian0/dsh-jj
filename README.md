@@ -13,32 +13,17 @@
 
 ## 安装
 
-运行插件需要 DSH 与 `jj` CLI(`jj` 需在 `PATH` 中,或用 `jjCommand` 指向可执行文件);插件本身没有额外的运行时依赖。
+需要 DSH 与 `jj` CLI(`jj` 在 `PATH` 中,或用 `jjCommand` 指定);无其他运行时依赖。
 
-### 本地目录(开发/未发布)
-
-`lib/` 是构建产物、不入库,所以本地安装前先在仓库根构建一次:
+**从 npm 安装**:在 Plugin Manager 里把 spec 填成精确版本(如 `@aqian0/dsh-jj@0.2.1`,避免发版后已装内容变化),或执行:
 
 ```bash
-npm run build   # 构建 lib/;完整校验(构建 + 类型检查 + 242 个测试)用 npm test
+dsh plugin --profile <name> add @aqian0/dsh-jj@0.2.1
 ```
 
-然后在 DSH 的 Plugin Manager 里安装本地 bundle:
+**本地目录安装**:`lib/` 是构建产物、不入库,先在仓库根执行 `npm run build`,再在 Plugin Manager 里安装本地 bundle,spec 填本仓库绝对路径(如 `/path/to/dsh-jj`);Web GUI 在设置 → 插件管理,Agent 侧用 `plugin_manager` 的 `install_bundle`。
 
-- Web GUI:设置页 → 插件管理 → 安装本地 bundle,spec 填本仓库的绝对路径(如 `/path/to/dsh-jj`);
-- Agent 工具:`plugin_manager` 的 `install_bundle`,target 填同一个绝对路径。
-
-### 从 npm(发布后)
-
-在 Plugin Manager 里把 spec 填成精确版本(避免下次发版改变已装内容):
-
-```
-@aqian0/dsh-jj@0.2.1
-```
-
-也可以只安装依赖:`dsh plugin --profile <name> add @aqian0/dsh-jj@0.2.1`。
-
-安装后 bundle 自动贡献 `jj-runtime` / `jj-tools` / `jj-guard` 三行,并给 `agent-instructions` 加上 `.jj` 根标记;用 Plugin 页面或 `list_plugins` 确认三行 enabled。
+安装后自动启用 `jj-runtime` / `jj-tools` / `jj-guard` 三行,并给 `agent-instructions` 加上 `.jj` 根标记;用 Plugin 页面或 `list_plugins` 确认。
 
 ## 使用
 
