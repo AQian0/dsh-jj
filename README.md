@@ -106,28 +106,6 @@ Use the jj equivalent instead:
 - `agent-instructions` 的 `.jj` 根标记覆盖在 Web profile 不生效(Web 在 bundle 层禁用了顶层该行),headless/CLI profile 生效。
 - jj-native 工作区里项目级 skill 根仍按 `.git` 查找(上游硬编码),暂不可用。
 
-## 开发
-
-仓库里的手写代码全部是 TypeScript,和 DSH 本身及官方插件包的组织方式一致:
-
-| 位置 | 内容 |
-|---|---|
-| `src/**/*.ts` | 插件实现(构建入口) |
-| `test/**/*.test.ts` | 测试套件(`node:test`,由 Node 原生类型擦除直接运行) |
-| `scripts/*.ts` | 开发脚本(离线依赖链接) |
-| `lib/**/*.js` + `lib/types/**/*.d.ts` | `tsc` 构建产物,不入库;npm 发布包中包含(官方插件包同样只发布构建输出) |
-
-测试与脚本直接以 TS 运行,因此开发/CI 需要 **Node 24+**(内置类型擦除)。
-
-```bash
-node scripts/setup-links.ts    # 离线链接全局 DSH 依赖(仅类型检查/构建需要,幂等)
-npm run build                  # tsc: src/ -> lib/(提交入库的产物)
-npm run typecheck              # 类型检查 src/ + test/ + scripts/(tsconfig.test.json)
-npm test                       # 构建 + 类型检查 + 242 个测试
-```
-
-`lib/` 是构建产物且不入库;改动 `src/` 后运行 `npm run build`。npm 发布由 `prepack` 自动构建,CI 也会在测试前显式构建。
-
 ## License
 
 [MIT](./LICENSE)
