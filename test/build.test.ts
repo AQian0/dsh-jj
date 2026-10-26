@@ -72,6 +72,29 @@ test('pure modules stay free of runtime @deepseek-ai imports', () => {
   }
 });
 
+/** Manifest fields this build test inspects. */
+interface PackageManifest {
+  readonly peerDependencies?: Readonly<Record<string, string>>;
+}
+
+test('DSH peer ranges admit later 0.2.x releases instead of pinning one runtime', () => {
+  const manifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as PackageManifest;
+  const dshPeers = Object.entries(manifest.peerDependencies ?? {}).filter(
+    ([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'),
+  );
+  assert.ok(dshPeers.length > 0, 'the manifest must state its DSH runtime requirement');
+  for (const [name, range] of dshPeers) {
+    // DSH matches the running version against each peer range, so an exact pin rejects every
+    // later 0.2.x release. A caret range keeps patch/prerelease updates compatible while still
+    // rejecting the next minor line, whose plugin-facing APIs may change incompatibly.
+    assert.match(
+      range,
+      /^\^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/,
+      `${name} must declare a caret range so later DSH patch releases stay compatible, got ${JSON.stringify(range)}`,
+    );
+  }
+});
+
 test('all three entries import under plain Node with name/inject/apply/Config', async () => {
   const entries: ReadonlyArray<readonly [string, string, readonly string[]]> = [
     ['.', 'jj', ['subprocess', 'workingDirectory']],
