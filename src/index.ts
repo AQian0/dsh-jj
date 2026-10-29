@@ -134,7 +134,7 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   if (typeof effect === 'function') effect.call(ctx, () => () => promptContext(), 'dsh-jj: jj prompt context');
 }
 
-export { JjService, JjOperations, TPL_STATUS, TPL_LOG, TPL_OP_LOG, TPL_BOOKMARK_LIST, TPL_WORKSPACE_LIST_TAB } from './service.ts';
+export { JjService, JjOperations, TPL_STATUS, TPL_LOG, TPL_DESCRIPTION, TPL_OP_LOG, TPL_BOOKMARK_LIST, TPL_WORKSPACE_LIST_TAB } from './service.ts';
 export { JjError, classifyJjFailure, createCommandRunGit, createCommandRunJj, createRunGit, createRunJj, jjErrorMessage, jjNonInteractiveEnv } from './jj-command.ts';
 export { jjRefusalText, jjToolDefinitions, registerJjTools } from './tools.ts';
 export { describeVcsKind } from './types.ts';
