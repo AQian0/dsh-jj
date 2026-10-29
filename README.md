@@ -10,6 +10,7 @@
 - **提交描述风格**:默认继承仓库里最近 jj/Git 描述的写法;历史不足或混杂时先询问你选 Conventional Commits / Angular / Gitmoji / 纯文本或自定义风格,也支持在配置里固定风格。
 - **小步提交**:默认要求模型每完成一个内聚步骤就用 `jj commit` 收尾并开新 change,避免整份任务堆在 `@` 里难以审阅。
 - **模型上下文**:在 jj 仓库里自动向模型注入「优先用 jj」的上下文;非 jj 仓库不注入。
+- **多会话并行**:检测同一进程、同一 jj 仓库里的其他顶层会话;共用工作副本时引导先隔离到仓库外的独立 jj workspace,同仓库不同 workspace 时提醒不要改写别人的提交,并在任务收尾按标准 rebase 流程交付。
 - **项目根发现**:让 `agent-instructions` 也能把 `.jj` 当作项目根标记(headless/CLI profile 生效)。
 - **不回退 git**:jj 不可用或目录不是 jj 仓库时明确报错,绝不静默改用 git。
 
@@ -85,6 +86,58 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 并在其上加一个新的 change(未传 `paths` 时为空),而不是把整个任务堆在 `@` 里;从混杂改动中只提交
 部分文件时,给 `jj_commit` 传 `paths`。这样人可以从容地逐个提交审阅。`commitGuidance: false` 可关闭以上注入的提示。
 
+### 多会话并行与 jj workspace
+
+默认部署里同一个 DSH 进程可能有多个顶层会话同时工作(Web GUI 的会话共用一个进程)。`jj-runtime` 会检测同一个
+jj 仓库里是否还有其他存活的顶层会话(只算顶层会话,子代理不算);检测到多会话时,注入的上下文会要求模型在
+动文件之前先隔离工作副本,并在任务收尾时做一次标准 rebase。
+
+`multiSessionGuidance` 控制这段指引:
+
+- `auto`(默认):仅当同一进程里还有其它顶层会话在同一个 jj 仓库工作时注入;一旦检测到并行会话,收尾 rebase
+  清单会保留到本会话结束(即使另一个会话先退出),避免最后交付时缺少 rebase 提示。
+- `always`:始终注入——多个 `dsh` 进程并行操作同一仓库时用它。
+- `off`:不注入多会话指引。
+
+自动检测只能看到同一 DSH 进程内的会话:Web GUI 的会话都在一个进程里,而多个 `dsh` CLI 进程互相不可见;
+跨进程并行请显式配置 `multiSessionGuidance: always`。检测是 fail-open 的:宿主没有提供 agent 注册表 /
+工作目录服务时按「没有其它会话」处理,不注入,也不会影响会话启动。
+
+**共享工作副本 vs 同仓库其它 workspace**
+
+- 另一个存活会话与本会话**共用同一个 jj 工作副本**时:动文件前先隔离(只读检查不受影响)。用 `jj_workspace_add`
+  在仓库外建一个 sibling workspace(绝对路径,例如 `<repo 的兄弟目录>/repo-session-a`,不要放进仓库根内),
+  再用 `working_directory` 工具把本会话切过去;先 `jj_workspace_list` 看一下,不要复用别人的 workspace。共享副本
+  不安全:每条 jj 命令(包括 `jj workspace add`)都会先快照整个目录,不带 `paths` 的 `jj commit` 可能把另一个会话
+  未提交的文件一起提交。如果本会话已经在共享副本里改了东西,先只提交本会话自己的路径(`jj_commit` 传 `paths`),
+  再用 `jj_workspace_add` 的 `parents: ["@"]`(`jj workspace add --revision @ <path>`)把这部分带入新 workspace。
+  只有用户明确要求时才直接改共享副本,此时提交要传 `paths`。
+- 另一个会话在**同一个 jj 仓库的另一个 workspace**:工作副本彼此隔离,但 bookmark 与 operation log 共享。
+  只可以 rewrite 本会话自己的提交;不要去 rebase / undo / restore 另一个 workspace 的提交,也不要移动它的 bookmark。
+
+**任务收尾:标准 rebase**
+
+多会话指引生效时,按下面的顺序结束任务:
+
+1. 用 `jj_commit` 提交最后一个内聚步骤,让本会话的改动是一段连续的 change 栈。
+2. 选目标。先跑 `jj git fetch`(仓库没有远端时 jj 会以 1 退出并提示 "No git remotes to fetch from",忽略即可)。
+   再确认目标:`jj log -r '<target>'` 必须是一个真实提交(不是空的 root commit),且本会话提交栈的 base 已经在
+   它的祖先里 —— `jj log -r '(<first-change>-) & ~::<target>'` 必须无输出。任一检查失败(仓库没有远端 trunk,
+   或本地 `main` 领先于远端)时,改用本地 `main` / `master` bookmark 或用户在对话里指定的 revision。
+3. 一次 rebase 移动整段栈:`jj_rebase`(revision = 本会话创建的第一个 change,destination = 目标,
+   **mode = `source`**)或 `jj rebase -s <first-change> -d <target>`。栈 rebase 绝不能用默认的 `revisions`/`-r`:
+   它只移动指定提交,后代会被 re-parent 回旧父提交、留在原地。执行前确认这次移动的后代都属于本会话。
+   不要 cherry-pick,也不要用 git rebase/merge。
+4. 复核:`jj_status` 无冲突、`jj_log` 显示栈直接位于目标之上、`jj_diff` 只有预期文件。冲突时把文件编辑成最终内容
+   (删掉 `<<<<<<<` / `%%%%%%%` / `>>>>>>>` 标记块)再跑一次 `jj_status` 让 jj 完成快照与解决,`jj resolve --list`
+   可列出仍未解决的冲突;中间提交的冲突用 `jj edit <change>` 修完再回到顶层。若 jj 提示 working copy is stale
+   (另一个会话 rewrite 了共享祖先),运行 `jj workspace update-stale` 后重新复核 —— 不要用 `jj undo` / `jj op restore`。
+   解决不了就带着 change id 停下来向用户报告。
+5. 只有 bookmark 属于本会话时才用 `jj_bookmark_set` 移动它,然后向用户报告 rebase 后的 change id 与目标。
+6. 不要自己执行 `jj workspace forget` —— forget 当前 workspace 会成功,但该目录不再是 jj 的 working copy(文件保留,
+   之后的 jj 命令会报没有 working copy)。临时 workspace 交给用户:报告 `jj_workspace_list` 里的名字/路径,
+   由用户在默认 workspace 里 forget,再删除目录。
+
 ### 工具一览
 
 | 工具 | 作用 |
@@ -101,7 +154,7 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 | `jj_op_log` | operation 历史,用于找 `jj_undo` 的目标 |
 | `jj_workspace_add` / `jj_workspace_list` | 新建/列出 jj workspace |
 | `jj_bookmark_list` / `jj_bookmark_set` | 列出/设置 bookmark |
-| `jj_rebase` | rebase 提交及其后代 |
+| `jj_rebase` | rebase revision 到目标;`mode` 可选 `source`(连同后代,整栈 rebase 用它)/ `branch` / `revisions`(默认,只移动指定提交) |
 
 非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj;不会回退到 git。
 
@@ -121,7 +174,9 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 | `guardTools` | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名 |
 | `guardCreateWorktree` | `true` | 在 jj 仓库里拒绝 `create_worktree`,引导用 `jj workspace add` |
 | `readOnlyGitNotice` | `true` | colocated 仓库内只读 git 命令是否附「优先用 jj」提示 |
-| `preferJjContext` | `true` | 会话开始时注入「优先用 jj」的模型可见上下文;关闭会连提交描述指引一起关闭 |
+| `preferJjContext` | `true` | 会话开始时注入「优先用 jj」的模型可见上下文;关闭会连提交描述与多会话指引一起关闭 |
+| `multiSessionGuidance` | `auto` | 多会话并行指引:`auto`(同进程的同一 jj 仓库检测到其他顶层会话时注入)/ `always` / `off` |
+| `rebaseTarget` | `trunk()` | 任务收尾标准 rebase 的目标 revset,不能为空;`trunk()` 解析不到时回退到 `main` / `master` 或用户指定的 revision |
 | `commitGuidance` | `true` | 是否注入提交描述风格与拆分提交指引(需 `preferJjContext` 开启) |
 | `commitStyle` | `auto` | 描述风格:`auto`(继承历史)/ `conventional` / `angular` / `gitmoji` / `plain` / `custom` |
 | `commitStyleCustom` | `''` | `commitStyle: custom` 时的风格规则(该模式下必填) |
@@ -132,6 +187,7 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 
 > `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `commitStyleSampleLimit`
 > 由 `jj-runtime` 行读取:prompt 与 `jj_commit_style` 共用同一份策略,这些键写在 `jj-tools` 行不会生效。
+> `multiSessionGuidance` / `rebaseTarget` 同样只由 `jj-runtime` 行读取,只影响注入的多会话与收尾 rebase 指引。
 
 ## 已知限制
 
@@ -143,6 +199,11 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
   `commitStyle: angular`);合并提交、大写 `Fix:` 之类的写法会归入 plain 或造成 mixed,可能触发询问。
 - `agent-instructions` 的 `.jj` 根标记覆盖在 Web profile 不生效(Web 在 bundle 层禁用了顶层该行),headless/CLI profile 生效。
 - jj-native 工作区里项目级 skill 根仍按 `.git` 查找(上游硬编码),暂不可用。
+- 多会话自动检测只看同一 DSH 进程内的顶层会话(Web GUI 的会话都在一个进程;多个 `dsh` CLI 进程互相不可见),
+  跨进程并行请配置 `multiSessionGuidance: always`。检测是 fail-open 的:宿主没有 agents / workingDirectory 服务时
+  `auto` 不注入任何内容,也不会让会话启动失败。
+- 子代理不注入多会话指引(包括 `always`):子代理与父会话共享工作副本,父会话继续运行时子代理同时写文件不受本功能
+  覆盖;需要严格隔离时由父会话显式给子任务指定独立 workspace。
 
 ## License
 
