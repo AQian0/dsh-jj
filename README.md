@@ -19,10 +19,10 @@
 需要 DSH 与 `jj` CLI(`jj` 在 `PATH` 中,或用 `jjCommand` 指定);无其他运行时依赖。
 兼容 DSH `0.2.1-rc.2` 及之后的 `0.2.x`:peer 依赖写作 `^0.2.1-rc.2`,同一 `0.2` 系列内的补丁/预发布升级(如 `0.2.1-rc.3`)无需更新插件;`0.3` 起需要插件适配。
 
-**从 npm 安装**:在 Plugin Manager 里把 spec 填成精确版本(如 `@aqian0/dsh-jj@0.2.2`,避免发版后已装内容变化),或执行:
+**从 npm 安装**:在 Plugin Manager 里把 spec 填成精确版本(如 `@aqian0/dsh-jj@0.3.0`,避免发版后已装内容变化),或执行:
 
 ```bash
-dsh plugin --profile <name> add @aqian0/dsh-jj@0.2.2
+dsh plugin --profile <name> add @aqian0/dsh-jj@0.3.0
 ```
 
 **本地目录安装**:`lib/` 是构建产物、不入库,先在仓库根执行 `npm run build`,再在 Plugin Manager 里安装本地 bundle,spec 填本仓库绝对路径(如 `/path/to/dsh-jj`);Web GUI 在设置 → 插件管理,Agent 侧用 `plugin_manager` 的 `install_bundle`。
