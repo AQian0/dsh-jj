@@ -9,6 +9,7 @@
  */
 
 import z from '@deepseek-ai/schemastery';
+import type { CommitStyleId } from './commit-style.ts';
 
 /** Cordis config schema for every dsh-jj entry point. */
 export const Config = z.object({
@@ -31,6 +32,17 @@ export const Config = z.object({
   readOnlyGitNotice: z.boolean().default(true),
   // Session-start model-visible context: 'this is a jj workspace, prefer jj'.
   preferJjContext: z.boolean().default(true),
+  // Commit-description policy (2026-10-30): by default inherit the style of the
+  // repository's recent jj/Git descriptions; when history cannot decide, the model
+  // asks the user (Conventional Commits / Angular / Gitmoji / plain / custom).
+  // `custom` requires the rules in `commitStyleCustom`.
+  commitGuidance: z.boolean().default(true),
+  commitStyle: z.union(['auto', 'conventional', 'angular', 'gitmoji', 'plain', 'custom']).default('auto'),
+  commitStyleCustom: z.string().default(''),
+  // Prefer a stack of small, self-contained commits over one growing @ change.
+  preferSplitCommits: z.boolean().default(true),
+  // How many recent descriptions jj_commit_style samples (also bounds its process output).
+  commitStyleSampleLimit: z.natural().default(30),
   defaultLogLimit: z.natural().default(30),
   maxLogLimit: z.natural().default(200),
   defaultCwd: z.string().default(''),
@@ -52,6 +64,16 @@ export interface JjPluginConfig {
   readonly guardCreateWorktree?: boolean;
   readonly readOnlyGitNotice?: boolean;
   readonly preferJjContext?: boolean;
+  /** Inject the commit-description style and split-commit guidance into the model context (default true). */
+  readonly commitGuidance?: boolean;
+  /** Commit-description style: inherit history (`auto`), a preset, or `custom` (default auto). */
+  readonly commitStyle?: CommitStyleId;
+  /** Rules for `commitStyle: 'custom'` (required in that case); ignored for other styles. */
+  readonly commitStyleCustom?: string;
+  /** Tell the model to advance through small, self-contained commits (default true). */
+  readonly preferSplitCommits?: boolean;
+  /** Number of recent descriptions `jj_commit_style` samples (default 30). */
+  readonly commitStyleSampleLimit?: number;
   readonly defaultLogLimit?: number;
   readonly maxLogLimit?: number;
   readonly defaultCwd?: string;
@@ -72,6 +94,11 @@ export interface ResolvedJjConfig {
   readonly guardCreateWorktree: boolean;
   readonly readOnlyGitNotice: boolean;
   readonly preferJjContext: boolean;
+  readonly commitGuidance: boolean;
+  readonly commitStyle: CommitStyleId;
+  readonly commitStyleCustom: string;
+  readonly preferSplitCommits: boolean;
+  readonly commitStyleSampleLimit: number;
   readonly defaultLogLimit: number;
   readonly maxLogLimit: number;
   readonly defaultCwd: string;
@@ -103,6 +130,13 @@ export function resolveConfig(config: JjPluginConfig = {}): ResolvedJjConfig {
     guardCreateWorktree: config.guardCreateWorktree ?? true,
     readOnlyGitNotice: config.readOnlyGitNotice ?? true,
     preferJjContext: config.preferJjContext ?? true,
+    // Commit-description policy (2026-10-30): inherit history, ask when undecidable,
+    // allow presets/custom config. Keep in lockstep with the Config schema above.
+    commitGuidance: config.commitGuidance ?? true,
+    commitStyle: config.commitStyle ?? 'auto',
+    commitStyleCustom: config.commitStyleCustom ?? '',
+    preferSplitCommits: config.preferSplitCommits ?? true,
+    commitStyleSampleLimit: config.commitStyleSampleLimit ?? 30,
     defaultLogLimit: config.defaultLogLimit ?? 30,
     maxLogLimit: config.maxLogLimit ?? 200,
     defaultCwd: config.defaultCwd ?? '',
@@ -133,5 +167,11 @@ export function assertServiceableConfig(config: ResolvedJjConfig): void {
   }
   if (!Number.isSafeInteger(config.maxLogLimit) || config.maxLogLimit < config.defaultLogLimit) {
     throw new Error('dsh-jj: `maxLogLimit` must be a safe integer >= defaultLogLimit');
+  }
+  if (config.commitStyle === 'custom' && config.commitStyleCustom.trim().length === 0) {
+    throw new Error("dsh-jj: `commitStyle: 'custom'` requires a non-empty `commitStyleCustom` with the style rules");
+  }
+  if (!Number.isSafeInteger(config.commitStyleSampleLimit) || config.commitStyleSampleLimit <= 0) {
+    throw new Error('dsh-jj: `commitStyleSampleLimit` must be a positive safe integer');
   }
 }
