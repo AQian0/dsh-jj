@@ -10,6 +10,7 @@
 
 import z from '@deepseek-ai/schemastery';
 import type { CommitStyleId } from './commit-style.ts';
+import type { MultiSessionGuidanceMode } from './multi-session.ts';
 
 /** Cordis config schema for every dsh-jj entry point. */
 export const Config = z.object({
@@ -32,6 +33,14 @@ export const Config = z.object({
   readOnlyGitNotice: z.boolean().default(true),
   // Session-start model-visible context: 'this is a jj workspace, prefer jj'.
   preferJjContext: z.boolean().default(true),
+  // Multi-session policy (2026-10-30): when several top-level DSH sessions work in the
+  // same jj project at the same time, the model is told to isolate in its own jj
+  // workspace before writing and to rebase the finished stack onto `rebaseTarget`.
+  // `auto` detects live sessions in this DSH process; `always` also covers separate
+  // dsh processes (where in-process detection cannot see peers); `off` disables it.
+  multiSessionGuidance: z.union(['auto', 'always', 'off']).default('auto'),
+  // End-of-task rebase destination used by the multi-session guidance (jj revset).
+  rebaseTarget: z.string().default('trunk()'),
   // Commit-description policy (2026-10-30): by default inherit the style of the
   // repository's recent jj/Git descriptions; when history cannot decide, the model
   // asks the user (Conventional Commits / Angular / Gitmoji / plain / custom).
@@ -64,6 +73,10 @@ export interface JjPluginConfig {
   readonly guardCreateWorktree?: boolean;
   readonly readOnlyGitNotice?: boolean;
   readonly preferJjContext?: boolean;
+  /** Multi-session guidance: `auto` (detect live sessions), `always`, or `off` (default auto). */
+  readonly multiSessionGuidance?: MultiSessionGuidanceMode;
+  /** jj revset used as the end-of-task rebase destination in the multi-session guidance (default `trunk()`). */
+  readonly rebaseTarget?: string;
   /** Inject the commit-description style and split-commit guidance into the model context (default true). */
   readonly commitGuidance?: boolean;
   /** Commit-description style: inherit history (`auto`), a preset, or `custom` (default auto). */
@@ -94,6 +107,8 @@ export interface ResolvedJjConfig {
   readonly guardCreateWorktree: boolean;
   readonly readOnlyGitNotice: boolean;
   readonly preferJjContext: boolean;
+  readonly multiSessionGuidance: MultiSessionGuidanceMode;
+  readonly rebaseTarget: string;
   readonly commitGuidance: boolean;
   readonly commitStyle: CommitStyleId;
   readonly commitStyleCustom: string;
@@ -130,6 +145,11 @@ export function resolveConfig(config: JjPluginConfig = {}): ResolvedJjConfig {
     guardCreateWorktree: config.guardCreateWorktree ?? true,
     readOnlyGitNotice: config.readOnlyGitNotice ?? true,
     preferJjContext: config.preferJjContext ?? true,
+    // Multi-session policy (2026-10-30): detect parallel sessions by default, allow
+    // `always` for cross-process setups, and let the operator pin the rebase target.
+    // Keep in lockstep with the Config schema above.
+    multiSessionGuidance: config.multiSessionGuidance ?? 'auto',
+    rebaseTarget: config.rebaseTarget ?? 'trunk()',
     // Commit-description policy (2026-10-30): inherit history, ask when undecidable,
     // allow presets/custom config. Keep in lockstep with the Config schema above.
     commitGuidance: config.commitGuidance ?? true,
@@ -167,6 +187,9 @@ export function assertServiceableConfig(config: ResolvedJjConfig): void {
   }
   if (!Number.isSafeInteger(config.maxLogLimit) || config.maxLogLimit < config.defaultLogLimit) {
     throw new Error('dsh-jj: `maxLogLimit` must be a safe integer >= defaultLogLimit');
+  }
+  if (config.rebaseTarget.trim().length === 0) {
+    throw new Error('dsh-jj: `rebaseTarget` must be a non-empty jj revset');
   }
   if (config.commitStyle === 'custom' && config.commitStyleCustom.trim().length === 0) {
     throw new Error("dsh-jj: `commitStyle: 'custom'` requires a non-empty `commitStyleCustom` with the style rules");

@@ -52,6 +52,12 @@ function bound(text: string, limit: number): { text: string; truncated: boolean 
   return text.length <= limit ? { text, truncated: false } : { text: text.slice(0, limit), truncated: true };
 }
 
+/** How `jj rebase` selects the revisions to move (jj 0.46). */
+export type JjRebaseMode = 'revisions' | 'source' | 'branch';
+
+/** `JjRebaseMode` → jj command-line flag. */
+const REBASE_MODE_FLAGS: Readonly<Record<JjRebaseMode, string>> = { revisions: '-r', source: '-s', branch: '-b' };
+
 function badInput(message: string, argv: readonly string[] = []): JjError {
   return new JjError('JJ_BAD_INPUT', message, { argv, exitCode: null, stderr: '', stdout: '' });
 }
@@ -548,11 +554,28 @@ export class JjOperations {
     return { name, target, moved: existing !== undefined };
   }
 
-  /** `jj rebase -r <revision> -d <destination>`. */
-  async rebase(cwd: string, revision: string, destination: string, signal?: AbortSignal): Promise<string> {
-    const argv = ['rebase', '-r', revision, '-d', destination];
+  /**
+   * `jj rebase (-r|-s|-b) <revision> -d <destination>`.
+   *
+   * jj 0.46 distinguishes the selection modes sharply: `-r` moves only the named
+   * revisions and leaves their descendants behind (re-parented onto the old
+   * parents), while `-s` moves the revision together with all of its descendants.
+   * Moving a whole stack (the multi-session hand-off) therefore needs
+   * `mode: 'source'`; the default stays `revisions` to preserve existing callers.
+   */
+  async rebase(
+    cwd: string,
+    revision: string,
+    destination: string,
+    signal?: AbortSignal,
+    mode: JjRebaseMode = 'revisions',
+  ): Promise<string> {
+    const flag = REBASE_MODE_FLAGS[mode] ?? '-r';
+    const argv = ['rebase', flag, revision, '-d', destination];
     const result = await this.run(cwd, argv, signal);
-    return bound(result.stdout.trim(), 2 * 1024).text;
+    // jj prints the "Rebased N commits…" status on stderr even on success, so fall
+    // back to it when stdout is empty; the model gets a real result summary.
+    return bound(result.stdout.trim() || result.stderr.trim(), 2 * 1024).text;
   }
 
   /** Read `@` (or a revset) as a {@link JjChangeRecord}. */
