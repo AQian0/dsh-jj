@@ -101,7 +101,7 @@ jobs:
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             exit 0
           fi
-          args=(--verify-tag --generate-notes --title "@aqian0/dsh-jj ${RELEASE_TAG}")
+          args=(--verify-tag --generate-notes --title "${RELEASE_TAG}")
           if [[ "${RELEASE_TAG#v}" == *-* ]]; then
             args+=(--prerelease)
           fi
