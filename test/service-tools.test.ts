@@ -150,7 +150,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
-test('all 13 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
+test('all 15 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-defs');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   fx.cwd = repo;
@@ -164,7 +164,9 @@ test('all 13 jj_* tools are defined with contract names, descriptions, and schem
     'jj_log',
     'jj_diff',
     'jj_new',
+    'jj_commit',
     'jj_describe',
+    'jj_commit_style',
     'jj_squash',
     'jj_undo',
     'jj_op_log',
@@ -175,7 +177,19 @@ test('all 13 jj_* tools are defined with contract names, descriptions, and schem
     'jj_rebase',
   ];
   assert.deepEqual([...byName.keys()], expected);
-  const antiConfusion = new Set(['jj_status', 'jj_log', 'jj_diff', 'jj_new', 'jj_describe', 'jj_squash', 'jj_undo', 'jj_workspace_add', 'jj_rebase']);
+  const antiConfusion = new Set([
+    'jj_status',
+    'jj_log',
+    'jj_diff',
+    'jj_new',
+    'jj_commit',
+    'jj_describe',
+    'jj_commit_style',
+    'jj_squash',
+    'jj_undo',
+    'jj_workspace_add',
+    'jj_rebase',
+  ]);
   for (const definition of definitions) {
     assert.match(definition.description, /Jujutsu \(jj\)/, `${definition.name} must name jj`);
     if (antiConfusion.has(definition.name)) {
@@ -204,7 +218,9 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
     jj_log: { revset: '@', limit: 3 },
     jj_diff: { revset: '@', format: 'stat', paths: [] },
     jj_new: { message: 'from tool', parents: [] },
+    jj_commit: { message: 'chore: commit from tool' },
     jj_describe: { message: 'described by tool', revset: '@' },
+    jj_commit_style: {},
     jj_squash: { from: '@', into: '@-', useDestinationMessage: true },
     jj_undo: {},
     jj_op_log: { limit: 3 },
@@ -242,12 +258,13 @@ test('T20: every tool path runs jj only, never git', async (t) => {
   const operations = new JjOperations({ runJj, config: {} });
   const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
 
-  for (const name of ['jj_status', 'jj_log', 'jj_diff', 'jj_op_log', 'jj_workspace_list', 'jj_bookmark_list']) {
+  for (const name of ['jj_status', 'jj_log', 'jj_diff', 'jj_op_log', 'jj_workspace_list', 'jj_bookmark_list', 'jj_commit_style']) {
     const definition = definitions.get(name)!;
     await definition.execute(name === 'jj_log' ? { revset: '@', limit: 2 } : {}, fakeExec());
   }
   await definitions.get('jj_bookmark_set')!.execute({ name: 'argv-bookmark', revset: '@' }, fakeExec());
   await definitions.get('jj_new')!.execute({ message: 'argv new' }, fakeExec());
+  await definitions.get('jj_commit')!.execute({ message: 'chore: argv commit' }, fakeExec());
   await definitions.get('jj_describe')!.execute({ message: 'argv described' }, fakeExec());
 
   assert.ok(calls.length >= 8, `expected many jj calls, saw ${calls.length}`);
@@ -322,11 +339,217 @@ test('registerJjTools registers and disposes every tool', async (t) => {
     },
   };
   const dispose = registerJjTools(host, { service: toolService(fx, operations), config: {} });
-  assert.equal(registered.length, 13);
+  assert.equal(registered.length, 15);
   dispose();
   assert.equal(registered.length, 0);
   dispose();
   assert.equal(registered.length, 0, 'disposer is idempotent');
+});
+
+test('operation layer: jj commit describes the change, splits paths, and starts a new @', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-ops-commit');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await fx.run(['bash', '-c', 'printf one > one.txt; printf two > two.txt'], { cwd: repo, timeoutMs: 5_000 });
+
+  // Partial commit: only one.txt lands in the described change; two.txt stays in @.
+  const partial = await operations.commit(repo, 'feat: commit one only', ['one.txt']);
+  assert.equal(partial.committed.description, 'feat: commit one only');
+  assert.equal(partial.committed.currentWorkingCopy, false, 'the committed change is no longer @');
+  assert.equal(partial.committed.empty, false);
+  assert.deepEqual(partial.warnings, [], 'a successful commit has no warnings');
+  assert.equal(partial.workingCopy.currentWorkingCopy, true);
+  assert.equal(partial.workingCopy.empty, false, 'the remaining path stays in the new working copy');
+  const status = await operations.status(repo);
+  assert.deepEqual([...status.changedPaths], ['two.txt']);
+
+  // A pathspec that matches nothing is a zero-exit jj warning: it must be surfaced,
+  // and the empty commit must be visible instead of silently passing as a split.
+  await fx.run(['bash', '-c', 'printf leftover > leftover.txt'], { cwd: repo, timeoutMs: 5_000 });
+  const missed = await operations.commit(repo, 'feat: misses everything', ['missing.txt']);
+  assert.equal(missed.committed.empty, true, 'jj created an empty change for the non-matching path');
+  assert.ok(missed.warnings.length > 0, 'the jj warning is surfaced');
+  assert.match(missed.warnings.join('\n'), /do not match|No changes matched/);
+  assert.deepEqual([...missed.workingCopy.paths].sort(), ['leftover.txt', 'two.txt'], 'the real changes stay in the working copy');
+
+  // Full commit: the working copy becomes a fresh empty change.
+  const full = await operations.commit(repo, 'chore: finish the change', []);
+  assert.equal(full.committed.description, 'chore: finish the change');
+  assert.equal(full.workingCopy.empty, true);
+  assert.equal(full.workingCopy.currentWorkingCopy, true);
+  const committedLog = await operations.log(repo, '@-', 1);
+  assert.equal(committedLog[0]?.description, 'chore: finish the change');
+
+  // Description samples carry full descriptions (newest first), not just subjects.
+  const samples = await operations.descriptionSamples(repo, '::@', 10);
+  assert.ok(samples.some((description) => description.includes('chore: finish the change')));
+
+  // Invalid input is rejected before spawning.
+  calls.length = 0;
+  await assert.rejects(() => operations.commit(repo, '   ', []), /non-empty description/);
+  await assert.rejects(() => operations.commit(repo, 'feat: x', ['-bad']), /must not start/);
+  await assert.rejects(() => operations.commit(repo, 'feat: x', ['   ']), /must be non-empty/);
+  assert.equal(calls.length, 0);
+  for (const argv of calls) assert.equal(argv[0], 'jj');
+});
+
+test('jj_commit tool commits the change and reports the fresh working copy', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-tool-commit');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  await fx.run(['bash', '-c', 'printf one > one.txt; printf two > two.txt'], { cwd: repo, timeoutMs: 5_000 });
+
+  const result = (await definitions.get('jj_commit')!.execute({ message: 'feat: tool commit', paths: ['one.txt'] }, fakeExec())) as {
+    readonly committed: { readonly description: string; readonly empty: boolean; readonly currentWorkingCopy: boolean };
+    readonly workingCopy: { readonly empty: boolean; readonly currentWorkingCopy: boolean };
+    readonly committedPaths: readonly string[];
+    readonly workingCopyPaths: readonly string[];
+    readonly warnings: readonly string[];
+  };
+  assert.equal(result.committed.description, 'feat: tool commit');
+  assert.equal(result.committed.currentWorkingCopy, false);
+  assert.equal(result.workingCopy.currentWorkingCopy, true);
+  assert.equal(result.workingCopy.empty, false);
+  assert.deepEqual([...result.committedPaths], ['one.txt']);
+  assert.deepEqual([...result.workingCopyPaths], ['two.txt']);
+  assert.deepEqual([...result.warnings], []);
+  const status = await operations.status(repo);
+  assert.deepEqual([...status.changedPaths], ['two.txt']);
+
+  // Non-matching paths: the tool must expose the warning, not report a clean split.
+  const missed = (await definitions.get('jj_commit')!.execute({ message: 'feat: tool miss', paths: ['missing.txt'] }, fakeExec())) as {
+    readonly committed: { readonly empty: boolean };
+    readonly workingCopyPaths: readonly string[];
+    readonly warnings: readonly string[];
+  };
+  assert.equal(missed.committed.empty, true);
+  assert.ok(missed.warnings.length > 0);
+  assert.deepEqual([...missed.workingCopyPaths], ['two.txt'], 'the real change remains in the working copy');
+});
+
+test('jj_commit_style inherits Conventional history, asks when undecidable, and honours config', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-tool-style');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const styleTool = (policy = resolveConfig({})) => {
+    // Commit policy is owned by the runtime entry (`ctx.jj`), i.e. `operations.config`;
+    // the second config passed to toolContext is the tools row and must not fork it.
+    const runtimeOperations = new JjOperations({ runJj, config: policy });
+    return definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, runtimeOperations)))).get('jj_commit_style')!;
+  };
+
+  interface StyleResult {
+    readonly style: string;
+    readonly source: string;
+    readonly needsUserChoice: boolean;
+    readonly guidance: string;
+    readonly confidence: string;
+    readonly sampleCount: number;
+    readonly examples: readonly string[];
+    readonly choices: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+  }
+
+  // Empty history: the tool must not guess — it returns the ask-the-user choices.
+  const unknown = (await styleTool().execute({}, fakeExec())) as StyleResult;
+  assert.equal(unknown.style, 'auto');
+  assert.equal(unknown.source, 'needs-user-choice');
+  assert.equal(unknown.needsUserChoice, true);
+  assert.equal(unknown.choices.length, 5);
+  assert.ok(unknown.choices.some((choice) => choice.id === 'angular'));
+  assert.match(unknown.guidance, /ask_user_question/);
+
+  // Three Conventional commits: the tool inherits the repository style.
+  for (const message of ['feat(core): add alpha', 'fix(parser): handle beta', 'docs: explain gamma']) {
+    await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'commit', '-m', message], repo);
+  }
+  const detected = (await styleTool().execute({}, fakeExec())) as StyleResult;
+  assert.equal(detected.style, 'conventional');
+  assert.equal(detected.source, 'history');
+  assert.equal(detected.needsUserChoice, false);
+  assert.equal(detected.confidence, 'high');
+  assert.ok(detected.sampleCount >= 3);
+  assert.match(detected.guidance, /Conventional Commits/);
+  assert.ok(detected.examples.includes('feat(core): add alpha'));
+
+  // P3: the limit counts non-empty descriptions, not log entries (the empty @ and
+  // the empty root commit must not consume the budget).
+  const limited = (await styleTool(resolveConfig({ commitStyleSampleLimit: 3 })).execute({}, fakeExec())) as StyleResult;
+  assert.equal(limited.style, 'conventional');
+  assert.equal(limited.sampleCount, 3, 'three decent commits are enough even with the empty @ and root');
+  assert.equal(limited.needsUserChoice, false);
+
+  // Body/footer habits are observable: examples carry full descriptions, not just subjects.
+  await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'commit', '-m', 'feat(api): add endpoint\n\nExplain the why in the body.\n\nRefs: #42'],
+    repo,
+  );
+  const withBody = (await styleTool().execute({}, fakeExec())) as StyleResult;
+  assert.ok(
+    withBody.examples.some((example) => example.includes('Explain the why in the body.') && example.includes('Refs: #42')),
+    `full descriptions reach the model: ${JSON.stringify(withBody.examples)}`,
+  );
+
+  // A tools-row-only commitStyle must not contradict the runtime policy (single source of truth).
+  const toolsRowOnly = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({ commitStyle: 'angular' }))),
+  ).get('jj_commit_style')!;
+  const runtimeOwnsPolicy = (await toolsRowOnly.execute({}, fakeExec())) as StyleResult;
+  assert.equal(runtimeOwnsPolicy.style, 'conventional', 'runtime-row auto still detects history; tools-row config is ignored');
+  assert.equal(runtimeOwnsPolicy.source, 'history');
+
+  // The sampling bound comes from the tools row (`config.maxLogLimit`), and a
+  // tools-row commitStyleSampleLimit is inert like the style itself.
+  const toolsRowLimit = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({ commitStyleSampleLimit: 1 }))),
+  ).get('jj_commit_style')!;
+  const ignoredLimit = (await toolsRowLimit.execute({}, fakeExec())) as StyleResult;
+  assert.ok(ignoredLimit.sampleCount > 1, 'tools-row sample limit is ignored; the runtime policy applies');
+
+  // A configured preset wins over history.
+  const angular = (await styleTool(resolveConfig({ commitStyle: 'angular' })).execute({}, fakeExec())) as StyleResult;
+  assert.equal(angular.style, 'angular');
+  assert.equal(angular.source, 'config');
+  assert.equal(angular.needsUserChoice, false);
+  assert.match(angular.guidance, /Angular commit convention/);
+
+  // A configured custom style supplies the rules verbatim.
+  const rules = 'lowercase Chinese subject, no prefix, body optional';
+  const custom = (await styleTool(resolveConfig({ commitStyle: 'custom', commitStyleCustom: rules })).execute({}, fakeExec())) as StyleResult;
+  assert.equal(custom.style, 'custom');
+  assert.equal(custom.source, 'config');
+  assert.ok(custom.guidance.includes(rules));
+
+  // Style sampling must stay jj-only as well.
+  assert.ok(calls.length > 0);
+  for (const argv of calls) assert.equal(argv[0], 'jj', `unexpected non-jj program: ${argv.join(' ')}`);
+});
+
+test('descriptionSamples keeps complete records when the bounded output is truncated', async () => {
+  // A large full-description sample can trip maxOutputBytes; the partial tail must
+  // be dropped instead of failing the whole style probe.
+  const operations = new JjOperations({
+    runJj: async () => ({
+      exitCode: 0,
+      signal: null,
+      stdout: '"feat: first description"\n"feat: second description with a long body',
+      stderr: '',
+      truncated: true,
+      killedByTimeout: false,
+    }),
+  });
+  const samples = await operations.descriptionSamples('/anywhere', '::@', 5);
+  assert.deepEqual([...samples], ['feat: first description']);
 });
 
 test('TPL_STATUS is the contract template and parses into a change', async (t) => {

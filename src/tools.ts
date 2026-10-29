@@ -11,6 +11,13 @@
 
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
+import {
+  COMMIT_STYLE_CHOICES,
+  COMMIT_STYLE_IDS,
+  CONCRETE_COMMIT_STYLE_IDS,
+  detectCommitStyle,
+  resolveCommitStylePolicy,
+} from './commit-style.ts';
 import { Config, resolveConfig, type JjPluginConfig, type ResolvedJjConfig } from './config.ts';
 import type { JjOperations } from './service.ts';
 import type { VcsDescriptor, VcsKind } from './types.ts';
@@ -115,11 +122,15 @@ function workspaceFields(descriptor: VcsDescriptor): { kind: 'jj-colocated' | 'j
  * Build every `jj_*` tool definition (contract §7.3).
  *
  * @param context - service access, resolved config, host, and the cwd resolver.
- * @returns the 13 tool definitions in a stable order.
+ * @returns the 15 tool definitions in a stable order.
  */
 export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   const { service, config } = context;
   const operations = service.operations;
+  // Commit-description policy is owned by the runtime entry (`ctx.jj`) so the
+  // session prompt and jj_commit_style cannot disagree; the tools row only carries
+  // tool-specific tuning (limits, default cwd, …).
+  const commitConfig = operations.config;
 
   return [
     defineTool({
@@ -254,7 +265,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_new',
       description:
-        'Create a new Jujutsu (jj) change on top of the given parents and make it the working copy (@). This is jj, not git: the previous change keeps its identity and is not re-created, and no commit step is needed — the new change is already real.',
+        'Create a new Jujutsu (jj) change on top of the given parents and make it the working copy (@). This is jj, not git: the previous change keeps its identity and is not re-created, and no commit step is needed — the new change is already real. To finish the current change with a description and start the next one in a single step, use jj_commit. Prefer a series of small changes over one growing working copy.',
       parameters: {
         message: { type: 'string', description: 'Description for the new change. Omit to leave it undescribed; jj allows an undescribed working-copy change.' },
         parents: { type: 'array', items: { type: 'string' }, description: 'Revsets to use as parents. Omit to start on top of the current @ (jj moves the working copy).' },
@@ -269,9 +280,53 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     }),
 
     defineTool({
+      name: 'jj_commit',
+      description:
+        'Commit the current Jujutsu (jj) working-copy change with a description and start a new change on top. This is jj, not git: jj commit is jj describe plus jj new, so the described change stays in history and a new working-copy change is created (empty unless paths leave changes behind); there is no staging area. Prefer it after each coherent step to keep the change stack reviewable for humans, and pass paths to commit only part of the working copy when splitting work. Follow the repository description style — jj_commit_style reports it.',
+      parameters: {
+        message: {
+          type: 'string',
+          description: "Description for the change being committed; follow the repository's commit style (call jj_commit_style first when unsure).",
+          required: true,
+        },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional repository-relative paths to commit only those changes; the remaining changes stay in the new working-copy change.',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            committed: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
+            workingCopy: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
+            committedPaths: { type: 'array', items: { type: 'string' }, required: true },
+            workingCopyPaths: { type: 'array', items: { type: 'string' }, required: true },
+            warnings: { type: 'array', items: { type: 'string' }, required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const cwd = await context.cwdFor(exec);
+        await requireWorkspace(context, cwd, exec.signal);
+        const result = await operations.commit(cwd, args.message, args.paths ?? [], exec.signal);
+        return {
+          committed: changeView(result.committed),
+          workingCopy: changeView(result.workingCopy),
+          committedPaths: [...result.committed.paths],
+          workingCopyPaths: [...result.workingCopy.paths],
+          warnings: [...result.warnings],
+        };
+      },
+    }),
+
+    defineTool({
       name: 'jj_describe',
       description:
-        'Set the description (message) of a Jujutsu (jj) revision. This is jj, not git: there is no separate commit step, so this edits the change in place instead of amending or committing; descendants are rebased automatically when metadata changes.',
+        'Set the description (message) of a Jujutsu (jj) revision. This is jj, not git: there is no separate commit step, so this edits the change in place instead of amending or committing; descendants are rebased automatically when metadata changes. Follow the repository description style — jj_commit_style reports it. To finish the current change and start a new one in a single step, prefer jj_commit.',
       parameters: {
         message: { type: 'string', description: 'New description. An empty string clears the description.', required: true },
         revset: { type: 'string', description: "jj revset of the change to describe; defaults to '@'." },
@@ -282,6 +337,92 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         await requireWorkspace(context, cwd, exec.signal);
         const change = await operations.describeChange(cwd, args.revset ?? '@', args.message, exec.signal);
         return changeView(change);
+      },
+    }),
+
+    defineTool({
+      name: 'jj_commit_style',
+      description:
+        "Report the commit-description style used by this Jujutsu (jj) repository's recent descriptions, or the style configured for dsh-jj. This is jj, not git: it samples descriptions reachable from the working copy with jj log and classifies them as Conventional Commits/Angular, Gitmoji, plain subjects, mixed, or unknown. Call it before writing a description when the style is unclear; when needsUserChoice is true, ask the user to choose a style (the choices are returned) before committing.",
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            style: { type: 'string', enum: [...COMMIT_STYLE_IDS], required: true },
+            source: { type: 'string', enum: ['config', 'history', 'needs-user-choice', 'pending-history'], required: true },
+            needsUserChoice: { type: 'boolean', required: true },
+            guidance: { type: 'string', required: true },
+            detectionStyle: { type: 'string', enum: ['conventional', 'gitmoji', 'plain', 'mixed', 'unknown'], required: true },
+            confidence: { type: 'string', enum: ['high', 'medium', 'low', 'none'], required: true },
+            sampleCount: { type: 'integer', required: true },
+            counts: {
+              type: 'object',
+              additionalProperties: false,
+              required: true,
+              properties: {
+                conventional: { type: 'integer', required: true },
+                gitmoji: { type: 'integer', required: true },
+                plain: { type: 'integer', required: true },
+              },
+            },
+            reason: { type: 'string', required: true },
+            choices: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', enum: [...CONCRETE_COMMIT_STYLE_IDS, 'custom'], required: true },
+                  label: { type: 'string', required: true },
+                  summary: { type: 'string', required: true },
+                },
+              },
+            },
+            examples: { type: 'array', items: { type: 'string' }, required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(_args, exec) {
+        const cwd = await context.cwdFor(exec);
+        await requireWorkspace(context, cwd, exec.signal);
+        const sampleLimit = Math.max(1, Math.min(commitConfig.commitStyleSampleLimit, config.maxLogLimit));
+        // `@` and the root commit are usually empty, so read a few extra log entries
+        // to collect `sampleLimit` non-empty descriptions; the tools row's maxLogLimit
+        // (which also bounds jj_log) still caps this extra process output.
+        const readLimit = Math.min(sampleLimit + 5, Math.max(sampleLimit, config.maxLogLimit));
+        const fetched = await operations.descriptionSamples(cwd, '::@', readLimit, exec.signal);
+        const descriptions = fetched
+          .map((description) => description.trim())
+          .filter((description) => description.length > 0)
+          .slice(0, sampleLimit);
+        const detection = detectCommitStyle(descriptions);
+        const policy = resolveCommitStylePolicy({
+          configured: commitConfig.commitStyle,
+          customStyle: commitConfig.commitStyleCustom,
+          detection,
+        });
+        return {
+          style: policy.style,
+          source: policy.source,
+          needsUserChoice: policy.needsUserChoice,
+          guidance: policy.guidance,
+          detectionStyle: detection.style,
+          confidence: detection.confidence,
+          sampleCount: detection.sampleCount,
+          counts: {
+            conventional: detection.counts.conventional,
+            gitmoji: detection.counts.gitmoji,
+            plain: detection.counts.plain,
+          },
+          reason: detection.reason,
+          choices: COMMIT_STYLE_CHOICES.map((choice) => ({ id: choice.id, label: choice.label, summary: choice.summary })),
+          // Full examples (bounded) so the model can copy subject, body, and footer habits.
+          examples: descriptions.slice(0, 8).map((description) => (description.length > 600 ? `${description.slice(0, 600)}…` : description)),
+        };
       },
     }),
 
