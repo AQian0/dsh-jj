@@ -57,16 +57,16 @@ test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', 
   await ensureLinks();
   const result = await execFileAsync(tscCommand(), ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
   assert.equal(String(result.stderr).trim(), '', `tsc stderr: ${String(result.stderr)}`);
-  for (const file of ['index.js', 'tools.js', 'guard.js', 'detect.js', 'git-command.js', 'types.js', 'config.js']) {
+  for (const file of ['index.js', 'tools.js', 'guard.js', 'detect.js', 'git-command.js', 'types.js', 'config.js', 'commit-style.js', 'prompt-context.js', 'service.js']) {
     assert.ok(existsSync(join(packageDir, 'lib', file)), `missing build artifact lib/${file}`);
   }
-  for (const file of ['index.d.ts', 'tools.d.ts', 'guard.d.ts', 'detect.d.ts', 'git-command.d.ts', 'types.d.ts', 'config.d.ts']) {
+  for (const file of ['index.d.ts', 'tools.d.ts', 'guard.d.ts', 'detect.d.ts', 'git-command.d.ts', 'types.d.ts', 'config.d.ts', 'commit-style.d.ts', 'prompt-context.d.ts', 'service.d.ts']) {
     assert.ok(existsSync(join(packageDir, 'lib', 'types', file)), `missing declaration lib/types/${file}`);
   }
 });
 
 test('pure modules stay free of runtime @deepseek-ai imports', () => {
-  for (const file of ['detect.js', 'git-command.js', 'types.js']) {
+  for (const file of ['detect.js', 'git-command.js', 'types.js', 'commit-style.js']) {
     const source = readFileSync(join(packageDir, 'lib', file), 'utf8');
     assert.ok(!/from\s*"@deepseek-ai\//.test(source), `${file} must not import a DSH package at runtime`);
   }
@@ -123,6 +123,9 @@ test('the bare package name resolves each documented export', async () => {
   assert.equal(typeof root.classifyGitInvocation, 'function');
   assert.equal(typeof root.gitEquivalence, 'function');
   assert.equal(typeof root.installGitConfusionGuard, 'function');
+  assert.equal(typeof root.detectCommitStyle, 'function', 'commit-description policy is part of the public API');
+  assert.equal(typeof root.resolveCommitStylePolicy, 'function');
+  assert.equal(typeof root.jjPreferenceContextText, 'function');
 });
 
 test('the built guard entry installs a working guard against a real jj workspace', async (t) => {
@@ -148,6 +151,46 @@ test('the built runtime entry registers the ctx.jj service on a real Cordis cont
   assert.equal(typeof service.warm, 'function');
   assert.equal(typeof service.operations.status, 'function');
   assert.equal(service.describe('jj-native'), 'Jujutsu (jj) native repository');
+});
+
+test('the runtime entry forwards the commit policy into the registered prompt context', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-apply-policy');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const { Context } = await import('@deepseek-ai/cordis');
+  const runtimeEntry = await import('@aqian0/dsh-jj');
+
+  interface CapturedPromptContext {
+    readonly name: string;
+    readonly text: (context: { readonly agent?: { readonly session?: unknown } } | undefined) => string;
+  }
+
+  /** Apply the runtime entry over a fresh Cordis context with the two DSH services faked. */
+  const applyWith = (config: Parameters<typeof runtimeEntry.apply>[1]): { captured: CapturedPromptContext[]; text: string } => {
+    const captured: CapturedPromptContext[] = [];
+    const ctx = new Context();
+    ctx.provide('systemPrompt');
+    ctx.set('systemPrompt', {
+      context: (context: CapturedPromptContext) => {
+        captured.push(context);
+        return () => {};
+      },
+      getContextOrder: () => 100,
+    });
+    ctx.provide('workingDirectory');
+    ctx.set('workingDirectory', { get: () => repo });
+    runtimeEntry.apply(ctx, config);
+    const text = captured[0]?.text({ agent: { session: { id: 'policy' } } }) ?? '';
+    return { captured, text };
+  };
+
+  const angular = applyWith({ preferJjContext: true, commitStyle: 'angular' });
+  assert.equal(angular.captured.length, 1, 'exactly one global prompt context is registered');
+  assert.equal(angular.captured[0]?.name, 'dsh-jj-workspace');
+  assert.match(angular.text, /Angular commit convention/, 'commitStyle reaches the model context');
+  assert.match(angular.text, /Commit granularity/, 'preferSplitCommits defaults on');
+
+  const disabled = applyWith({ preferJjContext: false, commitStyle: 'angular' });
+  assert.equal(disabled.captured.length, 0, 'preferJjContext:false registers no context at all');
 });
 
 /** Map a subpath step in the loadability loop to the emitted entry file. */
