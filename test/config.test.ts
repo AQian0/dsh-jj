@@ -58,3 +58,24 @@ test('commitStyleSampleLimit must be a positive safe integer', () => {
   }
   assert.doesNotThrow(() => assertServiceableConfig(resolveConfig({ commitStyleSampleLimit: 1 })));
 });
+test('resolveConfig applies the multi-session defaults', () => {
+  const resolved = resolveConfig({});
+  assert.equal(resolved.multiSessionGuidance, 'auto');
+  assert.equal(resolved.rebaseTarget, 'trunk()');
+});
+
+test('the schemastery Config defaults agree for the multi-session keys', () => {
+  const defaults = Config({}) as Record<string, unknown>;
+  for (const key of ['multiSessionGuidance', 'rebaseTarget'] as const) {
+    assert.deepEqual(defaults[key], resolveConfig({})[key], `default mismatch for ${key}`);
+  }
+  assert.throws(() => Config({ multiSessionGuidance: 'sometimes' } as never), /multiSessionGuidance/);
+});
+
+test('explicit multi-session config is preserved, and rebaseTarget must not be empty', () => {
+  const resolved = resolveConfig({ multiSessionGuidance: 'always', rebaseTarget: 'main' });
+  assert.equal(resolved.multiSessionGuidance, 'always');
+  assert.equal(resolved.rebaseTarget, 'main');
+  assert.throws(() => assertServiceableConfig(resolveConfig({ rebaseTarget: '   ' })), /rebaseTarget/);
+  assert.doesNotThrow(() => assertServiceableConfig(resolveConfig({ rebaseTarget: 'main@origin' })));
+});

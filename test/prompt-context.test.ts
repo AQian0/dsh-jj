@@ -172,3 +172,198 @@ test('the install options forward into the registered context text', () => {
   assert.match(text, /Gitmoji/);
   assert.match(text, /:sparkles:/);
 });
+// ---------------------------------------------------------------------------
+// Multi-session guidance (policy 2026-10-30): parallel top-level DSH sessions.
+// ---------------------------------------------------------------------------
+
+/** Sniff double: the current checkout is a colocated jj workspace. */
+function colocatedSniff(root: string, workspaceRoot = root, jjRepoPath = `${root}/.jj/repo`): (cwd: string) => VcsSniff {
+  return (cwd) => ({ cwd, kind: 'jj-colocated', jjRoot: workspaceRoot, jjRepoPath, diagnostics: [] });
+}
+
+test('a parallel session sharing the working copy gets the isolate-now guidance', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-parallel');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'parallel-current' };
+  const peer = { id: 'parallel-peer' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    liveRootSessions: () => [
+      { session, cwd: repo },
+      { session: peer, cwd: repo },
+    ],
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /Parallel sessions: another live DSH session is using this Jujutsu working copy/);
+  assert.match(text, /jj_workspace_add/);
+  assert.match(text, /standard rebase hand-off/);
+  assert.match(text, /Inherit this repository|Commit descriptions/, 'commit guidance is still present');
+});
+
+test('sibling workspaces of one repository get the coordination wording and the configured target', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-sibling');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const peerRoot = fx.path('repo-w2');
+  const session = { id: 'sibling-current' };
+  const peer = { id: 'sibling-peer' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, peerRoot]]) });
+  installJjPromptContext(host, {
+    sniff: (cwd) =>
+      cwd === peerRoot
+        ? { cwd, kind: 'jj-colocated', jjRoot: peerRoot, jjRepoPath: `${repo}/.jj/repo`, diagnostics: [] }
+        : colocatedSniff(repo)(cwd),
+    liveRootSessions: () => [
+      { session, cwd: repo },
+      { session: peer, cwd: peerRoot },
+    ],
+    rebaseTarget: 'main',
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /but works in a separate workspace/);
+  assert.match(text, /destination = main/);
+  assert.ok(!text.includes('jj_workspace_add'), 'an isolated peer needs no new workspace');
+});
+
+test('a subagent session (not a top-level root) never counts its parent as a parallel peer', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-subagent');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const parent = { id: 'parent-session' };
+  const child = { id: 'child-subagent' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[child, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    // The registry only reports roots: the child is absent, so it is a subagent.
+    liveRootSessions: () => [{ session: parent, cwd: repo }],
+  });
+  const text = captured[0].text({ agent: { session: child } });
+  assert.match(text, /Jujutsu \(jj\) workspace/, 'the jj preference still applies');
+  assert.ok(!text.includes('Parallel sessions'), 'a delegated subagent is not a parallel session peer');
+});
+
+test('multi-session guidance respects off/auto/always', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-modes');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'mode-current' };
+  const peer = { id: 'mode-peer' };
+  const peers = () => [
+    { session, cwd: repo },
+    { session: peer, cwd: repo },
+  ];
+  const make = (options: Parameters<typeof installJjPromptContext>[1]): string => {
+    const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo]]) });
+    installJjPromptContext(host, options);
+    return captured[0].text({ agent: { session } });
+  };
+  const sniff = colocatedSniff(repo);
+  assert.ok(!make({ sniff, liveRootSessions: peers, multiSessionGuidance: 'off' }).includes('Parallel sessions'));
+  assert.ok(!make({ sniff }).includes('Parallel sessions'), 'auto without a session source is fail-open');
+  assert.match(make({ sniff, multiSessionGuidance: 'always' }), /separate dsh processes/);
+  assert.match(make({ sniff, multiSessionGuidance: 'always' }), /standard rebase hand-off/);
+});
+
+test('a throwing live-session source never breaks the prompt context', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-throw');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'throw-current' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    liveRootSessions: () => {
+      throw new Error('agent registry exploded');
+    },
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /Jujutsu \(jj\) workspace/);
+  assert.ok(!text.includes('Parallel sessions'));
+});
+
+test('peeked peer descriptors avoid re-sniffing peer directories', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-peek');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'peek-current' };
+  const peer = { id: 'peek-peer' };
+  const peerRoot = fx.path('repo-peek-w2');
+  const sniffed: string[] = [];
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, peerRoot]]) });
+  installJjPromptContext(host, {
+    peek: (cwd) =>
+      cwd === repo
+        ? { kind: 'jj-colocated', root: repo, workspaceName: 'default', jjRepoPath: `${repo}/.jj/repo` }
+        : cwd === peerRoot
+          ? { kind: 'jj-colocated', root: peerRoot, workspaceName: 'w2', jjRepoPath: `${repo}/.jj/repo` }
+          : undefined,
+    sniff: (cwd) => {
+      sniffed.push(cwd);
+      return colocatedSniff(repo)(cwd);
+    },
+    liveRootSessions: () => [
+      { session, cwd: repo },
+      { session: peer, cwd: peerRoot },
+    ],
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /works in a separate workspace/);
+  assert.deepEqual(sniffed, [], 'both descriptors came from the warm cache');
+});
+
+test('a session that saw a parallel peer keeps the finish checklist after the peer ends', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-latch');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'latch-current' };
+  const peer = { id: 'latch-peer' };
+  const live = { running: true };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    liveRootSessions: () =>
+      live.running
+        ? [
+            { session, cwd: repo },
+            { session: peer, cwd: repo },
+          ]
+        : [{ session, cwd: repo }],
+  });
+
+  const whilePeerAlive = captured[0].text({ agent: { session } });
+  assert.match(whilePeerAlive, /Parallel sessions: another live DSH session/);
+  assert.match(whilePeerAlive, /standard rebase hand-off/);
+
+  live.running = false;
+  const afterPeerLeft = captured[0].text({ agent: { session } });
+  assert.ok(!afterPeerLeft.includes('Parallel sessions'), 'the stale peer claim is gone');
+  assert.match(afterPeerLeft, /standard rebase hand-off/, 'the hand-off checklist is latched for the rest of the session');
+});
+
+test('subagents never receive multi-session guidance, even in always mode', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-subagent-always');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const parent = { id: 'always-parent' };
+  const child = { id: 'always-child' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[child, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    multiSessionGuidance: 'always',
+    // The child is absent from roots(), so it is a subagent, not a parallel session.
+    liveRootSessions: () => [{ session: parent, cwd: repo }],
+  });
+  const text = captured[0].text({ agent: { session: child } });
+  assert.match(text, /Jujutsu \(jj\) workspace/);
+  assert.ok(!text.includes('Parallel sessions'), 'a subagent is not an independent session');
+  assert.ok(!text.includes('standard rebase hand-off'), 'no hand-off checklist for delegated work');
+});
+
+test("'always' mode still contributes generically when the host enumerates sessions", async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-always-source');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'always-source-current' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    multiSessionGuidance: 'always',
+    liveRootSessions: () => [{ session, cwd: repo }],
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /separate dsh processes/);
+  assert.match(text, /standard rebase hand-off/);
+});

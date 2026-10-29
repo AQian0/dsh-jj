@@ -16,6 +16,7 @@ import type { VcsKind } from './types.ts';
 import type {} from '@deepseek-ai/dsh-tools';
 import { assertServiceableConfig, Config, resolveConfig, type JjPluginConfig } from './config.ts';
 import { installGitConfusionGuard, type GitConfusionGuardHandle, type GuardServiceLike, type ToolGuardHost } from './guard.ts';
+import type { JjLiveSession } from './multi-session.ts';
 import { installJjPromptContext } from './prompt-context.ts';
 import { JjService } from './service.ts';
 
@@ -113,6 +114,49 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // provider reading `AssembleContext.agent` — the pattern DSH's own
   // `dsh-working-directory` uses — so one registration covers every agent and model.
   const get = (ctx as unknown as { get?: (name: string, strict?: boolean) => unknown }).get;
+  /** Non-strict service read: unavailable services must not break prompt assembly. */
+  const readService = <T>(name: string): T | undefined => {
+    try {
+      return get?.call(ctx, name) as T | undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * Enumerate the live TOP-LEVEL DSH sessions with their effective working directories.
+   *
+   * `ctx.agents.roots()` returns independent user sessions only (subagents are created
+   * with an owning parent and therefore never appear here). This is what lets the prompt
+   * context tell whether another session is working in the same jj project, without a
+   * subprocess: both the agent registry and `workingDirectory.get` are synchronous.
+   * Missing services (older hosts, headless assemblies) simply yield no detection.
+   */
+  const liveRootSessions = (): readonly JjLiveSession[] => {
+    const agents = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents');
+    let roots: readonly { session?: unknown }[] | undefined;
+    try {
+      roots = agents?.roots?.();
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(roots) || roots.length === 0) return [];
+    const workingDirectory = readService<{ get?: (session: unknown) => unknown }>('workingDirectory');
+    if (typeof workingDirectory?.get !== 'function') return [];
+    const sessions: JjLiveSession[] = [];
+    for (const entry of roots) {
+      const session = entry?.session;
+      if (session === undefined) continue;
+      let cwd: unknown;
+      try {
+        cwd = workingDirectory.get(session);
+      } catch {
+        continue;
+      }
+      if (typeof cwd !== 'string' || cwd.length === 0) continue;
+      sessions.push({ session, cwd });
+    }
+    return sessions;
+  };
   const promptContext = resolved.preferJjContext
     ? installJjPromptContext(
         { get: typeof get === 'function' ? get.bind(ctx) : undefined },
@@ -120,7 +164,14 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
           peek: (cwd) => {
             try {
               const service = get?.call(ctx, 'jj') as
-                | { peek?: (cwd: string) => { kind: VcsKind; root: string; workspaceName?: string } | undefined }
+                | {
+                    peek?: (cwd: string) => {
+                      kind: VcsKind;
+                      root: string;
+                      workspaceName?: string;
+                      jjRepoPath?: string;
+                    } | undefined;
+                  }
                 | undefined;
               return service?.peek?.(cwd);
             } catch {
@@ -134,6 +185,12 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
           commitStyle: resolved.commitStyle,
           commitStyleCustom: resolved.commitStyleCustom,
           preferSplitCommits: resolved.preferSplitCommits,
+          // Multi-session handling (policy 2026-10-30): when a parallel top-level session
+          // shares the project, ask this session to isolate in its own jj workspace and to
+          // rebase the finished stack onto `rebaseTarget`.
+          multiSessionGuidance: resolved.multiSessionGuidance,
+          rebaseTarget: resolved.rebaseTarget,
+          liveRootSessions,
         },
       )
     : () => {};
@@ -151,6 +208,13 @@ export {
   JJ_CONTEXT_NAME,
   JJ_CONTEXT_ORDER_FALLBACK,
 } from './prompt-context.ts';
+export {
+  DEFAULT_REBASE_TARGET,
+  MULTI_SESSION_GUIDANCE_MODES,
+  detectParallelSessions,
+  multiSessionFinishChecklistText,
+  multiSessionPromptText,
+} from './multi-session.ts';
 export {
   COMMIT_STYLE_CHOICES,
   COMMIT_STYLE_DOMINANCE,
@@ -234,8 +298,16 @@ export type {
   ConcreteCommitStyleId,
   ResolveCommitStyleOptions,
 } from './commit-style.ts';
-export type { JjPromptCommitOptions, JjPromptContextOptions } from './prompt-context.ts';
+export type { JjPeekedDescriptor, JjPromptCommitOptions, JjPromptContextOptions, JjPromptMultiSessionOptions } from './prompt-context.ts';
+export type {
+  JjLiveSession,
+  JjWorkspaceIdentity,
+  JjWorkspaceProbe,
+  MultiSessionGuidanceMode,
+  MultiSessionPromptOptions,
+  ParallelSessionDetection,
+} from './multi-session.ts';
 export type { JjChange, JjOperation } from './types.ts';
 export type { JjErrorCode } from './jj-command.ts';
-export type { JjCommitResult, JjStatusResult, JjUndoResult, JjWorkspaceAddResult } from './service.ts';
+export type { JjCommitResult, JjRebaseMode, JjStatusResult, JjUndoResult, JjWorkspaceAddResult } from './service.ts';
 export type { JjToolService, JjToolsHost } from './tools.ts';

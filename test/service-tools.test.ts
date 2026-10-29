@@ -127,6 +127,10 @@ test('operation layer: status, new, describe, log, diff, op log, bookmarks, work
   await operations.squash(repo, '@', '@-', undefined, true, undefined);
   const rebased = await operations.rebase(repo, '@', '@-', undefined);
   assert.equal(typeof rebased, 'string');
+  assert.ok(
+    calls.some((argv) => argv.includes('rebase') && argv.includes('-r')),
+    'the default rebase mode stays the current `-r` behavior',
+  );
 
   // every recorded call used the jj binary — never git
   assert.ok(calls.length > 10);
@@ -134,6 +138,51 @@ test('operation layer: status, new, describe, log, diff, op log, bookmarks, work
     assert.equal(argv[0], 'jj', `unexpected non-jj program: ${argv.join(' ')}`);
   }
   assert.ok(calls.every((argv) => argv.includes('--no-pager') && argv.includes('--color=never')), 'non-interactive flags are always present');
+});
+
+test('jj_rebase mode: source moves a whole stack onto the advanced trunk', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-rebase-source');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  // Build a two-commit session stack on top of main.
+  await mustRun(fx.run, ['jj', 'commit', '-m', 'chore: init'], repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  await fx.run(['bash', '-c', 'printf b > b.txt'], { cwd: repo, timeoutMs: 5_000 });
+  await mustRun(fx.run, ['jj', 'commit', '-m', 'feat: one'], repo);
+  await fx.run(['bash', '-c', 'printf c > c.txt'], { cwd: repo, timeoutMs: 5_000 });
+  await mustRun(fx.run, ['jj', 'commit', '-m', 'feat: two'], repo);
+  const stack = await operations.log(repo, 'main..@', 10, undefined);
+  const first = stack.find((change) => change.description === 'feat: one');
+  const second = stack.find((change) => change.description === 'feat: two');
+  assert.ok(first !== undefined, 'the stack contains its first change');
+  assert.ok(second !== undefined, 'the stack contains its last change');
+
+  // Advance main while the session works (the shared trunk moves).
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'feat: advance'], repo);
+  await fx.run(['bash', '-c', 'printf d > d.txt'], { cwd: repo, timeoutMs: 5_000 });
+  await mustRun(fx.run, ['jj', 'commit', '-m', 'feat: advance'], repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+
+  const message = await operations.rebase(repo, first.changeId, 'main', undefined, 'source');
+  assert.match(message, /Rebased/);
+  // Change ids survive rewrites, so the rebased stack can be inspected and must now
+  // sit on top of the advanced trunk: feat two's ancestry contains feat one AND the
+  // advance commit. (With `-r` the stack would be split and the advance missing here.)
+  const ancestry = await operations.log(repo, `::${second.changeId}`, 20, undefined);
+  const descriptions = ancestry.map((change) => change.description).filter((description) => description.length > 0);
+  assert.deepEqual(
+    descriptions.slice(0, 3),
+    ['feat: two', 'feat: one', 'feat: advance'],
+    'source mode rebased the whole stack onto the advanced main',
+  );
+  assert.ok(
+    calls.some((argv) => argv.includes('rebase') && argv.includes('-s')),
+    'source mode uses `jj rebase -s` instead of `-r`',
+  );
 });
 
 test('operation layer: bad input is rejected before spawning anything', async (t) => {
@@ -227,7 +276,7 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
     jj_workspace_list: {},
     jj_bookmark_list: { allRemotes: false },
     jj_bookmark_set: { name: 'tool-bookmark', revset: '@' },
-    jj_rebase: { revision: '@', destination: '@-' },
+    jj_rebase: { revision: '@', destination: '@-', mode: 'source' },
   };
 
   for (const definition of definitions) {

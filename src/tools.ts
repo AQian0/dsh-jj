@@ -536,7 +536,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_add',
       description:
-        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, and start a new change in it. This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer a path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots), and use an absolute path to place the workspace outside the repository.',
+        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, and start a new change in it. This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Without `parents` the new workspace starts from the parents of the current change; pass `parents: ["@"]` to carry the current change (and its checkout) into the new workspace when migrating mid-task.',
       parameters: {
         path: { type: 'string', description: 'Directory for the new workspace; relative paths resolve against the current working directory, absolute paths are supported and are the way to place it outside the repository. jj creates it if missing.', required: true },
         name: { type: 'string', description: 'Workspace name. Defaults to the basename of path; names must be unique.' },
@@ -676,10 +676,16 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_rebase',
       description:
-        'Rebase a Jujutsu (jj) revision and its descendants onto another revision. This is jj, not git: descendants move automatically, so there is no branch replay and no merge step.',
+        'Rebase Jujutsu (jj) revisions onto a destination revision. This is jj, not git: there is no checkout and no merge commit. The mode selects which revisions move: "source" moves the given revision and all of its descendants (use it to rebase a whole stack); "revisions" (default) moves only the named revisions and leaves their descendants behind, re-parented onto the old parents; "branch" moves the whole branch containing the revision, relative to the destination.',
       parameters: {
         revision: { type: 'string', description: 'jj revset of the revision(s) to move.', required: true },
         destination: { type: 'string', description: 'jj revset of the destination revision.', required: true },
+        mode: {
+          type: 'string',
+          enum: ['revisions', 'source', 'branch'],
+          description:
+            "Which revisions move: 'source' = the revision and all of its descendants (use it for a stack), 'revisions' (default) = only the named revisions, 'branch' = the whole branch relative to the destination.",
+        },
       },
       output: {
         schema: {
@@ -688,6 +694,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           properties: {
             revision: { type: 'string', required: true },
             destination: { type: 'string', required: true },
+            mode: { type: 'string', enum: ['revisions', 'source', 'branch'], required: true },
             message: { type: 'string', required: true },
           },
         },
@@ -696,8 +703,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       async execute(args, exec) {
         const cwd = await context.cwdFor(exec);
         await requireWorkspace(context, cwd, exec.signal);
-        const message = await operations.rebase(cwd, args.revision, args.destination, exec.signal);
-        return { revision: args.revision, destination: args.destination, message };
+        const mode = args.mode ?? 'revisions';
+        const message = await operations.rebase(cwd, args.revision, args.destination, exec.signal, mode);
+        return { revision: args.revision, destination: args.destination, mode, message };
       },
     }),
   ];
