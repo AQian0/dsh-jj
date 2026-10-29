@@ -127,6 +127,13 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
               return undefined;
             }
           },
+          // Commit-description handling (policy 2026-10-30): inherit the repository's
+          // description style by default, ask the user when history cannot decide, and
+          // prefer a stack of small commits; a configured preset/custom style wins.
+          commitGuidance: resolved.commitGuidance,
+          commitStyle: resolved.commitStyle,
+          commitStyleCustom: resolved.commitStyleCustom,
+          preferSplitCommits: resolved.preferSplitCommits,
         },
       )
     : () => {};
@@ -144,6 +151,20 @@ export {
   JJ_CONTEXT_NAME,
   JJ_CONTEXT_ORDER_FALLBACK,
 } from './prompt-context.ts';
+export {
+  COMMIT_STYLE_CHOICES,
+  COMMIT_STYLE_DOMINANCE,
+  COMMIT_STYLE_IDS,
+  COMMIT_STYLE_PRESETS,
+  CONCRETE_COMMIT_STYLE_IDS,
+  MIN_COMMIT_STYLE_SAMPLES,
+  SPLIT_COMMITS_GUIDANCE,
+  classifyDescriptionStyle,
+  commitStylePromptText,
+  detectCommitStyle,
+  firstDescriptionLine,
+  resolveCommitStylePolicy,
+} from './commit-style.ts';
 export {
   detectVcs,
   sniffVcsSync,
@@ -198,7 +219,23 @@ export type {
   ToolGuardHost,
 } from './guard.ts';
 export type { ResolvedJjConfig } from './config.ts';
+export type {
+  CommitStyleChoice,
+  CommitStyleConfidence,
+  CommitStyleCounts,
+  CommitStyleDetection,
+  CommitStyleDetectionKind,
+  CommitStyleFamily,
+  CommitStyleId,
+  CommitStylePolicy,
+  CommitStylePreset,
+  CommitStylePromptOptions,
+  CommitStyleSource,
+  ConcreteCommitStyleId,
+  ResolveCommitStyleOptions,
+} from './commit-style.ts';
+export type { JjPromptCommitOptions, JjPromptContextOptions } from './prompt-context.ts';
 export type { JjChange, JjOperation } from './types.ts';
 export type { JjErrorCode } from './jj-command.ts';
-export type { JjStatusResult, JjUndoResult, JjWorkspaceAddResult } from './service.ts';
+export type { JjCommitResult, JjStatusResult, JjUndoResult, JjWorkspaceAddResult } from './service.ts';
 export type { JjToolService, JjToolsHost } from './tools.ts';
