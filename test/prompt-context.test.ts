@@ -125,4 +125,50 @@ test('the shared text helper is stable', () => {
   const text = jjPreferenceContextText('jj-colocated', '/repo', 'default');
   assert.match(text, /^This session's working directory is a Jujutsu \(jj\) workspace \(jj-colocated: \/repo \(workspace "default"\)\)\./);
   assert.match(text, /jj describe/);
+  assert.match(text, /jj_commit_style/, 'the default text explains how to learn the description style');
+});
+
+test('default context asks the model to inherit descriptions and split commits', () => {
+  const text = jjPreferenceContextText('jj-colocated', '/repo');
+  assert.match(text, /inherit this repository's existing style/);
+  assert.match(text, /jj_commit_style/);
+  assert.match(text, /needsUserChoice/);
+  assert.match(text, /jj commit -m/, 'jj commit is part of the recommended workflow');
+  assert.match(text, /small, self-contained commits/);
+  assert.match(text, /hard for humans to review/);
+  assert.match(text, /never use git commit/);
+});
+
+test('commit guidance can be disabled without dropping the jj preference', () => {
+  const text = jjPreferenceContextText('jj-colocated', '/repo', undefined, { commitGuidance: false });
+  assert.match(text, /Prefer jj/);
+  assert.ok(!text.includes('Commit descriptions'), 'no description-style section');
+  assert.ok(!text.includes('Commit granularity'), 'no split-commit section');
+});
+
+test('configured and custom styles are reflected in the prompt text', () => {
+  const angular = jjPreferenceContextText('jj-native', '/repo', undefined, { commitStyle: 'angular' });
+  assert.match(angular, /Angular commit convention/);
+  assert.ok(angular.includes('<type>(<scope>): <subject>'));
+
+  const rules = 'Chinese imperative subject, no prefix, body optional.';
+  const custom = jjPreferenceContextText('jj-native', '/repo', undefined, { commitStyle: 'custom', commitStyleCustom: rules });
+  assert.ok(custom.includes(rules), 'custom rules are copied verbatim');
+
+  const noSplit = jjPreferenceContextText('jj-native', '/repo', undefined, { preferSplitCommits: false });
+  assert.ok(!noSplit.includes('Commit granularity'));
+  assert.match(noSplit, /Commit descriptions/);
+});
+
+test('the install options forward into the registered context text', () => {
+  const session = { id: 'style' };
+  const cwd = '/fake/jj-workspace';
+  const { host, captured } = fakeHost({ cwdBySession: new Map([[session, cwd]]) });
+  installJjPromptContext(host, {
+    sniff: () => ({ cwd, kind: 'jj-colocated', jjRoot: cwd, diagnostics: [] }),
+    commitStyle: 'gitmoji',
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /Gitmoji/);
+  assert.match(text, /:sparkles:/);
 });

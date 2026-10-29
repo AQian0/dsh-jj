@@ -16,9 +16,15 @@
  * sniff. The warmed `ctx.jj` cache is consulted first when it already has an answer.
  * Outside a jj workspace the provider returns `''`, which contributes nothing.
  *
+ * Policy (2026-10-30): the same context carries the commit-description policy (inherit
+ * the repository's history, ask the user when undecidable, or a configured preset/custom
+ * style) and the split-commit workflow. Those strings live in `./commit-style.ts`; this
+ * module only decides whether to append them (`commitGuidance`).
+ *
  * @module dsh-jj/prompt-context
  */
 
+import { commitStylePromptText, type CommitStyleId } from './commit-style.ts';
 import { sniffVcsSync } from './detect.ts';
 import type { VcsKind, VcsSniff } from './types.ts';
 
@@ -38,8 +44,20 @@ export interface JjPromptAgent {
   readonly session?: unknown;
 }
 
+/** Commit-description/granularity options reflected in the injected context. */
+export interface JjPromptCommitOptions {
+  /** Inject the description-style and split-commit guidance at all (default true). */
+  readonly commitGuidance?: boolean;
+  /** `auto` (inherit history) or a configured preset/custom style. */
+  readonly commitStyle?: CommitStyleId;
+  /** Rules for `commitStyle: 'custom'`. */
+  readonly commitStyleCustom?: string;
+  /** Recommend a stack of small commits (default true). */
+  readonly preferSplitCommits?: boolean;
+}
+
 /** Options for {@link installJjPromptContext}. */
-export interface JjPromptContextOptions {
+export interface JjPromptContextOptions extends JjPromptCommitOptions {
   /** Sync cached lookup (`ctx.jj.peek`) — consulted before the sniff. */
   readonly peek?: (cwd: string) => { kind: VcsKind; root: string; workspaceName?: string } | undefined;
   /** Injectable sniff for tests. */
@@ -48,14 +66,37 @@ export interface JjPromptContextOptions {
   readonly order?: number;
 }
 
-/** Model-facing preference text for one jj workspace. */
-export function jjPreferenceContextText(kind: VcsKind, root: string, workspaceName?: string): string {
+/**
+ * Model-facing preference text for one jj workspace.
+ *
+ * @param kind - jj repository flavour.
+ * @param root - workspace root.
+ * @param workspaceName - workspace name when known.
+ * @param commitOptions - description-style and split-commit guidance (on by default).
+ * @returns the multi-line context text.
+ */
+export function jjPreferenceContextText(
+  kind: VcsKind,
+  root: string,
+  workspaceName?: string,
+  commitOptions: JjPromptCommitOptions = {},
+): string {
   const place = `${kind}: ${root}${workspaceName !== undefined ? ` (workspace "${workspaceName}")` : ''}`;
-  return [
+  const lines = [
     `This session's working directory is a Jujutsu (jj) workspace (${place}).`,
-    'Prefer jj for version control here: use the jj_* tools and jj-native commands (jj status / log / diff / new / describe / squash / undo / op log / bookmark / workspace) and address revisions with revsets and change ids rather than git branch names.',
+    'Prefer jj for version control here: use the jj_* tools and jj-native commands (jj status / log / diff / new / commit / describe / squash / undo / op log / bookmark / workspace) and address revisions with revsets and change ids rather than git branch names.',
     "Git still works, but a git write is not recorded in jj's operation log (so `jj undo` cannot take it back) and jj re-imports the result afterwards. Prefer `jj describe` / `jj new` / `jj commit` over `git commit`, and `jj bookmark` over `git branch`.",
-  ].join('\n');
+  ];
+  if (commitOptions.commitGuidance !== false) {
+    lines.push(
+      commitStylePromptText({
+        configured: commitOptions.commitStyle ?? 'auto',
+        customStyle: commitOptions.commitStyleCustom ?? '',
+        preferSplitCommits: commitOptions.preferSplitCommits ?? true,
+      }),
+    );
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -77,6 +118,13 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
       ? systemPrompt.getContextOrder('WORKING_DIRECTORY')
       : JJ_CONTEXT_ORDER_FALLBACK);
 
+  const commitOptions: JjPromptCommitOptions = {
+    ...(options.commitGuidance !== undefined ? { commitGuidance: options.commitGuidance } : {}),
+    ...(options.commitStyle !== undefined ? { commitStyle: options.commitStyle } : {}),
+    ...(options.commitStyleCustom !== undefined ? { commitStyleCustom: options.commitStyleCustom } : {}),
+    ...(options.preferSplitCommits !== undefined ? { preferSplitCommits: options.preferSplitCommits } : {}),
+  };
+
   const textForAgent = (agent: JjPromptAgent | undefined): string => {
     if (agent === undefined) return '';
     try {
@@ -86,12 +134,19 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
       if (typeof cwd !== 'string' || cwd.length === 0) return '';
       const peeked = options.peek?.(cwd);
       if (peeked !== undefined) {
-        return peeked.kind.startsWith('jj-') ? jjPreferenceContextText(peeked.kind, peeked.root, peeked.workspaceName) : '';
+        return peeked.kind.startsWith('jj-')
+          ? jjPreferenceContextText(peeked.kind, peeked.root, peeked.workspaceName, commitOptions)
+          : '';
       }
       const sniffed = (options.sniff ?? sniffVcsSync)(cwd);
       if (!sniffed.kind.startsWith('jj-')) return '';
       // VcsSniff carries the marker roots rather than one `root`; the jj workspace wins.
-      return jjPreferenceContextText(sniffed.kind, sniffed.jjRoot ?? sniffed.cwd, (sniffed as { workspaceName?: string }).workspaceName);
+      return jjPreferenceContextText(
+        sniffed.kind,
+        sniffed.jjRoot ?? sniffed.cwd,
+        (sniffed as { workspaceName?: string }).workspaceName,
+        commitOptions,
+      );
     } catch {
       // A prompt contribution must never break an assembly.
       return '';
