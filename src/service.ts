@@ -38,6 +38,15 @@ export const TPL_OP_LOG = 'json(self) ++ "\\n"';
 /** `jj bookmark list` template (contract §7.3.11). */
 export const TPL_BOOKMARK_LIST = 'json(self) ++ "\\n"';
 
+/**
+ * `jj log` template returning one full description per line as JSON.
+ *
+ * Used by the commit-style sampler: the first line carries the style, but the
+ * model also needs to see body/footer habits, which `TPL_LOG` (`first_line`)
+ * intentionally drops.
+ */
+export const TPL_DESCRIPTION = 'json(description) ++ "\\n"';
+
 /** Bounded text helper. */
 function bound(text: string, limit: number): { text: string; truncated: boolean } {
   return text.length <= limit ? { text, truncated: false } : { text: text.slice(0, limit), truncated: true };
@@ -70,6 +79,16 @@ export interface JjUndoResult {
   readonly operationId: string;
   readonly headOperationId: string;
   readonly message: string;
+}
+
+/** Result of `commit()`. */
+export interface JjCommitResult {
+  /** The change that was described (the parent of the new working copy); it may be empty. */
+  readonly committed: JjChangeRecord;
+  /** The new working-copy change; it keeps any changes not covered by `paths`. */
+  readonly workingCopy: JjChangeRecord;
+  /** Non-fatal jj warnings (for example paths that matched no file), surfaced to the model. */
+  readonly warnings: readonly string[];
 }
 
 /** Result of `workspaceAdd()`. */
@@ -248,6 +267,89 @@ export class JjOperations {
     const readArgv = ['log', '-r', revset, '--no-graph', '-T', TPL_STATUS];
     const result = await this.run(cwd, readArgv, signal);
     return changeFromRecord(parseJsonLine(result.stdout, readArgv));
+  }
+
+  /**
+   * `jj commit -m <message> [-- <paths…>]` then read the committed change (`@-`)
+   * and the new working copy (`@`).
+   *
+   * jj commit is describe + new in one step: the current change keeps its content
+   * (or only the given paths, which lets a caller split a messy working copy),
+   * gets the description, and a new working-copy change becomes `@` (empty unless
+   * some changes were left behind). Warnings jj reports on a zero exit (for
+   * example a pathspec that matched no file) are returned instead of being
+   * discarded, because a silent empty commit would defeat the split workflow.
+   *
+   * @param cwd - workspace directory.
+   * @param message - non-empty description; callers are expected to follow the repository style.
+   * @param paths - optional repository-relative paths to commit only part of the working copy.
+   * @param signal - cancellation signal.
+   */
+  async commit(cwd: string, message: string, paths: readonly string[], signal?: AbortSignal): Promise<JjCommitResult> {
+    if (message.trim().length === 0) {
+      throw badInput('jj_commit needs a non-empty description that follows the repository commit style.');
+    }
+    for (const path of paths) {
+      if (path.trim().length === 0 || path.startsWith('-')) {
+        throw badInput('paths must be non-empty and must not start with "-".');
+      }
+    }
+    // A pathspec would otherwise be parsed as an option; `--` ends option parsing.
+    const argv = ['commit', '-m', message, ...(paths.length > 0 ? ['--', ...paths] : [])];
+    const commitResult = await this.run(cwd, argv, signal);
+    const warnings: string[] = [];
+    // jj writes progress ("Working copy now at: …") to stderr as well; only real
+    // warning lines are surfaced to the model.
+    const warningLines = commitResult.stderr
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /^Warning:/.test(line));
+    if (warningLines.length > 0) warnings.push(bound(warningLines.join('\n'), 2 * 1024).text);
+    const workingCopy = await this.readAt(cwd, signal);
+    const committed = await this.readAt(cwd, signal, '@-');
+    if (paths.length > 0 && committed.empty) {
+      warnings.push(
+        'No changes matched the given paths, so the committed change is empty; the working copy still holds the changes. Check that the paths are repository-relative.',
+      );
+    }
+    return { committed, workingCopy, warnings };
+  }
+
+  /**
+   * Full descriptions selected by a revset, newest first (`TPL_DESCRIPTION`).
+   *
+   * This is the commit-style sampler: `TPL_LOG` only exposes the subject line,
+   * but callers may want to show body/footer conventions as well.
+   *
+   * @param cwd - workspace directory.
+   * @param revset - revisions to read.
+   * @param limit - maximum number of records to read.
+   * @param signal - cancellation signal.
+   */
+  async descriptionSamples(cwd: string, revset: string, limit: number, signal?: AbortSignal): Promise<readonly string[]> {
+    const argv = ['log', '-r', revset, '--no-graph', '--limit', String(limit), '-T', TPL_DESCRIPTION];
+    const result = await this.run(cwd, argv, signal);
+    const descriptions: string[] = [];
+    const lines = result.stdout.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? '';
+      if (line.trim().length === 0) continue;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        descriptions.push(typeof parsed === 'string' ? parsed : String(parsed));
+      } catch (error) {
+        // A bounded output stream can cut the last JSON record in half; the complete
+        // records before it are still useful (a style sample is best-effort).
+        if (result.truncated && index === lines.length - 1) break;
+        throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`, {
+          argv,
+          exitCode: 0,
+          stderr: error instanceof Error ? error.message : '',
+          stdout: bound(result.stdout, 512).text,
+        });
+      }
+    }
+    return descriptions;
   }
 
   /** `jj squash --from <from> --into <into> [-m msg | --use-destination-message]`. */
