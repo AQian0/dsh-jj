@@ -9,7 +9,7 @@
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
 - 三个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」上下文;
-  - `dsh-jj/tools`(`jj-tools`):13 个 `jj_*` 模型工具;
+  - `dsh-jj/tools`(`jj-tools`):15 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护。
 - 纯 TypeScript + ESM,**零运行时依赖**:DSH 包全部通过 `peerDependencies` 由宿主提供(版本见 `package.json`)。
 - 没有任何构建工具链依赖:构建只用 `tsc`,测试只用 `node --test`。
@@ -51,8 +51,9 @@
 | `src/guard.ts` | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案 |
 | `src/jj-command.ts` | jj/git 子进程适配、非交互 env、错误归类 |
 | `src/config.ts` | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验 |
+| `src/commit-style.ts` | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)与拆分提交指引(纯模块,无 I/O) |
 | `src/types.ts` | 共享类型与词汇(纯声明) |
-| `src/prompt-context.ts` | 会话开始时注入「优先用 jj」的模型可见上下文 |
+| `src/prompt-context.ts` | 会话开始时注入「优先用 jj」与提交描述/拆分提交的模型可见上下文 |
 | `test/**/*.test.ts` | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner |
 | `scripts/setup-links.ts` | 离线依赖软链脚本 |
 | `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`) |
@@ -64,9 +65,9 @@
 1. **入口契约**:每个入口导出 `name` / `inject` / `apply` / `Config`;`build.test.ts` 会校验这些值与 `inject` 列表。
 2. **分层**:`index.ts` 拥有 `ctx.jj`;tools/guard 通过 `inject: ['tools', 'jj'(, 'workingDirectory')]` 消费。
    删改 `inject` 会破坏其他行加载。
-3. **纯模块**:`detect.ts`、`git-command.ts`、`types.ts` 不得在运行时 import 任何 `@deepseek-ai/*`(由 `build.test.ts`
-   强制)。DSH 运行时 import 仅限:`config.ts`(schemastery)、`service.ts`(cordis)、`tools.ts`(dsh-tools)、
-   `jj-command.ts`(dsh-subprocess)。
+3. **纯模块**:`detect.ts`、`git-command.ts`、`types.ts`、`commit-style.ts` 不得在运行时 import 任何 `@deepseek-ai/*`
+   (由 `build.test.ts` 强制)。DSH 运行时 import 仅限:`config.ts`(schemastery)、`service.ts`(cordis)、
+   `tools.ts`(dsh-tools)、`jj-command.ts`(dsh-subprocess)。
 4. **不直接 spawn**:所有 jj/git 调用都走注入的 `RunJj` / `RunCommand`(统一超时、宽限、输出截断、env 清洗)。
    这是可测试性的基础,也保证 guard/service 行为一致。
 5. **检测语义**:`detectVcs` 永远返回 `VcsDescriptor`,仓库问题通过 `notices` + `verified === false` 上报,
@@ -109,6 +110,13 @@
 4. 同步 README「工具一览」,以及 `prompt-context.ts` 中的命令列表(如相关)。
 
 **新增配置键**:`config.ts` 五处同步 → README「配置」表 → 按影响补 guard/detect/service 测试。
+
+**修改提交描述策略**:`commit-style.ts` 纯函数(分类 / 检测 / 策略 / 文案)→ `config.ts` 五处同步 →
+`prompt-context.ts` 与 `tools.ts`(`jj_commit_style`、`jj_commit`)注入 → `test/commit-style.test.ts` 与
+`test/service-tools.test.ts`;默认保持 `auto`(继承历史、无法确定时询问用户),不要改成静默固定风格,
+也不要让默认 `preferSplitCommits` 退化回「只改当前工作区」。提交策略以 `ctx.jj`(runtime 行)的配置为
+唯一来源:`jj_commit_style` 读 `service.operations.config`,不要改回读 tools 行配置,否则 prompt 与工具
+会给出互相矛盾的风格。
 
 **修改 guard 行为**:`git-command.ts` 分类表(保持纯函数)→ `guard.ts` 文案与策略 → `test/guard*.test.ts`;
 不要把默认从 `warn` 改成 `deny`,也不要放开 hard-deny。
