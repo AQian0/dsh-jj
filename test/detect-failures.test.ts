@@ -172,3 +172,72 @@ test('contract-shaped DetectDeps input works (runJj/runGit, argv without the pro
   assert.ok(calls.some((call) => call[0] === 'jj' && call.includes('workspace')), 'the jj authority probe ran');
   assert.ok(calls.every((call) => call[1] !== undefined), 'the program name is supplied by the adapter, never by deps');
 });
+/** DetectDeps whose jj workspace-list probe returns a synthetic result. */
+function depsWithWorkspaceList(
+  fx: ReturnType<typeof makeFixture>,
+  synthetic: { readonly stdout: string; readonly truncated: boolean },
+): DetectDeps {
+  const delegateJj = async ({ cwd, argv, timeoutMs }: Parameters<NonNullable<DetectDeps['runJj']>>[0]) => {
+    const result = await fx.run(['jj', ...argv], { cwd, timeoutMs });
+    return {
+      exitCode: result.exitCode,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      truncated: false,
+      killedByTimeout: result.timedOut,
+    };
+  };
+  return {
+    runJj: async (options) => {
+      if (options.argv.includes('workspace')) {
+        return { exitCode: 0, signal: null, stdout: synthetic.stdout, stderr: '', truncated: synthetic.truncated, killedByTimeout: false };
+      }
+      return delegateJj(options);
+    },
+    runGit: async ({ cwd, argv, timeoutMs }) => {
+      const result = await fx.run(['git', ...argv], { cwd, timeoutMs });
+      return {
+        exitCode: result.exitCode,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        truncated: false,
+        killedByTimeout: result.timedOut,
+      };
+    },
+  };
+}
+
+test('M6: a truncated workspace list is diagnosed and degrades confidence', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-fail-truncated');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const deps = depsWithWorkspaceList(fx, { stdout: '{"name":"default","root":"', truncated: true });
+  const descriptor = await detectVcs(colo, deps);
+  assert.equal(descriptor.kind, 'jj-colocated', 'the layout still classifies');
+  assert.equal(descriptor.workspaceName, undefined);
+  assert.deepEqual(descriptor.workspaces, []);
+  assert.equal(descriptor.confidence, 'low', 'a truncated authority output cannot be high confidence');
+  assert.ok(descriptor.notices.some((entry) => entry.code === 'jj-metadata-incomplete'));
+});
+
+test('M6: an unparsable workspace list is diagnosed instead of silently high confidence', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-fail-unparsed');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const deps = depsWithWorkspaceList(fx, { stdout: 'Warning: unexpected output\n', truncated: false });
+  const descriptor = await detectVcs(colo, deps);
+  assert.equal(descriptor.confidence, 'low');
+  assert.ok(
+    descriptor.notices.some((entry) => entry.code === 'jj-metadata-incomplete' && /could not be parsed/.test(entry.message ?? '')),
+  );
+});
+
+test('M6: an empty workspace list keeps the sniffed root but lowers confidence to medium', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-fail-empty-list');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const deps = depsWithWorkspaceList(fx, { stdout: '', truncated: false });
+  const descriptor = await detectVcs(colo, deps);
+  assert.equal(descriptor.confidence, 'medium');
+  assert.equal(descriptor.workspaceName, undefined);
+  assert.ok(descriptor.notices.some((entry) => entry.code === 'jj-metadata-incomplete'));
+});
