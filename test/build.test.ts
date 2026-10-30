@@ -67,7 +67,18 @@ function sourceModuleNames(): string[] {
  * `build.test.ts` asserts this list still matches the source tree and that the
  * compiled output only imports DSH packages with a declared runtime dependency.
  */
-const PURE_MODULES = ['detect', 'git-command', 'types', 'commit-style', 'multi-session'] as const;
+const PURE_MODULES = [
+  'detect',
+  'git-command',
+  'git-tokenize',
+  'git-equivalence',
+  'git-rules',
+  'jj-rules',
+  'jj-templates',
+  'types',
+  'commit-style',
+  'multi-session',
+] as const;
 
 /** Manifest fields the packaging guard inspects. */
 interface PackageManifest {
