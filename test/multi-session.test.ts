@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import {
   DEFAULT_REBASE_TARGET,
   detectParallelSessions,
+  multiSessionFinishChecklistText,
   multiSessionPromptText,
   parallelPeerCwds,
   MULTI_SESSION_GUIDANCE_MODES,
@@ -156,11 +157,12 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   assert.match(text, /jj_handoff/, 'the model is told to use the one-shot hand-off tool');
   assert.match(text, /source mode/, 'the hand-off moves the whole stack with source mode internally');
   assert.match(text, /repository without remotes is fine/, 'a repo without remotes is handled inside the tool');
-  assert.match(text, /resolves the integration target itself/, 'the model must not ask the user to pick the target');
-  assert.match(text, /earlier parallel session's committed change/, 'an inherited stack base keeps the chain together instead of deflecting to the user');
-  assert.match(text, /resolve them yourself/, 'conflicts are resolved by the model, not handed back');
+  assert.match(text, /(picks|resolves) the integration target itself/, 'the model must not ask the user to pick the target');
+  assert.match(text, /earlier session's (committed )?(change|commit)/, 'an inherited stack base keeps the chain together instead of deflecting to the user');
+  assert.match(text, /resolve conflicts yourself/i, 'conflicts are resolved by the model, not handed back');
   assert.match(text, /jj_workspace_cleanup/, 'a session-created workspace is cleaned up by the plugin');
-  assert.match(text, /do not run jj workspace forget yourself/i, 'raw workspace forget stays denied');
+  assert.match(text, /the user runs `jj workspace forget <name>`/, 'raw workspace forget is left to the user');
+  assert.match(text, /do not run it yourself/i, 'raw workspace forget stays denied');
 });
 
 test('sibling workspaces are described as isolated copies with a shared repository', () => {
@@ -168,8 +170,8 @@ test('sibling workspaces are described as isolated copies with a shared reposito
     mode: 'auto',
     detection: { sharedWorkspace: [], siblingWorkspace: ['/repo-w2', '/repo-w3'] },
   });
-  assert.match(text, /another DSH session is running in a separate workspace of this Jujutsu repository/);
-  assert.match(text, /working copies are isolated while bookmarks and the operation log are shared/);
+  assert.match(text, /another DSH session is using a sibling workspace of this Jujutsu repository/);
+  assert.match(text, /working copies are isolated; bookmarks and the operation log are shared/i);
   assert.match(text, /jj undo/);
   assert.ok(!text.includes('isolate this session in its own jj workspace'), 'no need to create a workspace when the peer is already isolated');
   assert.match(text, /standard rebase hand-off/, 'the finish checklist still applies');
@@ -208,4 +210,14 @@ test('the shared-working-copy warning wins over the sibling-workspace wording', 
 
 test('the exported mode list is the accepted configuration vocabulary', () => {
   assert.deepEqual([...MULTI_SESSION_GUIDANCE_MODES], ['auto', 'always', 'off']);
+});
+
+test('the injected guidance stays within the prompt token budget', () => {
+  // Rough English prompt ratio: ~3.5 chars/token. The shared variant (the largest
+  // block: isolation guidance + finish checklist) must stay within ~700 tokens.
+  const shared = multiSessionPromptText({ mode: 'auto', detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] } });
+  const checklist = multiSessionFinishChecklistText();
+  assert.ok(shared.length <= 2450, `shared guidance is ${shared.length} chars; target is ~700 tokens`);
+  assert.ok(checklist.length <= 1450, `finish checklist is ${checklist.length} chars; target is ~400 tokens`);
+  assert.ok(checklist.length < shared.length, 'the checklist is the smaller half of the shared block');
 });
