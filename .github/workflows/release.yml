@@ -72,13 +72,18 @@ jobs:
           echo "${JJ_TARBALL_SHA256}  ${archive}" | sha256sum -c -
           tar -xzf "${archive}" -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          expected="jj ${JJ_VERSION}"
           actual="$("$HOME/.local/bin/jj" --version)"
-          if [ "${actual}" != "${expected}" ]; then
-            echo "::error::expected ${expected}, got ${actual}"
-            exit 1
-          fi
-          echo "${actual}"
+          # Official release binaries report a git-hash suffix (e.g.
+          # "jj 0.46.0-7d382314f94..."), so compare the version prefix only.
+          case "${actual}" in
+            "jj ${JJ_VERSION}"*)
+              echo "jj version ok: ${actual}"
+              ;;
+            *)
+              echo "::error::expected jj ${JJ_VERSION}..., got ${actual}"
+              exit 1
+              ;;
+          esac
 
       - name: Verify tag and package metadata
         run: |
