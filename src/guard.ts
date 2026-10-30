@@ -18,8 +18,15 @@
  * @module dsh-jj/guard
  */
 
+import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { Config, resolveConfig, type JjPluginConfig, type ResolvedJjConfig } from './config.ts';
+import {
+  assertServiceableConfig,
+  Config,
+  resolveConfig,
+  type JjPluginConfig,
+  type ResolvedJjConfig,
+} from './config.ts';
 
 export { Config };
 import { sniffVcsSync } from './detect.ts';
@@ -159,6 +166,45 @@ function descriptorFromSniff(sniff: VcsSniff): GuardDescriptorLike {
     jjRoot: sniff.jjRoot,
     root: sniff.jjRoot ?? sniff.gitMarkRoot ?? sniff.cwd,
   };
+}
+
+/**
+ * Canonical filesystem identity of a path (realpath with a resolve fallback).
+ *
+ * The guard's synchronous path may do I/O, and comparing raw path strings would
+ * classify the same repository reached through a symlink (for example `/tmp` and
+ * `/private/tmp` on macOS) as scope creep and hard-deny a legitimate command.
+ */
+function canonicalGuardPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/** `resolve` that never throws on a malformed path (fail-open fallback). */
+function safeResolvePath(base: string): string {
+  try {
+    return resolve(base);
+  } catch {
+    return base;
+  }
+}
+
+/**
+ * Follow one statically known `cd`/`-C` target.
+ *
+ * A shell path that still contains expansions (`$VAR`, backticks) or an
+ * unresolved `~` cannot be evaluated without executing the shell; guessing it
+ * would both miss real repositories and falsely flag unrelated ones, so callers
+ * keep the current cursor (fail-open) instead.
+ */
+function staticChangeDir(cursor: string, target: string): string | undefined {
+  if (target.length === 0) return undefined;
+  if (/[$`]/.test(target) || target.startsWith('~')) return undefined;
+  return isAbsolute(target) ? target : safeResolvePath(resolve(cursor, target));
 }
 
 /** Reason text for one kind (contract §8.5, verbatim). */
@@ -343,25 +389,14 @@ export function evaluateGitCommand(
   const classification = classifyGitInvocation(commandLine);
   const findings: GitGuardFinding[] = [];
   const effectiveCwds: string[] = [];
-  let cursor: string;
-  try {
-    cursor = resolve(baseCwd);
-  } catch {
-    cursor = baseCwd;
-  }
+  let cursor = safeResolvePath(baseCwd);
 
   for (const segment of classification.segments) {
-    if (segment.cdTarget !== undefined) {
-      cursor = isAbsolute(segment.cdTarget) ? segment.cdTarget : resolve(cursor, segment.cdTarget);
-    }
+    if (segment.cdTarget !== undefined) cursor = staticChangeDir(cursor, segment.cdTarget) ?? cursor;
     for (const invocationIndex of segment.invocationIndexes) {
       const invocation = classification.invocations[invocationIndex];
       if (invocation === undefined) continue;
-      const effective = invocation.changeDir === undefined
-        ? cursor
-        : isAbsolute(invocation.changeDir)
-          ? invocation.changeDir
-          : resolve(cursor, invocation.changeDir);
+      const effective = invocation.changeDir === undefined ? cursor : staticChangeDir(cursor, invocation.changeDir) ?? cursor;
       effectiveCwds[invocationIndex] = effective;
       if (!invocation.mutating) continue;
       const descriptor = sniff(effective);
@@ -422,12 +457,33 @@ export function installGitConfusionGuard(
   };
 
   /**
+   * Whether one command line may produce a repository-wide jj warning that names
+   * the head operation. Only warn mode renders a head operation id, and only a
+   * repository-wide jj invocation needs one — everything else would pay an extra
+   * `jj op log` (and a working-copy snapshot) for nothing.
+   */
+  const needsHeadOperation = (commandLine: string | undefined): boolean => {
+    if (commandLine === undefined || resolved.guardJjRepositoryWide !== 'warn') return false;
+    try {
+      return classifyJjInvocation(commandLine).invocations.some((invocation) => invocation.scope === 'repo-wide');
+    } catch {
+      return false;
+    }
+  };
+
+  /**
    * Resolve the directory a tool call would run in (contract §5.10).
    *
-   * Order: explicit `workdir` argument → the session's working directory through
-   * `workingDirectory.get(agent.session)` (the real `WorkingDirectoryService` is
-   * keyed by **Session**; a live Agent carries it at `agent.session`) → for calls
-   * with no agent at all, the configured `defaultCwd`.
+   * Order: an explicit `workdir` argument, relative to the session working
+   * directory (`workingDirectory.get(agent.session)`; the real service is keyed by
+   * **Session** while a live Agent carries it at `agent.session`) — then the
+   * session directory itself — then, only for calls with no agent at all, the
+   * configured `defaultCwd` (tests/embedders).
+   *
+   * A relative `workdir` must be resolved against the session directory, not the
+   * host process directory: the shell tool runs the command in the session
+   * directory, so resolving it against `process.cwd()` would inspect the wrong
+   * repository and miss a jj workspace (a deny-mode bypass found by auditing).
    *
    * Resolution failure never falls back to `process.cwd()` silently: the guard
    * emits a one-time `jj/guard-degraded` diagnostic and **allows** this call
@@ -438,22 +494,45 @@ export function installGitConfusionGuard(
     args: Record<string, unknown> | undefined,
   ): { cwd: string; degraded: boolean } => {
     const fallback = resolved.defaultCwd.length > 0 ? resolved.defaultCwd : process.cwd();
-    const workdir = args?.['workdir'];
-    if (typeof workdir === 'string' && workdir.length > 0) {
-      return { cwd: isAbsolute(workdir) ? workdir : resolve(fallback, workdir), degraded: false };
+    const workdirArg = args?.['workdir'];
+    const explicitWorkdir = typeof workdirArg === 'string' && workdirArg.length > 0 ? workdirArg : undefined;
+    // An absolute workdir is authoritative and needs no session lookup.
+    if (explicitWorkdir !== undefined && isAbsolute(explicitWorkdir)) {
+      return { cwd: explicitWorkdir, degraded: false };
     }
     if (execution.agent === undefined) {
       // No calling agent: the documented defaultCwd path (tests/embedders).
-      return { cwd: fallback, degraded: false };
+      const cwd = explicitWorkdir === undefined ? fallback : resolve(fallback, explicitWorkdir);
+      return { cwd, degraded: false };
     }
 
+    const session = resolveSessionCwd(execution);
+    if (session.cwd !== undefined) {
+      return {
+        cwd: explicitWorkdir === undefined ? session.cwd : resolve(session.cwd, explicitWorkdir),
+        degraded: false,
+      };
+    }
+    // The session directory is unknown: do not guess a relative base. The
+    // degraded marker makes the caller fail open (contract §5.10).
+    return {
+      cwd: explicitWorkdir === undefined ? fallback : resolve(fallback, explicitWorkdir),
+      degraded: session.degraded,
+    };
+  };
+
+  /**
+   * Current working directory of one live agent's session, or a degraded marker.
+   *
+   * The real `WorkingDirectoryService` is keyed by Session; keep the agent itself
+   * as a second candidate for implementations that key on either. Reads only.
+   */
+  const resolveSessionCwd = (execution: GuardExecutionLike): { cwd?: string; degraded: boolean } => {
     const workingDirectory = optionalMember(host, 'workingDirectory');
     const get = optionalMember(workingDirectory, 'get');
     if (typeof get !== 'function' || workingDirectory === undefined) {
-      return { cwd: fallback, degraded: diagnoseCwdFailure(execution, 'the host exposes no workingDirectory service') };
+      return { degraded: diagnoseCwdFailure(execution, 'the host exposes no workingDirectory service') };
     }
-    // The real service wants the Session; keep the agent itself as a second
-    // candidate for implementations that key on either.
     const candidates: unknown[] = [optionalMember(execution.agent, 'session'), execution.agent];
     let lastError: unknown;
     for (const candidate of candidates) {
@@ -466,7 +545,6 @@ export function installGitConfusionGuard(
       }
     }
     return {
-      cwd: fallback,
       degraded: diagnoseCwdFailure(
         execution,
         lastError === undefined ? 'the working directory was empty' : lastError instanceof Error ? lastError.message : String(lastError),
@@ -553,6 +631,28 @@ export function installGitConfusionGuard(
   };
 
   /**
+   * Surface a parser degradation once per tool (fail-open): the guard can only
+   * protect against commands it understands, so a command it could not fully
+   * parse must not be silently assumed safe.
+   */
+  const reportParseWarnings = (execution: GuardExecutionLike, cwd: string, parseWarnings: readonly string[]): void => {
+    if (parseWarnings.length === 0) return;
+    emitOnce(
+      `parse-warning|${execution.name}`,
+      {
+        tool: execution.name,
+        cwd,
+        kind: 'none' as VcsKind,
+        subcommand: '',
+        message:
+          `dsh-jj could not fully parse this \`${execution.name}\` command (${parseWarnings[0]}); ` +
+          'the git-confusion guard may miss commands hidden in the unparsed part. Inspect it manually if it looks unusual.',
+      },
+      'jj/guard-degraded',
+    );
+  };
+
+  /**
    * Repository-wide jj commands and scope creep (contract §8.3b). Scope creep is
    * always denied; repository-wide commands follow `guardJjRepositoryWide`, whose
    * default (`warn`) deliberately allows jj's preferred recovery path.
@@ -568,51 +668,71 @@ export function installGitConfusionGuard(
     const resolvedCwd = resolveBaseCwd(execution, args);
     if (resolvedCwd.degraded) return undefined; // fail-open (contract §5.10)
     const baseCwd = resolvedCwd.cwd;
-    const base = peek(baseCwd);
+    reportParseWarnings(execution, baseCwd, classification.warnings);
+    const baseDescriptor = peek(baseCwd);
+    let cursor = safeResolvePath(baseCwd);
 
-    for (const invocation of classification.invocations) {
-      // Scope creep: a jj command aimed at another repository is never allowed.
-      if (invocation.repository !== undefined) {
-        const target = isAbsolute(invocation.repository) ? invocation.repository : resolve(baseCwd, invocation.repository);
-        const targetDescriptor = peek(target);
-        if (targetDescriptor === undefined || !isJjKind(targetDescriptor.kind) || (base !== undefined && targetDescriptor.jjRoot !== base.jjRoot)) {
-          return [
-            `Blocked: \`jj ${invocation.subcommand}\` targets \`${invocation.repository}\`, which is not the repository this session is working in.`,
-            'Running jj against another repository (or an ancestor workspace) can rewrite a working copy owned by another session or agent.',
-            '',
-            'Safer alternatives:',
-            '  - Run the command from that directory in its own session.',
-            '  - Inspect this repository with `jj log` / `jj status` / `jj --at-op=<op-id> jj log`.',
-          ].join('\n');
+    // Walk the segments so a `cd <repo> && jj undo` from a non-jj directory is
+    // evaluated against the directory the jj command actually runs in. A `cd`
+    // target that needs shell expansion is not guessed (fail-open): the cursor
+    // keeps its previous value.
+    for (const segment of classification.segments) {
+      if (segment.changeDir !== undefined) cursor = staticChangeDir(cursor, segment.changeDir) ?? cursor;
+      for (const invocationIndex of segment.invocationIndexes) {
+        const invocation = classification.invocations[invocationIndex];
+        if (invocation === undefined) continue;
+        const cwd = cursor;
+        const descriptorAtCwd = peek(cwd);
+        // Scope creep: a jj command aimed at another repository is never allowed.
+        // Compare canonical paths: the same workspace reached through a symlink is
+        // not another repository (macOS `/tmp` → `/private/tmp` was a false denial).
+        if (invocation.repository !== undefined) {
+          const target = isAbsolute(invocation.repository) ? invocation.repository : safeResolvePath(resolve(cwd, invocation.repository));
+          const targetDescriptor = peek(target);
+          const sameRepository =
+            descriptorAtCwd === undefined ||
+            targetDescriptor === undefined ||
+            canonicalGuardPath(targetDescriptor.jjRoot ?? targetDescriptor.root) ===
+              canonicalGuardPath(descriptorAtCwd.jjRoot ?? descriptorAtCwd.root);
+          if (targetDescriptor === undefined || !isJjKind(targetDescriptor.kind) || !sameRepository) {
+            return [
+              `Blocked: \`jj ${invocation.subcommand}\` targets \`${invocation.repository}\`, which is not the repository this session is working in.`,
+              'Running jj against another repository (or an ancestor workspace) can rewrite a working copy owned by another session or agent.',
+              '',
+              'Safer alternatives:',
+              '  - Run the command from that directory in its own session.',
+              '  - Inspect this repository with `jj log` / `jj status` / `jj --at-op=<op-id> jj log`.',
+            ].join('\n');
+          }
         }
-      }
-      const descriptor = base ?? { kind: 'none' as VcsKind, jjRoot: undefined, root: baseCwd };
-      if (!isJjKind(descriptor.kind)) continue;
+        const descriptor = descriptorAtCwd ?? baseDescriptor ?? { kind: 'none' as VcsKind, jjRoot: undefined, root: cwd };
+        if (!isJjKind(descriptor.kind)) continue;
 
-      // Hard denies (contract §8.3b): never short-circuited by config.
-      if (invocation.scope === 'destructive') {
-        return buildJjHardDenyRefusal(invocation, descriptor);
-      }
-      if (invocation.scope !== 'repo-wide') continue;
+        // Hard denies (contract §8.3b): never short-circuited by config.
+        if (invocation.scope === 'destructive') {
+          return buildJjHardDenyRefusal(invocation, descriptor);
+        }
+        if (invocation.scope !== 'repo-wide') continue;
 
-      // `jj workspace forget <other>` affects someone else's workspace: always deny.
-      if (invocation.subcommand === 'workspace forget' && invocation.targetWorkspace !== undefined && invocation.targetWorkspace !== descriptor.workspaceName) {
-        return buildJjWorkspaceForgetRefusal(invocation, descriptor, baseCwd);
+        // `jj workspace forget <other>` affects someone else's workspace: always deny.
+        if (invocation.subcommand === 'workspace forget' && invocation.targetWorkspace !== undefined && invocation.targetWorkspace !== descriptor.workspaceName) {
+          return buildJjWorkspaceForgetRefusal(invocation, descriptor, cwd);
+        }
+        const mode = resolved.guardJjRepositoryWide;
+        if (mode === 'off') continue;
+        if (mode === 'deny') return buildJjRepoWideRefusal(invocation, descriptor, cwd);
+        emitOnce(
+          `${cwd}|repo-wide|${invocation.subcommand}`,
+          {
+            tool: execution.name,
+            cwd,
+            kind: descriptor.kind,
+            subcommand: invocation.subcommand,
+            message: buildJjRepoWideWarning(invocation, descriptor, headOperations.get(cwd) ?? headOperations.get(baseCwd)),
+          },
+          'jj/repo-wide-op',
+        );
       }
-      const mode = resolved.guardJjRepositoryWide;
-      if (mode === 'off') continue;
-      if (mode === 'deny') return buildJjRepoWideRefusal(invocation, descriptor, baseCwd);
-      emitOnce(
-        `${baseCwd}|repo-wide|${invocation.subcommand}`,
-        {
-          tool: execution.name,
-          cwd: baseCwd,
-          kind: descriptor.kind,
-          subcommand: invocation.subcommand,
-          message: buildJjRepoWideWarning(invocation, descriptor, headOperations.get(baseCwd)),
-        },
-        'jj/repo-wide-op',
-      );
     }
     return undefined;
   };
@@ -628,25 +748,15 @@ export function installGitConfusionGuard(
 
     const resolvedCwd = resolveBaseCwd(execution, args);
     if (resolvedCwd.degraded) return undefined; // fail-open (contract §5.10)
-    let cursor: string;
-    try {
-      cursor = resolve(resolvedCwd.cwd);
-    } catch {
-      cursor = resolvedCwd.cwd;
-    }
+    reportParseWarnings(execution, resolvedCwd.cwd, classification.warnings);
+    let cursor = safeResolvePath(resolvedCwd.cwd);
 
     for (const segment of classification.segments) {
-      if (segment.cdTarget !== undefined) {
-        cursor = isAbsolute(segment.cdTarget) ? segment.cdTarget : resolve(cursor, segment.cdTarget);
-      }
+      if (segment.cdTarget !== undefined) cursor = staticChangeDir(cursor, segment.cdTarget) ?? cursor;
       for (const invocationIndex of segment.invocationIndexes) {
         const invocation = classification.invocations[invocationIndex];
         if (invocation === undefined) continue;
-        const cwd = invocation.changeDir === undefined
-          ? cursor
-          : isAbsolute(invocation.changeDir)
-            ? invocation.changeDir
-            : resolve(cursor, invocation.changeDir);
+        const cwd = invocation.changeDir === undefined ? cursor : staticChangeDir(cursor, invocation.changeDir) ?? cursor;
         const descriptor = peek(cwd);
         if (descriptor === undefined) continue; // fail-open (contract §8.4)
         if (!isJjKind(descriptor.kind)) {
@@ -778,9 +888,11 @@ export function installGitConfusionGuard(
             if (resolvedCwd.degraded) return next(); // fail-open (contract §5.10)
             if (service !== undefined) {
               await service.warm(cwd, signal);
-              // Self-protection (contract §8.3b): record the head operation before a
-              // repository-wide call so the warning can name a rollback target.
-              if (typeof service.operations?.headOperationId === 'function') {
+              // Self-protection (contract §8.3b): the head operation is only needed
+              // when a repository-wide jj command may be warned about. Fetching
+              // `jj op log` for every shell call would spawn an extra jj process and
+              // snapshot the working copy (audited cost: ~16 ms per tool call).
+              if (needsHeadOperation(readCommandLine(args)) && typeof service.operations?.headOperationId === 'function') {
                 try {
                   headOperations.set(cwd, await service.operations.headOperationId(cwd, signal));
                 } catch {
@@ -790,7 +902,15 @@ export function installGitConfusionGuard(
             } else if (warmExplicit !== undefined) {
               await warmExplicit(cwd);
             }
-            if (typeof execution.callId === 'string') decisions.set(execution.callId, decide(execution, args));
+            if (typeof execution.callId === 'string') {
+              decisions.set(execution.callId, decide(execution, args));
+              // Bound the decision cache: post-execute normally deletes the entry,
+              // but a host that skips that event must not grow it forever.
+              if (decisions.size > 512) {
+                const oldest = decisions.keys().next();
+                if (!oldest.done) decisions.delete(oldest.value);
+              }
+            }
           }
         } catch {
           // Warm-up failure must not block the tool call (fail-open).
@@ -814,6 +934,9 @@ export function installGitConfusionGuard(
         async (execution: GuardExecutionLike, result: unknown, next: () => Promise<unknown>) => {
           const decision = (await next()) as { kind?: string; content?: unknown } | undefined;
           const callId = execution?.callId;
+          // The synchronous guard may consult the precomputed decision once per
+          // call; once the tool finished the entry is no longer needed.
+          if (typeof callId === 'string') decisions.delete(callId);
           const notice = typeof callId === 'string' ? preferenceNotices.get(callId) : undefined;
           if (notice === undefined || decision === undefined || decision.kind !== 'accept') return decision;
           if (typeof callId === 'string') preferenceNotices.delete(callId);
@@ -884,6 +1007,9 @@ export function apply(
   },
   config: JjPluginConfig = {},
 ): void {
+  // Validate before installing anything: an invalid profile config must fail at
+  // boot, like the runtime/tools entries, instead of surfacing at decision time.
+  assertServiceableConfig(resolveConfig(config));
   // Build the host once with every optional member the guard can use. Reading the
   // live Cordis context directly is what makes `workingDirectory.get(session)` and
   // the warm-up listener available in a production profile (V5).
