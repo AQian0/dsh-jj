@@ -9,8 +9,6 @@
  */
 
 import z from '@deepseek-ai/schemastery';
-import type { CommitStyleId } from './commit-style.ts';
-import type { MultiSessionGuidanceMode } from './multi-session.ts';
 
 /** Cordis config schema for every dsh-jj entry point. */
 export const Config = z.object({
@@ -57,67 +55,24 @@ export const Config = z.object({
   defaultCwd: z.string().default(''),
 });
 
-/** Plugin configuration accepted by `apply` (every key optional; defaults from {@link Config}). */
-export interface JjPluginConfig {
-  readonly jjCommand?: string;
-  readonly gitCommand?: string;
-  readonly timeoutMs?: number;
-  readonly graceMs?: number;
-  readonly maxOutputBytes?: number;
-  readonly detectCacheTtlMs?: number;
-  readonly guardMutatingGit?: 'deny' | 'warn' | 'off';
-  readonly guardGitInJjNative?: 'warn' | 'deny' | 'off';
-  /** Treatment of repository-wide jj commands (`jj undo`, `jj op restore`, …) in shell tools (default warn). */
-  readonly guardJjRepositoryWide?: 'warn' | 'deny' | 'off';
-  readonly guardTools?: readonly string[];
-  readonly guardCreateWorktree?: boolean;
-  readonly readOnlyGitNotice?: boolean;
-  readonly preferJjContext?: boolean;
-  /** Multi-session guidance: `auto` (detect live sessions), `always`, or `off` (default auto). */
-  readonly multiSessionGuidance?: MultiSessionGuidanceMode;
-  /** jj revset used as the end-of-task rebase destination in the multi-session guidance (default `trunk()`). */
-  readonly rebaseTarget?: string;
-  /** Inject the commit-description style and split-commit guidance into the model context (default true). */
-  readonly commitGuidance?: boolean;
-  /** Commit-description style: inherit history (`auto`), a preset, or `custom` (default auto). */
-  readonly commitStyle?: CommitStyleId;
-  /** Rules for `commitStyle: 'custom'` (required in that case); ignored for other styles. */
-  readonly commitStyleCustom?: string;
-  /** Tell the model to advance through small, self-contained commits (default true). */
-  readonly preferSplitCommits?: boolean;
-  /** Number of recent descriptions `jj_commit_style` samples (default 30). */
-  readonly commitStyleSampleLimit?: number;
-  readonly defaultLogLimit?: number;
-  readonly maxLogLimit?: number;
-  readonly defaultCwd?: string;
-}
+/**
+ * Plugin configuration accepted by `apply` (every key optional; defaults from {@link Config}).
+ *
+ * Derived from the schemastery schema so a new schema key cannot be forgotten here:
+ * `Partial<ResolvedJjConfig>` is exactly the schema output with every field optional.
+ */
+export type JjPluginConfig = Partial<ResolvedJjConfig>;
 
-/** Configuration with every default applied. */
-export interface ResolvedJjConfig {
-  readonly jjCommand: string;
-  readonly gitCommand: string;
-  readonly timeoutMs: number;
-  readonly graceMs: number;
-  readonly maxOutputBytes: number;
-  readonly detectCacheTtlMs: number;
-  readonly guardMutatingGit: 'deny' | 'warn' | 'off';
-  readonly guardGitInJjNative: 'warn' | 'deny' | 'off';
-  readonly guardJjRepositoryWide: 'warn' | 'deny' | 'off';
-  readonly guardTools: readonly string[];
-  readonly guardCreateWorktree: boolean;
-  readonly readOnlyGitNotice: boolean;
-  readonly preferJjContext: boolean;
-  readonly multiSessionGuidance: MultiSessionGuidanceMode;
-  readonly rebaseTarget: string;
-  readonly commitGuidance: boolean;
-  readonly commitStyle: CommitStyleId;
-  readonly commitStyleCustom: string;
-  readonly preferSplitCommits: boolean;
-  readonly commitStyleSampleLimit: number;
-  readonly defaultLogLimit: number;
-  readonly maxLogLimit: number;
-  readonly defaultCwd: string;
-}
+/**
+ * Configuration with every default applied.
+ *
+ * Derived from the schemastery schema (`Schemastery.TypeT`) instead of being written
+ * out by hand, so the interface cannot drift from {@link Config}.
+ */
+export type ResolvedJjConfig = Schemastery.TypeT<typeof Config>;
+
+/** Schema defaults: the single source of truth for every resolved default value. */
+const SCHEMA_DEFAULTS: ResolvedJjConfig = Config({});
 
 /** Hard upper bound accepted for timer-valued keys (mirrors DSH MAX_TIMER_DELAY_MS). */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -125,42 +80,24 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /**
  * Apply contract defaults to a partial config.
  *
+ * The defaults come from {@link Config}({}) and are only overridden by keys the caller
+ * actually supplied, so `Config` and `resolveConfig` cannot drift. Values are not
+ * validated here (the Cordis loader validates profiles; {@link assertServiceableConfig}
+ * covers construction-time invariants), which keeps tolerant callers like tests working.
+ *
  * @param config - partial plugin config (already schema-validated when loaded by Cordis).
  * @returns a fully populated configuration.
  */
 export function resolveConfig(config: JjPluginConfig = {}): ResolvedJjConfig {
-  return {
-    jjCommand: config.jjCommand ?? 'jj',
-    gitCommand: config.gitCommand ?? 'git',
-    timeoutMs: config.timeoutMs ?? 30_000,
-    graceMs: config.graceMs ?? 3_000,
-    maxOutputBytes: config.maxOutputBytes ?? 262_144,
-    detectCacheTtlMs: config.detectCacheTtlMs ?? 10_000,
-    // Keep these two in lockstep with the Config schema defaults above: a jj workspace
-    // prefers jj and does not forbid git (policy 2026-10-22).
-    guardMutatingGit: config.guardMutatingGit ?? 'warn',
-    guardGitInJjNative: config.guardGitInJjNative ?? 'warn',
-    guardJjRepositoryWide: config.guardJjRepositoryWide ?? 'warn',
-    guardTools: config.guardTools ?? ['bash', 'pwsh', 'terminal_send'],
-    guardCreateWorktree: config.guardCreateWorktree ?? true,
-    readOnlyGitNotice: config.readOnlyGitNotice ?? true,
-    preferJjContext: config.preferJjContext ?? true,
-    // Multi-session policy (2026-10-30): detect parallel sessions by default, allow
-    // `always` for cross-process setups, and let the operator pin the rebase target.
-    // Keep in lockstep with the Config schema above.
-    multiSessionGuidance: config.multiSessionGuidance ?? 'auto',
-    rebaseTarget: config.rebaseTarget ?? 'trunk()',
-    // Commit-description policy (2026-10-30): inherit history, ask when undecidable,
-    // allow presets/custom config. Keep in lockstep with the Config schema above.
-    commitGuidance: config.commitGuidance ?? true,
-    commitStyle: config.commitStyle ?? 'auto',
-    commitStyleCustom: config.commitStyleCustom ?? '',
-    preferSplitCommits: config.preferSplitCommits ?? true,
-    commitStyleSampleLimit: config.commitStyleSampleLimit ?? 30,
-    defaultLogLimit: config.defaultLogLimit ?? 30,
-    maxLogLimit: config.maxLogLimit ?? 200,
-    defaultCwd: config.defaultCwd ?? '',
-  };
+  const resolved: ResolvedJjConfig = { ...SCHEMA_DEFAULTS };
+  const writable = resolved as Record<string, unknown>;
+  for (const key of Object.keys(SCHEMA_DEFAULTS) as (keyof ResolvedJjConfig)[]) {
+    const value = config[key];
+    if (value !== undefined) writable[key] = value;
+  }
+  // Copy the array default so a caller can never mutate the shared schema default.
+  resolved.guardTools = [...(config.guardTools ?? SCHEMA_DEFAULTS.guardTools)];
+  return resolved;
 }
 
 /**

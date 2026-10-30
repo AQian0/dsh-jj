@@ -110,3 +110,19 @@ test('assertServiceableConfig rejects invalid timing and limit values', () => {
   for (const [pattern, run] of cases) assert.throws(run, new RegExp(pattern));
   assert.doesNotThrow(() => assertServiceableConfig(base));
 });
+
+test('resolveConfig derives defaults from the schema and isolates array defaults', () => {
+  const first = resolveConfig({});
+  first.guardTools.push('mutated-by-caller');
+  assert.deepEqual(
+    [...resolveConfig({}).guardTools],
+    ['bash', 'pwsh', 'terminal_send'],
+    'a resolved config must not share the mutable schema default array',
+  );
+  assert.deepEqual([...resolveConfig({ guardTools: ['bash'] }).guardTools], ['bash']);
+  assert.equal(
+    resolveConfig({ timeoutMs: 0 }).timeoutMs,
+    0,
+    'resolveConfig stays tolerant; assertServiceableConfig is the validation step',
+  );
+});
