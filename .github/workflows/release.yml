@@ -110,13 +110,20 @@ jobs:
         # 与 .github/workflows/ci.yml 保持同一套安装配方：仓库保持零依赖、不带
         # lockfile，这里临时安装公开 peer 依赖和固定版本编译器。
         # `@deepseek-ai/dsh-session-projection` 仅测试使用（test/guard-cwd.test.ts
-        # 用它构建真实的 WorkingDirectoryService 栈），不是本插件的 peer 依赖；显式按
-        # dsh-working-directory 声明的 exact peer 版本（0.2.1-rc.2）安装，避免上游
-        # 依赖树变化到发版才炸。
+        # 用它构建真实的 WorkingDirectoryService 栈），不是本插件的 peer 依赖。
+        # 不要硬编码它的版本：上面的 caret peer 范围会解析到最新的 0.2.1-rcN 上游树，
+        # 而上游包彼此声明 exact peer（rc.5 要求 projection@0.2.1-rc.5），钉住旧 rc 会让
+        # 第二次 npm install 在任何测试前就 ERESOLVE 失败；改为从刚装好的依赖树里读
+        # exact peer 版本，保证测试专用依赖始终与本次解析出的上游树一致。
         run: |
           npm install --no-package-lock --ignore-scripts --no-audit --no-fund
+          projection="$(node -p "require('./node_modules/@deepseek-ai/dsh-working-directory/package.json').peerDependencies['@deepseek-ai/dsh-session-projection']")"
+          if [ -z "${projection}" ] || [ "${projection}" = "undefined" ]; then
+            echo "::error::cannot read the @deepseek-ai/dsh-session-projection peer version from the installed DSH tree"
+            exit 1
+          fi
           npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
-            typescript@6.0.3 @types/node@26.6.5 @deepseek-ai/dsh-session-projection@0.2.1-rc.2
+            typescript@6.0.3 @types/node@26.6.5 "@deepseek-ai/dsh-session-projection@${projection}"
 
       - name: Run the documented test gate
         # `npm test` = setup-links（依赖已安装则 no-op）+ tsc -p tsconfig.test.json +

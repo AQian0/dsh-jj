@@ -74,14 +74,22 @@ jobs:
         # lifecycle scripts disabled, and the exact tsc/@types pair.
         # `@deepseek-ai/dsh-session-projection` is test-only: test/guard-cwd.test.ts
         # imports it to build the real WorkingDirectoryService stack, but it is not a
-        # peer dependency of this plugin. Install it explicitly at the exact version
-        # dsh-working-directory declares as a peer dependency (0.2.1-rc.2), so an
-        # upstream dependency-tree change cannot break CI (or a release) at publish
-        # time.
+        # peer dependency of this plugin. Do NOT hardcode its version: the caret peer
+        # ranges above resolve to the newest published 0.2.1-rcN tree, and upstream
+        # packages declare their siblings as *exact* peers (rc.5 requires
+        # projection@0.2.1-rc.5), so pinning an older rc makes this second install fail
+        # with ERESOLVE before any test runs. Read the exact peer version from the tree
+        # step 1 just installed instead, so the test-only dependency always matches
+        # the upstream tree that was actually resolved.
         run: |
           npm install --no-package-lock --ignore-scripts --no-audit --no-fund
+          projection="$(node -p "require('./node_modules/@deepseek-ai/dsh-working-directory/package.json').peerDependencies['@deepseek-ai/dsh-session-projection']")"
+          if [ -z "${projection}" ] || [ "${projection}" = "undefined" ]; then
+            echo "::error::cannot read the @deepseek-ai/dsh-session-projection peer version from the installed DSH tree"
+            exit 1
+          fi
           npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
-            typescript@6.0.3 @types/node@26.6.5 @deepseek-ai/dsh-session-projection@0.2.1-rc.2
+            typescript@6.0.3 @types/node@26.6.5 "@deepseek-ai/dsh-session-projection@${projection}"
 
       - name: Check the offline bootstrap
         # After the install above, scripts/setup-links.ts must no-op; this also

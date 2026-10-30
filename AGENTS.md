@@ -50,8 +50,10 @@
 
 没有 lint / format 脚本;push / PR CI 运行 `npm test`(`.github/workflows/ci.yml`);`release.yml` 在发布前复用同一门禁
 (`npm test`,`build.test.ts` 负责构建 `lib/`),再显式构建、校验发布内容并发布。两个 workflow 的 jj 安装会校验资产
-SHA-256,actions 固定到 commit SHA(注释写明来源与升级方式),并显式安装测试专用依赖
-`@deepseek-ai/dsh-session-projection`(本插件不是它的 peer)。
+SHA-256,actions 固定到 commit SHA(注释写明来源与升级方式),并安装测试专用依赖
+`@deepseek-ai/dsh-session-projection`(本插件不是它的 peer)。该依赖的版本必须从刚安装好的依赖树里读
+`dsh-working-directory` 声明的 exact peer,不要硬编码:上游 `0.2.1-rcN` 树会移动且彼此声明 exact peer,
+钉死旧 rc 会让第二次 `npm install` 在跑测试前就 ERESOLVE(2026-10 曾因此连续三轮 CI 红)。
 
 ## 仓库布局
 
