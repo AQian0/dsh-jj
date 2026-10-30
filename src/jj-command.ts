@@ -12,7 +12,7 @@
  * @module dsh-jj/jj-command
  */
 
-import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess';
+import { scrubbedParentEnv, type SubprocessOutcome } from '@deepseek-ai/dsh-subprocess';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ResolvedJjConfig } from './config.ts';
 import type { JjRunResult, RunCommand, RunJj, RunJjOptions } from './types.ts';
@@ -24,6 +24,8 @@ export type JjErrorCode =
   | 'JJ_NOT_INSTALLED'
   | 'JJ_TIMEOUT'
   | 'JJ_ABORTED'
+  /** The process died from a signal (for example an external SIGINT/SIGTERM). */
+  | 'JJ_SIGNALED'
   | 'JJ_NOT_A_REPO'
   | 'JJ_REPO_BROKEN'
   | 'JJ_BAD_REVSET'
@@ -87,16 +89,31 @@ function bounded(text: string, limit = 2_048): string {
 /**
  * Map a settled jj process outcome onto a {@link JjErrorCode}.
  *
+ * Ordering is part of the contract (audit M2):
+ * - a zero exit code is a success, even when the caller's signal aborted while
+ *   the process was already finishing: the command may simply have won the race,
+ *   and reporting it as cancelled would hide a completed mutation;
+ * - our own deadline is `JJ_TIMEOUT`, with the terminating signal in the message;
+ * - a caller cancellation that stopped the process is `JJ_ABORTED`;
+ * - a process killed by an external signal is `JJ_SIGNALED` — Node reports
+ *   `exitCode: null` there too, so it must not be mistaken for a missing binary;
+ * - `exitCode: null` with no signal is the spawn-failure shape the adapter
+ *   produces when the executable could not be started (for example ENOENT),
+ *   which stays `JJ_NOT_INSTALLED`.
+ *
  * @param result - settled run result.
  * @param aborted - whether the caller's signal was already aborted.
  * @returns the error code, or `undefined` for a successful exit.
  */
 export function classifyJjFailure(result: JjRunResult, aborted: boolean): JjErrorCode | undefined {
-  if (aborted) return 'JJ_ABORTED';
+  if (result.exitCode === 0 && !result.killedByTimeout) return undefined;
   if (result.killedByTimeout) return 'JJ_TIMEOUT';
-  if (result.exitCode === 0) return undefined;
+  if (aborted) return 'JJ_ABORTED';
+  if (result.exitCode === null) {
+    return result.signal === null ? 'JJ_NOT_INSTALLED' : 'JJ_SIGNALED';
+  }
   const stderr = result.stderr;
-  if (result.exitCode === null) return 'JJ_NOT_INSTALLED';
+  if (result.signal !== null) return 'JJ_SIGNALED';
   if (result.exitCode === 255 || /appears broken or inaccessible/i.test(stderr)) return 'JJ_REPO_BROKEN';
   if (/There is no jj repo in/i.test(stderr)) return 'JJ_NOT_A_REPO';
   if (/Failed to parse revset|doesn't exist|no such revision|Revision .* doesn't exist/i.test(stderr)) return 'JJ_BAD_REVSET';
@@ -109,12 +126,18 @@ export function classifyJjFailure(result: JjRunResult, aborted: boolean): JjErro
 export function jjErrorMessage(code: JjErrorCode, argv: readonly string[], result: JjRunResult, jjCommand: string): string {
   const command = `jj ${argv.join(' ')}`;
   switch (code) {
-    case 'JJ_NOT_INSTALLED':
-      return `dsh-jj could not run the jj executable (${jjCommand}). Install Jujutsu (https://jj-vcs.dev) or point the dsh-jj \`jjCommand\` setting at the binary. dsh-jj never substitutes Git for jj.`;
+    case 'JJ_NOT_INSTALLED': {
+      const detail = result.stderr.trim();
+      return `dsh-jj could not run the jj executable (${jjCommand}). Install Jujutsu (https://jj-vcs.dev) or point the dsh-jj \`jjCommand\` setting at the binary. dsh-jj never substitutes Git for jj.${detail.length > 0 ? ` Underlying error: ${bounded(detail, 512)}` : ''}`;
+    }
     case 'JJ_TIMEOUT':
       return `\`${command}\` exceeded its timeout (${result.signal ?? 'killed'}); the repository may already be partially changed — inspect with jj_op_log before retrying.`;
     case 'JJ_ABORTED':
-      return `\`${command}\` was cancelled by the caller.`;
+      return `\`${command}\` was cancelled by the caller; the command may already have partially changed the repository — inspect with jj_op_log before retrying.`;
+    case 'JJ_SIGNALED': {
+      const detail = result.stderr.trim();
+      return `\`${command}\` was terminated by ${result.signal ?? 'a signal'} (not by a dsh-jj timeout); the command may already have partially changed the repository — inspect with jj_op_log before retrying.${detail.length > 0 ? ` Output: ${bounded(detail, 512)}` : ''}`;
+    }
     case 'JJ_NOT_A_REPO':
       return `\`${command}\` failed: this directory is not a usable Jujutsu (jj) repository. ${bounded(result.stderr, 512)}`;
     case 'JJ_REPO_BROKEN':
@@ -145,9 +168,100 @@ function readCollected(reader: { readFrom(fromByte: number): { text: string; los
   }
 }
 
+/** Effective limits for one spawn-based run (per-call overrides win over config). */
+interface SpawnLimits {
+  readonly timeoutMs: number;
+  readonly graceMs: number;
+  readonly maxOutputBytes: number;
+}
+
+/** Read `error` as a message without leaking `unknown` through the adapter. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Shared execution ladder for both spawn-based runners.
+ *
+ * The jj and Git adapters must behave identically for deadlines, caller
+ * cancellation, bounded collection, and teardown (audit M7): a Git probe must
+ * not outlive the configured timeout while jj calls respect it. Only argv and
+ * env differ between the two runners; everything else lives here so the two
+ * cannot drift.
+ *
+ * @param ctx - context providing the `subprocess` service.
+ * @param config - resolved plugin configuration (default limits).
+ * @param options - per-call contract options (overrides and caller signal).
+ * @param argv - fully built argv (program included).
+ * @param env - fully layered environment for this run.
+ * @returns the settled result; a pre-aborted caller never spawns anything.
+ */
+async function runSpawned(
+  ctx: Context,
+  config: ResolvedJjConfig,
+  options: RunJjOptions,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<JjRunResult> {
+  if (options.signal?.aborted === true) return emptyResult();
+  const limits: SpawnLimits = {
+    timeoutMs: options.timeoutMs || config.timeoutMs,
+    graceMs: options.graceMs || config.graceMs,
+    maxOutputBytes: options.maxOutputBytes || config.maxOutputBytes,
+  };
+  const controller = new AbortController();
+  const onAbort = (): void => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error('dsh-jj timeout')), limits.timeoutMs);
+  let timedOut = false;
+  controller.signal.addEventListener('abort', () => {
+    // A caller cancellation is classified as JJ_ABORTED, not as our deadline.
+    if (options.signal?.aborted !== true) timedOut = true;
+  });
+  try {
+    const handle = ctx.subprocess.spawn({
+      argv,
+      cwd: options.cwd,
+      stdio: {
+        stdin: 'ignore',
+        stdout: { maxBytes: limits.maxOutputBytes },
+        stderr: { maxBytes: limits.maxOutputBytes },
+      },
+      graceMs: limits.graceMs,
+      signal: controller.signal,
+      env,
+    });
+    let outcome: SubprocessOutcome;
+    try {
+      outcome = await handle.done;
+    } catch (error) {
+      handle.terminate();
+      await handle.waitForExit().catch(() => false);
+      return { ...emptyResult(), stderr: errorMessage(error), killedByTimeout: timedOut };
+    }
+    const stdout = readCollected(handle.collected.stdout);
+    const stderr = readCollected(handle.collected.stderr);
+    return {
+      exitCode: outcome.exitCode,
+      signal: outcome.signal,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      truncated: stdout.lossy,
+      killedByTimeout: timedOut,
+    };
+  } catch (error) {
+    // Spawn refused synchronously (missing executable, invalid spec).
+    return { ...emptyResult(), stderr: errorMessage(error), killedByTimeout: timedOut };
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * The real runner: `ctx.subprocess.spawn` with collected output, grace, and a
- * caller-owned timeout (contract §5.5).
+ * caller-owned timeout (contract §5.5). Shares the deadline/abort ladder with
+ * {@link createRunGit} through {@link runSpawned}.
  *
  * @param ctx - context providing the `subprocess` service.
  * @param config - resolved plugin configuration.
@@ -155,62 +269,8 @@ function readCollected(reader: { readFrom(fromByte: number): { text: string; los
  */
 export function createRunJj(ctx: Context, config: ResolvedJjConfig): RunJj {
   return async (options: RunJjOptions): Promise<JjRunResult> => {
-    if (options.signal?.aborted === true) return emptyResult();
     const argv = [options.jjCommand || config.jjCommand, '--no-pager', '--color=never', ...options.argv];
-    const controller = new AbortController();
-    const onAbort = (): void => controller.abort(options.signal?.reason);
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => controller.abort(new Error('dsh-jj timeout')), options.timeoutMs || config.timeoutMs);
-    let timedOut = false;
-    controller.signal.addEventListener('abort', () => {
-      if (options.signal?.aborted !== true) timedOut = true;
-    });
-    try {
-      const handle = ctx.subprocess.spawn({
-        argv,
-        cwd: options.cwd,
-        stdio: {
-          stdin: 'ignore',
-          stdout: { maxBytes: options.maxOutputBytes || config.maxOutputBytes },
-          stderr: { maxBytes: options.maxOutputBytes || config.maxOutputBytes },
-        },
-        graceMs: options.graceMs || config.graceMs,
-        signal: controller.signal,
-        env: jjNonInteractiveEnv(options.env),
-      });
-      let outcome;
-      try {
-        outcome = await handle.done;
-      } catch (error) {
-        handle.terminate();
-        await handle.waitForExit().catch(() => false);
-        return {
-          ...emptyResult(),
-          stderr: error instanceof Error ? error.message : String(error),
-          killedByTimeout: timedOut,
-        };
-      }
-      const stdout = readCollected(handle.collected.stdout);
-      const stderr = readCollected(handle.collected.stderr);
-      return {
-        exitCode: outcome.exitCode,
-        signal: outcome.signal,
-        stdout: stdout.text,
-        stderr: stderr.text,
-        truncated: stdout.lossy,
-        killedByTimeout: timedOut,
-      };
-    } catch (error) {
-      // Spawn refused synchronously (missing executable, invalid spec).
-      return {
-        ...emptyResult(),
-        stderr: error instanceof Error ? error.message : String(error),
-        killedByTimeout: timedOut,
-      };
-    } finally {
-      clearTimeout(timer);
-      options.signal?.removeEventListener('abort', onAbort);
-    }
+    return await runSpawned(ctx, config, options, argv, jjNonInteractiveEnv(options.env));
   };
 }
 
@@ -236,6 +296,8 @@ export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): R
       signal: result.signal,
       stdout: result.stdout,
       stderr: result.errorCode !== undefined ? `${result.errorCode}: ${result.stderr}` : result.stderr,
+      // The injected `RunCommand` shape has no truncation signal; the spawn-based
+      // adapter (`createRunJj`/`createRunGit`) is the one that tracks lossy output.
       truncated: false,
       killedByTimeout: result.timedOut,
     };
@@ -244,7 +306,9 @@ export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): R
 
 /**
  * The Git runner: used **only** for probes (`git rev-parse`, `git --version`) and
- * never as a fallback for jj work (contract §5.4 MUST 1).
+ * never as a fallback for jj work (contract §5.4 MUST 1). It shares
+ * {@link runSpawned} with the jj adapter, so a hung Git probe is bounded by the
+ * same configurable timeout and caller cancellation (audit M7).
  *
  * @param ctx - context providing the `subprocess` service.
  * @param config - resolved plugin configuration.
@@ -252,35 +316,16 @@ export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): R
  */
 export function createRunGit(ctx: Context, config: ResolvedJjConfig): RunJj {
   return async (options: RunJjOptions): Promise<JjRunResult> => {
-    if (options.signal?.aborted === true) return emptyResult();
     const argv = [options.jjCommand || config.gitCommand, ...options.argv];
-    try {
-      const handle = ctx.subprocess.spawn({
-        argv,
-        cwd: options.cwd,
-        stdio: {
-          stdin: 'ignore',
-          stdout: { maxBytes: options.maxOutputBytes || config.maxOutputBytes },
-          stderr: { maxBytes: options.maxOutputBytes || config.maxOutputBytes },
-        },
-        graceMs: options.graceMs || config.graceMs,
-        signal: options.signal,
-        env: { ...scrubbedParentEnv(), NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', GIT_OPTIONAL_LOCKS: '0', ...(options.env ?? {}) },
-      });
-      const outcome = await handle.done;
-      const stdout = readCollected(handle.collected.stdout);
-      const stderr = readCollected(handle.collected.stderr);
-      return {
-        exitCode: outcome.exitCode,
-        signal: outcome.signal,
-        stdout: stdout.text,
-        stderr: stderr.text,
-        truncated: stdout.lossy,
-        killedByTimeout: false,
-      };
-    } catch (error) {
-      return { ...emptyResult(), stderr: error instanceof Error ? error.message : String(error) };
-    }
+    const env = {
+      ...scrubbedParentEnv(),
+      NO_COLOR: '1',
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_PAGER: 'cat',
+      GIT_OPTIONAL_LOCKS: '0',
+      ...(options.env ?? {}),
+    };
+    return await runSpawned(ctx, config, options, argv, env);
   };
 }
 
@@ -299,6 +344,8 @@ export function createCommandRunGit(run: RunCommand, config: ResolvedJjConfig): 
       signal: result.signal,
       stdout: result.stdout,
       stderr: result.errorCode !== undefined ? `${result.errorCode}: ${result.stderr}` : result.stderr,
+      // The injected `RunCommand` shape has no truncation signal; the spawn-based
+      // adapter (`createRunJj`/`createRunGit`) is the one that tracks lossy output.
       truncated: false,
       killedByTimeout: result.timedOut,
     };
