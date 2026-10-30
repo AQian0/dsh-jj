@@ -104,6 +104,85 @@ export interface JjWorkspaceAddResult {
   readonly change: JjChangeRecord;
 }
 
+/** jj's empty root commit id: a destination that resolves to it is never an integration base. */
+export const ROOT_COMMIT_ID = '0'.repeat(40);
+
+/** How a hand-off destination was chosen (model-facing provenance). */
+export type JjHandoffTargetSource = 'argument' | 'configured' | 'trunk' | 'main' | 'master';
+
+/** The integration destination a hand-off resolved. */
+export interface JjHandoffTarget {
+  /** The revset expression that resolved (as given/configured or the automatic fallback). */
+  readonly revset: string;
+  /** Why this candidate was used. */
+  readonly source: JjHandoffTargetSource;
+  readonly change: JjChangeRecord;
+}
+
+/** Outcome of the hand-off's `jj git fetch`; never fatal. */
+export interface JjFetchResult {
+  readonly status: 'fetched' | 'no-remote' | 'skipped' | 'failed';
+  readonly message: string;
+}
+
+/** Options for {@link JjOperations.handoff}. */
+export interface JjHandoffOptions {
+  /** Explicit integration revset (a user-named revision or bookmark); omit for automatic resolution. */
+  readonly destination?: string;
+  /** Bottom-most change of this workspace's stack; omit to detect it above the destination. */
+  readonly firstChange?: string;
+  /** Local bookmark to move to the rebased tip (only a bookmark this session owns). */
+  readonly bookmark?: string;
+  /** Run `jj git fetch` first (default true; a repository without remotes is fine). */
+  readonly fetch?: boolean;
+}
+
+/** One conflicted change reported by a hand-off. */
+export interface JjHandoffConflict {
+  readonly changeId: string;
+  readonly description: string;
+}
+
+/** Result of a bookmark move requested by a hand-off. */
+export interface JjHandoffBookmark {
+  readonly name: string;
+  readonly target: string;
+  readonly moved: boolean;
+}
+
+/** Result of {@link JjOperations.handoff}: everything the model needs to report or finish. */
+export interface JjHandoffResult {
+  readonly fetch: JjFetchResult;
+  /** Destination revset that was resolved. */
+  readonly destination: string;
+  readonly destinationSource: JjHandoffTargetSource;
+  readonly destinationChangeId: string;
+  readonly destinationCommitId: string;
+  /** Bottom-most change of the stack (empty when nothing was integrated). */
+  readonly firstChangeId: string;
+  /** The stack from `firstChangeId` up to and including `@`, newest first. */
+  readonly stack: readonly JjChangeRecord[];
+  readonly rebased: boolean;
+  readonly alreadyIntegrated: boolean;
+  /** True when the stack's base is the destination after this call. */
+  readonly onTarget: boolean;
+  /** Change ids of disconnected stacks when auto-detection was ambiguous. */
+  readonly ambiguousRoots: readonly string[];
+  readonly conflicts: readonly JjHandoffConflict[];
+  /** True when `@` has uncommitted content and must be committed before a hand-off. */
+  readonly needsCommit: boolean;
+  readonly message: string;
+  readonly bookmark?: JjHandoffBookmark;
+  /** Why a requested bookmark move was skipped (conflicts, empty stack). */
+  readonly bookmarkSkipped?: string;
+}
+
+/** Whether an error is jj's "working copy is stale" refusal (another workspace rewrote a shared ancestor). */
+function isStaleWorkingCopyFailure(error: unknown): boolean {
+  const stderr = error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : '';
+  return /stale/i.test(stderr) && /workspace update-stale/i.test(stderr);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
 }
@@ -498,6 +577,29 @@ export class JjOperations {
     return workspaces;
   }
 
+  /**
+   * `jj workspace forget <name>`.
+   *
+   * Unregisters one working copy without touching the shared commit graph (the
+   * directory and its files stay on disk, but jj stops treating it as a working
+   * copy). Callers must run this from a *different* workspace than the one being
+   * forgotten and own the target: the `jj_workspace_cleanup` tool enforces both,
+   * the shell guard keeps denying raw `jj workspace forget <other>` commands.
+   *
+   * @param cwd - directory to run jj in (the surviving workspace).
+   * @param name - exact workspace name from `jj workspace list`.
+   * @param signal - cancellation signal.
+   * @returns bounded jj output.
+   */
+  async workspaceForget(cwd: string, name: string, signal?: AbortSignal): Promise<string> {
+    if (name.trim().length === 0 || name.trim().startsWith('-')) {
+      throw badInput('workspace name must be non-empty and must not start with "-".');
+    }
+    const argv = ['workspace', 'forget', name.trim()];
+    const result = await this.run(cwd, argv, signal);
+    return bound(result.stdout.trim() || result.stderr.trim(), 1024).text;
+  }
+
   /** `jj bookmark list [--all-remotes] -T 'json(self) ++ "\n"'`. */
   async bookmarkList(
     cwd: string,
@@ -562,6 +664,12 @@ export class JjOperations {
    * parents), while `-s` moves the revision together with all of its descendants.
    * Moving a whole stack (the multi-session hand-off) therefore needs
    * `mode: 'source'`; the default stays `revisions` to preserve existing callers.
+   *
+   * The literal `trunk()` destination gets one preflight: in a repository without
+   * a fetched remote main it resolves to jj's empty root commit, and jj's raw
+   * revset error reads like a typo instead of the real cause. The model gets an
+   * actionable message instead (and `jj_handoff` never has this problem because it
+   * resolves the target with fallbacks).
    */
   async rebase(
     cwd: string,
@@ -570,12 +678,312 @@ export class JjOperations {
     signal?: AbortSignal,
     mode: JjRebaseMode = 'revisions',
   ): Promise<string> {
+    if (destination.trim() === 'trunk()') {
+      const trunk = await this.tryReadAt(cwd, destination, signal);
+      if (trunk !== undefined && trunk.commitId === ROOT_COMMIT_ID) {
+        throw badInput(
+          "`trunk()` resolves to jj's empty root commit here: this repository has no fetched remote main (local main/master bookmarks do not define trunk()). Pass a real destination such as `main` or a change id, or call jj_handoff, which resolves the integration target automatically.",
+        );
+      }
+    }
     const flag = REBASE_MODE_FLAGS[mode] ?? '-r';
     const argv = ['rebase', flag, revision, '-d', destination];
     const result = await this.run(cwd, argv, signal);
     // jj prints the "Rebased N commits…" status on stderr even on success, so fall
     // back to it when stdout is empty; the model gets a real result summary.
     return bound(result.stdout.trim() || result.stderr.trim(), 2 * 1024).text;
+  }
+
+  /** `jj workspace update-stale` — recovery after another workspace rewrote a shared ancestor. */
+  async updateStale(cwd: string, signal?: AbortSignal): Promise<string> {
+    const argv = ['workspace', 'update-stale'];
+    const result = await this.run(cwd, argv, signal);
+    return bound(result.stdout.trim() || result.stderr.trim(), 1024).text;
+  }
+
+  /**
+   * `jj git fetch`, classified instead of thrown: a local-only repository has no
+   * remote and that is a normal state for a hand-off, not an error. Aborts and
+   * timeouts still surface because the caller asked to stop.
+   */
+  async fetch(cwd: string, signal?: AbortSignal): Promise<JjFetchResult> {
+    try {
+      const result = await this.run(cwd, ['git', 'fetch'], signal);
+      const text = bound(
+        [result.stdout.trim(), result.stderr.trim()].filter((line) => line.length > 0).join('\n'),
+        1024,
+      ).text;
+      return { status: 'fetched', message: text.length > 0 ? text : 'jj git fetch completed with nothing new to fetch.' };
+    } catch (error) {
+      if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
+      const detail = error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : String(error);
+      if (/No git remotes to fetch from|No matching remotes/i.test(detail)) {
+        return {
+          status: 'no-remote',
+          message: 'This repository has no git remote to fetch from; continuing with the local targets.',
+        };
+      }
+      return {
+        status: 'failed',
+        message: `jj git fetch failed; continuing with the local targets. ${bound(detail, 512).text}`,
+      };
+    }
+  }
+
+  /**
+   * Resolve the integration destination for a hand-off.
+   *
+   * Order: the explicit `destination` when the model/user named one, otherwise the
+   * configured `rebaseTarget` (default `trunk()`), then `trunk()`, local `main`,
+   * and local `master`. A candidate counts only when the revset resolves to a real
+   * commit: jj's empty root commit (the usual `trunk()` result in a local-only
+   * repository) is skipped so the model never has to ask the user which revision
+   * to use. Only when every candidate fails does the error ask for a target.
+   *
+   * @param cwd - workspace directory.
+   * @param options - explicit destination (optional) and the configured rebase target.
+   * @param signal - cancellation signal.
+   * @returns the first usable target with its provenance.
+   * @throws JjError `JJ_BAD_INPUT` when the explicit revset is invalid or no target exists.
+   */
+  async resolveHandoffTarget(
+    cwd: string,
+    options: { readonly destination?: string; readonly configured: string },
+    signal?: AbortSignal,
+  ): Promise<JjHandoffTarget> {
+    const requested = options.destination?.trim();
+    const candidates: { revset: string; source: JjHandoffTargetSource }[] = [];
+    if (requested !== undefined && requested.length > 0) {
+      candidates.push({ revset: requested, source: 'argument' });
+    } else {
+      candidates.push({ revset: options.configured, source: 'configured' });
+    }
+    candidates.push({ revset: 'trunk()', source: 'trunk' }, { revset: 'main', source: 'main' }, { revset: 'master', source: 'master' });
+
+    const bookmarks = await this.localBookmarkNames(cwd, signal);
+    const bookmarkHint = bookmarks.length > 0 ? bookmarks.join(', ') : 'none';
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      if (seen.has(candidate.revset)) continue;
+      seen.add(candidate.revset);
+      const change = await this.tryReadAt(cwd, candidate.revset, signal);
+      if (change === undefined) {
+        if (candidate.source === 'argument') {
+          throw badInput(
+            `jj_handoff cannot use destination ${JSON.stringify(candidate.revset)}: the revset does not resolve in this repository. Pass a real revision (local bookmarks: ${bookmarkHint}), or omit destination to let jj_handoff resolve the target.`,
+          );
+        }
+        continue;
+      }
+      // `trunk()` in a local-only repository resolves to the empty root commit; the
+      // local main/master fallbacks below are the usable targets there.
+      if (change.commitId === ROOT_COMMIT_ID) continue;
+      return { ...candidate, change };
+    }
+    throw badInput(
+      `jj_handoff found no usable integration target: the configured target ${JSON.stringify(options.configured)} and the trunk()/main/master fallbacks all resolve to jj's empty root commit. Local bookmarks: ${bookmarkHint}. Ask the user which revision to integrate onto, pass it as destination, and call jj_handoff again.`,
+    );
+  }
+
+  /**
+   * Integrate this workspace's change stack onto a base revision.
+   *
+   * One call does the whole end-of-work hand-off so the model does not have to
+   * chain raw jj commands (and hand control back to the user when one of them
+   * fails): fetch (skipped/ignored when there is no remote), resolve the target
+   * deterministically, detect the stack above it, move the whole stack with
+   * `jj rebase -s`, recover a stale working copy once, report every conflicted
+   * change, and optionally move an owned bookmark to the rebased tip.
+   *
+   * It never decides content: conflicts are reported for the model to resolve (the
+   * same workspace is then handed off again to verify). A non-empty `@` is reported
+   * as `needsCommit` so the model commits with `jj_commit` first instead of the
+   * change being folded into the rebase.
+   *
+   * @param cwd - workspace directory.
+   * @param options - destination/firstChange/bookmark/fetch options.
+   * @param signal - cancellation signal.
+   * @returns the full hand-off report.
+   */
+  async handoff(cwd: string, options: JjHandoffOptions = {}, signal?: AbortSignal): Promise<JjHandoffResult> {
+    const fetchResult: JjFetchResult =
+      options.fetch === false
+        ? { status: 'skipped', message: 'jj git fetch was disabled for this call.' }
+        : await this.fetch(cwd, signal);
+    const target = await this.resolveHandoffTarget(
+      cwd,
+      {
+        ...(options.destination !== undefined ? { destination: options.destination } : {}),
+        configured: this.config.rebaseTarget,
+      },
+      signal,
+    );
+    const base: JjHandoffResult = {
+      fetch: fetchResult,
+      destination: target.revset,
+      destinationSource: target.source,
+      destinationChangeId: target.change.changeId,
+      destinationCommitId: target.change.commitId,
+      firstChangeId: '',
+      stack: [],
+      rebased: false,
+      alreadyIntegrated: false,
+      onTarget: false,
+      ambiguousRoots: [],
+      conflicts: [],
+      needsCommit: false,
+      message: '',
+    };
+
+    const workingCopy = await this.readAt(cwd, signal);
+    if (!workingCopy.empty) {
+      return {
+        ...base,
+        needsCommit: true,
+        stack: [workingCopy],
+        message:
+          'The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository\'s style), then call jj_handoff again.',
+      };
+    }
+
+    let first: JjChangeRecord;
+    const explicitFirst = options.firstChange?.trim();
+    if (explicitFirst !== undefined && explicitFirst.length > 0) {
+      const ancestor = await this.tryReadAt(cwd, `(${explicitFirst}) & ::@`, signal);
+      if (ancestor === undefined) {
+        throw badInput(
+          `jj_handoff firstChange ${JSON.stringify(explicitFirst)} is not a change in this workspace's working-copy ancestry. Pass the bottom-most change id this session created (inspect jj_log if needed).`,
+        );
+      }
+      first = ancestor;
+    } else {
+      const roots = await this.stackRoots(cwd, target.revset, signal);
+      if (roots.length === 0) {
+        return {
+          ...base,
+          alreadyIntegrated: true,
+          onTarget: true,
+          message: `This workspace has no changes above ${target.revset}: the stack is already integrated, nothing to rebase.`,
+        };
+      }
+      if (roots.length > 1) {
+        return {
+          ...base,
+          ambiguousRoots: roots.map((change) => change.changeId),
+          message: `This workspace has ${roots.length} disconnected stacks above ${target.revset}. Pass firstChange with the bottom-most change of the stack to rebase (candidates: ${roots.map((change) => change.changeId).join(', ')}).`,
+        };
+      }
+      first = roots[0] as JjChangeRecord;
+    }
+
+    const parentCommitId = await this.parentCommitId(cwd, first.changeId, signal);
+    if (parentCommitId !== undefined && parentCommitId === target.change.commitId) {
+      const stack = await this.stackFrom(cwd, first.changeId, signal);
+      return {
+        ...base,
+        firstChangeId: first.changeId,
+        stack,
+        alreadyIntegrated: true,
+        onTarget: true,
+        conflicts: this.conflictsIn(stack),
+        message: `The stack is already based directly on ${target.revset}; no rebase was needed.`,
+      };
+    }
+
+    let message: string;
+    try {
+      message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
+    } catch (error) {
+      if (!isStaleWorkingCopyFailure(error)) throw error;
+      // Another workspace rewrote a shared ancestor: refresh this working copy and
+      // retry once instead of leaving recovery to the user.
+      await this.updateStale(cwd, signal);
+      message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
+    }
+
+    const stack = await this.stackFrom(cwd, first.changeId, signal);
+    const conflicts = this.conflictsIn(stack);
+    const rebasedParentCommitId = await this.parentCommitId(cwd, first.changeId, signal);
+    const onTarget = rebasedParentCommitId !== undefined && rebasedParentCommitId === target.change.commitId;
+
+    let bookmark: JjHandoffBookmark | undefined;
+    let bookmarkSkipped: string | undefined;
+    const requestedBookmark = options.bookmark?.trim();
+    if (requestedBookmark !== undefined && requestedBookmark.length > 0) {
+      if (conflicts.length > 0) {
+        bookmarkSkipped = `Bookmark ${requestedBookmark} was left in place because the rebased stack has conflicts; resolve them and call jj_handoff again with the same bookmark.`;
+      } else {
+        const tip = this.bookmarkTip(stack);
+        if (tip === undefined) {
+          bookmarkSkipped = 'The rebased stack has no content change to point a bookmark at.';
+        } else {
+          bookmark = await this.bookmarkSet(cwd, requestedBookmark, tip.changeId, false, signal);
+        }
+      }
+    }
+
+    return {
+      ...base,
+      firstChangeId: first.changeId,
+      stack,
+      rebased: true,
+      onTarget,
+      conflicts,
+      message,
+      ...(bookmark !== undefined ? { bookmark } : {}),
+      ...(bookmarkSkipped !== undefined ? { bookmarkSkipped } : {}),
+    };
+  }
+
+  /** Bottom-most change(s) of this workspace's stack above `target` (`roots(::@ ~ ::target)`). */
+  private async stackRoots(cwd: string, target: string, signal?: AbortSignal): Promise<readonly JjChangeRecord[]> {
+    return await this.log(cwd, `roots(::@ ~ ::(${target}))`, 32, signal);
+  }
+
+  /** The stack from `first` up to and including `@`, newest first. */
+  private async stackFrom(cwd: string, first: string, signal?: AbortSignal): Promise<readonly JjChangeRecord[]> {
+    return await this.log(cwd, `(${first})::@`, this.config.maxLogLimit, signal);
+  }
+
+  /** Parent commit id of a revision, or `undefined` when it does not resolve. */
+  private async parentCommitId(cwd: string, revset: string, signal?: AbortSignal): Promise<string | undefined> {
+    const parent = await this.tryReadAt(cwd, `(${revset})-`, signal);
+    return parent?.commitId;
+  }
+
+  /** Conflicted changes in one stack, model-facing. */
+  private conflictsIn(stack: readonly JjChangeRecord[]): JjHandoffConflict[] {
+    return stack
+      .filter((change) => change.conflict)
+      .map((change) => ({ changeId: change.changeId, description: change.description }));
+  }
+
+  /** The stack's top content change (newest first, skipping the empty working-copy change). */
+  private bookmarkTip(stack: readonly JjChangeRecord[]): JjChangeRecord | undefined {
+    return (
+      stack.find((change) => !change.empty && !change.currentWorkingCopy) ??
+      stack.find((change) => !change.empty)
+    );
+  }
+
+  /** Local (non-remote-tracking) bookmark names, used in actionable errors. */
+  private async localBookmarkNames(cwd: string, signal?: AbortSignal): Promise<readonly string[]> {
+    try {
+      const bookmarks = await this.bookmarkList(cwd, false, signal);
+      return bookmarks.filter((bookmark) => bookmark.remote === null && bookmark.name.length > 0).map((bookmark) => bookmark.name);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Read one revision without throwing: an unresolvable revset reports `undefined` for fallbacks. */
+  private async tryReadAt(cwd: string, revset: string, signal?: AbortSignal): Promise<JjChangeRecord | undefined> {
+    try {
+      return await this.readAt(cwd, signal, revset);
+    } catch (error) {
+      if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
+      return undefined;
+    }
   }
 
   /** Read `@` (or a revset) as a {@link JjChangeRecord}. */

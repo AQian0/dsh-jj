@@ -19,7 +19,7 @@ import {
   resolveCommitStylePolicy,
 } from './commit-style.ts';
 import { Config, resolveConfig, type JjPluginConfig, type ResolvedJjConfig } from './config.ts';
-import type { JjOperations } from './service.ts';
+import type { JjHandoffResult, JjOperations } from './service.ts';
 import type { VcsDescriptor, VcsKind } from './types.ts';
 
 export { Config };
@@ -34,7 +34,11 @@ export interface JjToolService {
 /** Structural view of the host context used by the tools entry. */
 export interface JjToolsHost {
   readonly tools: { register(definition: ToolDefinition): () => void };
-  readonly workingDirectory?: { ensure(agent: unknown, signal?: AbortSignal): Promise<string> };
+  readonly workingDirectory?: {
+    ensure(agent: unknown, signal?: AbortSignal): Promise<string>;
+    /** Move one session to another directory (`workingDirectory.set`); optional on older hosts. */
+    set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string>;
+  };
 }
 
 /** Refusal text for a directory that is not a usable jj workspace (contract §7.4). */
@@ -119,14 +123,80 @@ function workspaceFields(descriptor: VcsDescriptor): { kind: 'jj-colocated' | 'j
 }
 
 /**
+ * Cleanup line for a hand-off result: say exactly who unregisters the workspace.
+ *
+ * A temporary workspace created through `jj_workspace_add` in this session may be
+ * cleaned by `jj_workspace_cleanup`; anything else (user-created or another
+ * session's workspace) stays a user action, with the exact command quoted.
+ */
+function workspaceCleanupText(descriptor: VcsDescriptor, cleanupOwned: boolean): string {
+  const workspaceName = descriptor.workspaceName ?? 'default';
+  if (workspaceName === 'default') return 'This is the default workspace; there is no temporary workspace to clean up.';
+  if (cleanupOwned) {
+    return `This session created workspace "${workspaceName}" with jj_workspace_add: after the hand-off is verified, call jj_workspace_cleanup to return to the default workspace and unregister it.`;
+  }
+  return `Workspace cleanup stays a user action for "${workspaceName}" at ${descriptor.root} (it was not created through jj_workspace_add in this session): report the exact commands — run \`jj workspace forget ${workspaceName}\` from the default workspace, then delete ${descriptor.root} — and do not run jj workspace forget yourself.`;
+}
+
+/**
+ * Model-facing next step for one hand-off result.
+ *
+ * The whole point of jj_handoff is that the model does not re-delegates its steps
+ * to the user: every branch below names the concrete next tool call. The only
+ * user interaction left is an explicit integration target when the repository
+ * genuinely has none.
+ */
+function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescriptor, cleanupOwned: boolean): string {
+  const cleanup = workspaceCleanupText(descriptor, cleanupOwned);
+  if (result.needsCommit) {
+    return 'Commit the working copy with jj_commit (a description following this repository\'s style), then call jj_handoff again. Do not ask the user to commit.';
+  }
+  if (result.ambiguousRoots.length > 0) {
+    return `Pass firstChange with one of these change ids and call jj_handoff again: ${result.ambiguousRoots.join(', ')}.`;
+  }
+  const cleanupNote = result.bookmarkSkipped !== undefined ? ` ${result.bookmarkSkipped}` : '';
+  if (result.conflicts.length > 0) {
+    const ids = result.conflicts.map((conflict) => conflict.changeId).join(', ');
+    return [
+      'Resolve the conflicts yourself; do not ask the user to do it.',
+      'Edit the files to their final content (remove the `<<<<<<<` / `%%%%%%%` / `>>>>>>>` marker blocks) and run jj_status so jj snapshots the resolution. For a conflict inside a middle commit, `jj edit <change>`, fix it, then `jj new <top change>` to return.',
+      `Then call jj_handoff again to confirm no conflicts remain, and report the rebased change ids. Conflicted changes: ${ids}.${cleanupNote}`,
+      cleanup,
+    ].join('\n');
+  }
+  if (!result.onTarget) {
+    return `The rebase command ran but the stack base is not the resolved destination yet. Inspect the change graph with jj_log and report the change ids; do not hand the remaining steps to the user. ${cleanup}`;
+  }
+  if (result.alreadyIntegrated) {
+    return `Nothing to rebase and no conflicts: the stack already sits on ${result.destination}. Report the destination, the change ids and any bookmark outcome to the user.${cleanupNote} ${cleanup}`;
+  }
+  return `Rebase finished and verified: the stack now sits directly on ${result.destination}. Report the rebased change ids, the destination, and the resolved-by-fallback provenance (destinationSource) to the user.${cleanupNote} ${cleanup}`;
+}
+
+/**
  * Build every `jj_*` tool definition (contract §7.3).
  *
  * @param context - service access, resolved config, host, and the cwd resolver.
- * @returns the 15 tool definitions in a stable order.
+ * @returns the 17 tool definitions in a stable order.
  */
 export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   const { service, config } = context;
   const operations = service.operations;
+  /**
+   * Workspaces this session created through `jj_workspace_add`, keyed by the live
+   * agent. Ownership is the safety invariant behind `jj_workspace_cleanup`: only a
+   * workspace this exact session registered may be unregistered by the plugin, so a
+   * session can never forget another session's (or the user's) working copy.
+   */
+  const sessionWorkspaces = new WeakMap<object, Set<string>>();
+  const rememberOwnedWorkspace = (agent: unknown, name: string): void => {
+    if (typeof agent !== 'object' || agent === null) return;
+    const owned = sessionWorkspaces.get(agent) ?? new Set<string>();
+    owned.add(name);
+    sessionWorkspaces.set(agent, owned);
+  };
+  const ownsWorkspace = (agent: unknown, name: string): boolean =>
+    typeof agent === 'object' && agent !== null && (sessionWorkspaces.get(agent)?.has(name) ?? false);
   // Commit-description policy is owned by the runtime entry (`ctx.jj`) so the
   // session prompt and jj_commit_style cannot disagree; the tools row only carries
   // tool-specific tuning (limits, default cwd, …).
@@ -561,6 +631,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const cwd = await context.cwdFor(exec);
         await requireWorkspace(context, cwd, exec.signal);
         const result = await operations.workspaceAdd(cwd, args.path, args.name, args.parents ?? [], args.message, args.colocate, exec.signal);
+        rememberOwnedWorkspace(exec.agent, result.name);
         return { path: result.path, name: result.name, changeId: result.change.changeId, commitId: result.change.commitId };
       },
     }),
@@ -706,6 +777,201 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const mode = args.mode ?? 'revisions';
         const message = await operations.rebase(cwd, args.revision, args.destination, exec.signal, mode);
         return { revision: args.revision, destination: args.destination, mode, message };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_handoff',
+      description:
+        'Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace\'s whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.',
+      parameters: {
+        destination: {
+          type: 'string',
+          description:
+            "jj revset to integrate onto (only when the user named a revision/bookmark). Omit for automatic resolution: the configured rebaseTarget (default trunk()), then local main/master; a local-only repository without a remote is handled.",
+        },
+        firstChange: {
+          type: 'string',
+          description:
+            "Bottom-most change id of this workspace's stack. Omit inside a dedicated session workspace (the stack above the destination is detected automatically). Required in the default workspace, whose history may contain changes this session does not own.",
+        },
+        bookmark: {
+          type: 'string',
+          description:
+            "Local bookmark to move to the rebased tip. Pass it only when this session owns the bookmark; never move another session's bookmark.",
+        },
+        fetch: { type: 'boolean', description: 'Run `jj git fetch` first (default true). Set false when the user explicitly asked to stay offline.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            kind: { type: 'string', enum: ['jj-colocated', 'jj-native'], required: true },
+            workspaceRoot: { type: 'string', required: true },
+            workspaceName: { type: 'string', required: true },
+            destination: { type: 'string', required: true },
+            destinationSource: { type: 'string', enum: ['argument', 'configured', 'trunk', 'main', 'master'], required: true },
+            destinationChangeId: { type: 'string', required: true },
+            destinationCommitId: { type: 'string', required: true },
+            firstChangeId: { type: 'string', required: true },
+            stack: { type: 'array', items: CHANGE_SCHEMA, required: true },
+            rebased: { type: 'boolean', required: true },
+            alreadyIntegrated: { type: 'boolean', required: true },
+            onTarget: { type: 'boolean', required: true },
+            needsCommit: { type: 'boolean', required: true },
+            ambiguousRoots: { type: 'array', items: { type: 'string' }, required: true },
+            conflicts: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  changeId: { type: 'string', required: true },
+                  description: { type: 'string', required: true },
+                },
+              },
+              required: true,
+            },
+            fetch: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                status: { type: 'string', enum: ['fetched', 'no-remote', 'skipped', 'failed'], required: true },
+                message: { type: 'string', required: true },
+              },
+              required: true,
+            },
+            message: { type: 'string', required: true },
+            bookmark: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string', required: true },
+                target: { type: 'string', required: true },
+                moved: { type: 'boolean', required: true },
+              },
+            },
+            bookmarkSkipped: { type: 'string' },
+            nextSteps: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const cwd = await context.cwdFor(exec);
+        const descriptor = await requireWorkspace(context, cwd, exec.signal);
+        const workspaceName = descriptor.workspaceName ?? 'default';
+        const explicitFirst = args.firstChange?.trim();
+        if (workspaceName === 'default' && (explicitFirst === undefined || explicitFirst.length === 0)) {
+          throw new Error(
+            'jj_handoff in the default workspace needs `firstChange` (the bottom-most change id this session created): the default workspace history may contain changes from earlier work, and jj_handoff must never rebase changes it does not own. Inspect jj_log when unsure. Inside a dedicated session workspace the stack is detected automatically.',
+          );
+        }
+        const result = await operations.handoff(
+          cwd,
+          {
+            ...(args.destination !== undefined ? { destination: args.destination } : {}),
+            ...(explicitFirst !== undefined && explicitFirst.length > 0 ? { firstChange: explicitFirst } : {}),
+            ...(args.bookmark !== undefined ? { bookmark: args.bookmark } : {}),
+            ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
+          },
+          exec.signal,
+        );
+        const cleanupOwned = workspaceName !== 'default' && ownsWorkspace(exec.agent, workspaceName);
+        return {
+          ...workspaceFields(descriptor),
+          destination: result.destination,
+          destinationSource: result.destinationSource,
+          destinationChangeId: result.destinationChangeId,
+          destinationCommitId: result.destinationCommitId,
+          firstChangeId: result.firstChangeId,
+          stack: result.stack.map(changeView),
+          rebased: result.rebased,
+          alreadyIntegrated: result.alreadyIntegrated,
+          onTarget: result.onTarget,
+          needsCommit: result.needsCommit,
+          ambiguousRoots: [...result.ambiguousRoots],
+          conflicts: result.conflicts.map((conflict) => ({ changeId: conflict.changeId, description: conflict.description })),
+          fetch: result.fetch,
+          message: result.message,
+          ...(result.bookmark !== undefined ? { bookmark: result.bookmark } : {}),
+          ...(result.bookmarkSkipped !== undefined ? { bookmarkSkipped: result.bookmarkSkipped } : {}),
+          nextSteps: handoffNextSteps(result, descriptor, cleanupOwned),
+        };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_workspace_cleanup',
+      description:
+        'Unregister this session\'s own temporary Jujutsu (jj) workspace after a verified hand-off. It moves the session back to the default workspace (working_directory set) and runs jj workspace forget only for a workspace this exact session created through jj_workspace_add; any other workspace is refused and must be cleaned by the user. The directory keeps its files on disk. Use it instead of leaving a registered workspace behind or asking the user to forget it.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            forgotten: { type: 'boolean', required: true },
+            workspaceName: { type: 'string', required: true },
+            workspaceRoot: { type: 'string', required: true },
+            currentWorkspace: { type: 'string', required: true },
+            currentWorkspaceRoot: { type: 'string', required: true },
+            message: { type: 'string', required: true },
+            directoryNote: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(_args, exec) {
+        const cwd = await context.cwdFor(exec);
+        const descriptor = await requireWorkspace(context, cwd, exec.signal);
+        const workspaceName = descriptor.workspaceName ?? 'default';
+        if (workspaceName === 'default') {
+          throw new Error('jj_workspace_cleanup is unnecessary here: this session already runs in the default workspace, which must never be forgotten.');
+        }
+        if (!ownsWorkspace(exec.agent, workspaceName)) {
+          throw new Error(
+            [
+              `jj_workspace_cleanup refused: workspace "${workspaceName}" was not created through jj_workspace_add in this session, so the plugin will not unregister it.`,
+              'Unregistering a workspace another session or the user created would break their working copy.',
+              `If the user should clean it up: from the default workspace run \`jj workspace forget ${workspaceName}\`, then delete ${descriptor.root}. Report those commands; do not run jj workspace forget yourself (the shell guard denies it).`,
+            ].join('\n'),
+          );
+        }
+        const status = await operations.status(cwd, exec.signal);
+        if (!status.change.empty) {
+          throw new Error(
+            'The working copy still has uncommitted changes. Commit them with jj_commit (or finish the hand-off with jj_handoff) before cleaning up, so nothing is lost when the workspace is unregistered.',
+          );
+        }
+        if (status.change.conflict) {
+          throw new Error(
+            'The working copy still has unresolved conflicts. Resolve them and finish the hand-off (jj_handoff) before cleaning up the workspace.',
+          );
+        }
+        const workspaces = await operations.workspaceList(cwd, exec.signal);
+        const fallback = workspaces.find((workspace) => workspace.name === 'default');
+        if (fallback === undefined) {
+          throw new Error('jj_workspace_cleanup could not find the default workspace to move this session back to; report the cleanup commands to the user instead.');
+        }
+        const workingDirectory = context.host.workingDirectory;
+        if (exec.agent === undefined || workingDirectory === undefined || typeof workingDirectory.set !== 'function') {
+          throw new Error(
+            'jj_workspace_cleanup cannot move this session back to the default workspace (the host workingDirectory service exposes no set). Keep the workspace registered and report the cleanup commands to the user instead.',
+          );
+        }
+        await workingDirectory.set(exec.agent, fallback.root, exec.signal);
+        const message = await operations.workspaceForget(fallback.root, workspaceName, exec.signal);
+        return {
+          forgotten: true,
+          workspaceName,
+          workspaceRoot: descriptor.root,
+          currentWorkspace: 'default',
+          currentWorkspaceRoot: fallback.root,
+          message,
+          directoryNote: `The directory ${descriptor.root} is no longer a jj working copy; its files remain on disk and nothing tracked was lost. The user can delete it whenever convenient.`,
+        };
       },
     }),
   ];

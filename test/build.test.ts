@@ -130,6 +130,8 @@ test('the bare package name resolves each documented export', async () => {
   assert.equal(typeof root.multiSessionFinishChecklistText, 'function');
   assert.equal(typeof root.detectParallelSessions, 'function');
   assert.equal(typeof root.parallelPeerCwds, 'function', 'the activity-aware peer selection is part of the public API');
+  assert.equal(typeof root.buildJjWorkspaceForgetRefusal, 'function', 'the workspace-forget refusal is part of the public API');
+  assert.equal(root.ROOT_COMMIT_ID, '0'.repeat(40), 'the empty root commit id is exported for hand-off logic');
 });
 
 test('the built guard entry installs a working guard against a real jj workspace', async (t) => {
