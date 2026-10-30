@@ -56,6 +56,11 @@ export interface GuardServiceLike {
   peek(cwd: string): VcsDescriptor | undefined;
   /** Refreshes the cache for `cwd` (contract §6.4). */
   warm(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor | void> | VcsDescriptor | void;
+  /**
+   * TTL-cached detection (contract §6.4). The guard reuses the cache for ordinary
+   * shell calls; when absent, the forced `warm` refresh remains the fallback.
+   */
+  detect?(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor | void> | VcsDescriptor | void;
   /** Optional: head operation id used by repo-wide warnings (contract §8.3b self-protection). */
   operations?: { headOperationId(cwd: string, signal?: AbortSignal): Promise<string> };
 }
@@ -466,6 +471,27 @@ export function installGitConfusionGuard(
     if (commandLine === undefined || resolved.guardJjRepositoryWide !== 'warn') return false;
     try {
       return classifyJjInvocation(commandLine).invocations.some((invocation) => invocation.scope === 'repo-wide');
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Whether one command needs a forced (uncached) detection before deciding.
+   *
+   * The repository identity can change seconds before a call (`jj git init`,
+   * workspace add/forget), so the commands guarded by a hard deny or a
+   * repository-wide warning keep the forced refresh. Ordinary shell/git calls
+   * reuse the TTL cache: the decision itself is recomputed from the fresh command
+   * line every time, and `detectCacheTtlMs` only bounds how stale the cached repo
+   * identity may be.
+   */
+  const requiresFreshDetection = (commandLine: string | undefined): boolean => {
+    if (commandLine === undefined) return false;
+    try {
+      return classifyJjInvocation(commandLine).invocations.some(
+        (invocation) => invocation.scope === 'destructive' || invocation.scope === 'repo-wide' || invocation.repository !== undefined,
+      );
     } catch {
       return false;
     }
@@ -886,13 +912,20 @@ export function installGitConfusionGuard(
             const cwd = resolvedCwd.cwd;
             const signal = execution.signal instanceof AbortSignal ? execution.signal : undefined;
             if (resolvedCwd.degraded) return next(); // fail-open (contract §5.10)
+            const commandLine = readCommandLine(args);
             if (service !== undefined) {
-              await service.warm(cwd, signal);
+              // Hard-deny/repo-wide jj scopes get a forced refresh; everything else
+              // reuses the TTL cache instead of spawning a full detection per call.
+              if (requiresFreshDetection(commandLine) || typeof service.detect !== 'function') {
+                await service.warm(cwd, signal);
+              } else {
+                await service.detect(cwd, signal);
+              }
               // Self-protection (contract §8.3b): the head operation is only needed
               // when a repository-wide jj command may be warned about. Fetching
               // `jj op log` for every shell call would spawn an extra jj process and
               // snapshot the working copy (audited cost: ~16 ms per tool call).
-              if (needsHeadOperation(readCommandLine(args)) && typeof service.operations?.headOperationId === 'function') {
+              if (needsHeadOperation(commandLine) && typeof service.operations?.headOperationId === 'function') {
                 try {
                   headOperations.set(cwd, await service.operations.headOperationId(cwd, signal));
                 } catch {
