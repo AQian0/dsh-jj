@@ -104,7 +104,10 @@ test('deny: guardTools limits which tools are inspected', async (t) => {
   const harness = createGuardContext();
   install(harness, { guardMutatingGit: 'deny', guardTools: ['pwsh'], defaultCwd: colo });
   assert.equal(harness.runGuard(bash('git commit -m x', colo)), undefined, 'bash is not in guardTools');
-  assert.equal(typeof harness.runGuard({ name: 'pwsh', arguments: { command: 'git commit -m x', workdir: colo } }), 'string');
+  assert.equal(
+    typeof harness.runGuard({ name: 'pwsh', arguments: { command: 'git commit -m x', workdir: colo } }),
+    'string',
+  );
   assert.equal(harness.runGuard({ name: 'read', arguments: { file_path: join(colo, 'x') } }), undefined);
 });
 
@@ -318,7 +321,19 @@ test('T19c: workspace-local and read-only jj commands are never blocked', async 
   const colo = await initJjColocated(fx.run, fx.path('colo'));
   const harness = createGuardContext();
   install(harness, { guardJjRepositoryWide: 'deny', defaultCwd: colo });
-  for (const command of ['jj new', 'jj describe -m x', 'jj squash', 'jj rebase -d main', 'jj restore file', 'jj split', 'jj op log', 'jj log -r @', 'jj status', 'jj diff', 'jj --at-op=abcdef jj log']) {
+  for (const command of [
+    'jj new',
+    'jj describe -m x',
+    'jj squash',
+    'jj rebase -d main',
+    'jj restore file',
+    'jj split',
+    'jj op log',
+    'jj log -r @',
+    'jj status',
+    'jj diff',
+    'jj --at-op=abcdef jj log',
+  ]) {
     assert.equal(harness.runGuard(bash(command, colo)), undefined, `${command} must be allowed`);
   }
 });
@@ -351,7 +366,11 @@ test('T19e: `jj workspace forget <other>` is denied regardless of mode', async (
   assert.ok(typeof reason === 'string', 'forgetting another workspace is denied even in warn mode');
   assert.match(reason, /^Blocked: `jj workspace forget other`/);
   assert.match(reason, /jj_workspace_cleanup/, 'the refusal points at the safe session-owned cleanup path');
-  assert.match(reason, /leave the cleanup to the user/, 'non-owned workspaces stay a user action with the exact command');
+  assert.match(
+    reason,
+    /leave the cleanup to the user/,
+    'non-owned workspaces stay a user action with the exact command',
+  );
 });
 
 test('T20 (base layer): the decision path is synchronous and spawns nothing', async (t) => {
@@ -412,8 +431,16 @@ test('T21c: `jj edit <rev>` and `jj new <rev>` are warned (v2.2), `jj new` alone
   for (const command of ['jj edit @-', 'jj new @-', 'jj op revert abcdef', 'jj abandon xyz']) {
     assert.equal(harness.runGuard(bash(command, colo)), undefined, `${command} is warn-class (allowed in warn mode)`);
   }
-  assert.equal(harness.events.filter((entry) => entry.event === 'jj/repo-wide-op').length >= 3, true, 'each warned call emits jj/repo-wide-op');
-  assert.equal(harness.runGuard(bash('jj new', colo)), undefined, '`jj new` without a revset only starts an empty change');
+  assert.equal(
+    harness.events.filter((entry) => entry.event === 'jj/repo-wide-op').length >= 3,
+    true,
+    'each warned call emits jj/repo-wide-op',
+  );
+  assert.equal(
+    harness.runGuard(bash('jj new', colo)),
+    undefined,
+    '`jj new` without a revset only starts an empty change',
+  );
   assert.equal(harness.runGuard(bash('jj describe -m x', colo)), undefined);
 
   const denyHarness = createGuardContext();
@@ -463,7 +490,9 @@ test('default (warn): a git write runs and the MODEL gets a jj-preference notice
   assert.equal(list.length, 1, 'the guard registers exactly one post-execute listener');
   let index = 0;
   const next = async (): Promise<unknown> =>
-    index < list.length ? await list[index++](execution, { content: [{ type: 'text', text: 'ok' }] }, next) : { kind: 'accept' };
+    index < list.length
+      ? await list[index++](execution, { content: [{ type: 'text', text: 'ok' }] }, next)
+      : { kind: 'accept' };
   const decision = (await next()) as HarnessToolResult;
   assert.equal(decision.kind, 'accept');
   const texts = (decision.content ?? []).map((block) => block.text ?? '').join('\n');
@@ -495,7 +524,11 @@ test('a relative `workdir` resolves against the session cwd, not the host direct
     arguments: { command: 'git commit -m x', workdir: '.' },
     agent,
   });
-  assert.match(relative ?? '', /^Blocked: `git commit`/, 'a relative workdir must stay anchored to the session repository');
+  assert.match(
+    relative ?? '',
+    /^Blocked: `git commit`/,
+    'a relative workdir must stay anchored to the session repository',
+  );
 
   const noWorkdir = harness.runGuard({
     name: 'bash',
@@ -524,11 +557,19 @@ test('scope creep compares canonical paths, so a symlinked workspace is not anot
   install(harness, { defaultCwd: link });
 
   assert.equal(
-    harness.runGuard({ name: 'bash', callId: 'scope-link', arguments: { command: `jj -R ${colo} new`, workdir: link } }),
+    harness.runGuard({
+      name: 'bash',
+      callId: 'scope-link',
+      arguments: { command: `jj -R ${colo} new`, workdir: link },
+    }),
     undefined,
     'the same repository reached through a symlink must not be refused as scope creep',
   );
-  const refused = harness.runGuard({ name: 'bash', callId: 'scope-other', arguments: { command: `jj -R ${other} undo`, workdir: link } });
+  const refused = harness.runGuard({
+    name: 'bash',
+    callId: 'scope-other',
+    arguments: { command: `jj -R ${other} undo`, workdir: link },
+  });
   assert.match(refused ?? '', /targets `.*other`, which is not the repository this session is working in/);
 });
 
@@ -551,7 +592,11 @@ test('the head operation is only read for repository-wide jj commands', async (t
 
   await harness.runPipeline({ name: 'bash', callId: 'lazy-ls', arguments: { command: 'ls', workdir: colo } });
   assert.equal(headReads, 0, 'a plain shell call must not read the jj operation log');
-  await harness.runPipeline({ name: 'bash', callId: 'lazy-git', arguments: { command: 'git commit -m x', workdir: colo } });
+  await harness.runPipeline({
+    name: 'bash',
+    callId: 'lazy-git',
+    arguments: { command: 'git commit -m x', workdir: colo },
+  });
   assert.equal(headReads, 0, 'a mutating git command does not need a jj rollback target');
   await harness.runPipeline({ name: 'bash', callId: 'lazy-undo', arguments: { command: 'jj undo', workdir: colo } });
   assert.equal(headReads, 1, 'a repository-wide jj command reads the head operation once');
@@ -603,10 +648,22 @@ test('jj-side decisions follow a statically known `cd` into a jj workspace', asy
   const harness = createGuardContext();
   install(harness, { guardJjRepositoryWide: 'deny', defaultCwd: plain });
 
-  const undoReason = harness.runGuard({ name: 'bash', callId: 'jjcd-1', arguments: { command: `cd ${colo} && jj undo` } });
-  assert.match(undoReason ?? '', /^Blocked: `jj undo`/, 'a cd into a jj workspace must be followed for jj-side hard denies');
+  const undoReason = harness.runGuard({
+    name: 'bash',
+    callId: 'jjcd-1',
+    arguments: { command: `cd ${colo} && jj undo` },
+  });
+  assert.match(
+    undoReason ?? '',
+    /^Blocked: `jj undo`/,
+    'a cd into a jj workspace must be followed for jj-side hard denies',
+  );
 
-  const abandonReason = harness.runGuard({ name: 'bash', callId: 'jjcd-2', arguments: { command: `cd ${colo} && jj abandon @` } });
+  const abandonReason = harness.runGuard({
+    name: 'bash',
+    callId: 'jjcd-2',
+    arguments: { command: `cd ${colo} && jj abandon @` },
+  });
   assert.match(abandonReason ?? '', /^Blocked: `jj abandon`/, 'hard denies apply after a static cd');
 });
 
@@ -619,7 +676,11 @@ test('a `cd` target that needs shell expansion is not guessed', async (t) => {
 
   // The variable cannot be resolved statically: keep the session cwd (plain dir)
   // and fail open instead of denying based on a guessed path.
-  const gitVar = harness.runGuard({ name: 'bash', callId: 'var-1', arguments: { command: 'cd "$DIR" && git commit -m x' } });
+  const gitVar = harness.runGuard({
+    name: 'bash',
+    callId: 'var-1',
+    arguments: { command: 'cd "$DIR" && git commit -m x' },
+  });
   assert.equal(gitVar, undefined);
   const jjVar = harness.runGuard({ name: 'bash', callId: 'var-2', arguments: { command: 'cd "$DIR" && jj undo' } });
   assert.equal(jjVar, undefined);
@@ -646,7 +707,11 @@ test('audited hard-deny bypasses are refused: redirection, flag values, bare aba
     'jj abandon',
   ];
   for (const command of refused) {
-    const reason = harness.runGuard({ name: 'bash', callId: `bypass-${refused.indexOf(command)}`, arguments: { command, workdir: colo } });
+    const reason = harness.runGuard({
+      name: 'bash',
+      callId: `bypass-${refused.indexOf(command)}`,
+      arguments: { command, workdir: colo },
+    });
     assert.match(reason ?? '', /^Blocked: `jj /, `${command} must be refused as destructive`);
   }
   assert.equal(harness.runGuard(bash('jj restore file.txt', colo)), undefined, 'an explicit fileset stays allowed');
@@ -659,13 +724,17 @@ test('audited false positives are gone: heredoc bodies, dry-run/help git, jj new
   const harness = createGuardContext();
   install(harness, { guardMutatingGit: 'deny', guardJjRepositoryWide: 'deny', defaultCwd: colo });
 
-  const heredoc = ['cat > notes.md <<\'EOF\'', 'git commit -m looks-like-a-command', 'EOF'].join('\n');
+  const heredoc = ["cat > notes.md <<'EOF'", 'git commit -m looks-like-a-command', 'EOF'].join('\n');
   assert.equal(harness.runGuard(bash(heredoc, colo)), undefined, 'heredoc bodies are data, not commands');
   assert.equal(harness.runGuard(bash('git clean -n', colo)), undefined, 'a dry-run is read-only');
   assert.equal(harness.runGuard(bash('git rm --dry-run file.txt', colo)), undefined);
   assert.equal(harness.runGuard(bash('git --help commit', colo)), undefined);
   assert.equal(harness.runGuard(bash('git commit --help', colo)), undefined);
-  assert.equal(harness.runGuard(bash('git branch > branches.txt', colo)), undefined, 'a redirected listing is read-only');
+  assert.equal(
+    harness.runGuard(bash('git branch > branches.txt', colo)),
+    undefined,
+    'a redirected listing is read-only',
+  );
   assert.equal(harness.runGuard(bash('jj new -m "message"', colo)), undefined, 'the -m value is not a revset');
 });
 
@@ -684,7 +753,11 @@ test('audited wrapper / attached-option bypasses are refused', async (t) => {
     'pwsh -c "git commit -m x"',
     'cmd /c "git commit -m x"',
   ].entries()) {
-    const reason = harness.runGuard({ name: 'bash', callId: `wrapper-${index}`, arguments: { command, workdir: colo } });
+    const reason = harness.runGuard({
+      name: 'bash',
+      callId: `wrapper-${index}`,
+      arguments: { command, workdir: colo },
+    });
     assert.match(reason ?? '', /^Blocked: `git commit`/, `${command} must be recognised`);
   }
   const attached = harness.runGuard({
@@ -719,12 +792,20 @@ test('guard warm-up reuses the TTL detection cache for ordinary commands', async
   assert.equal(warms, 0);
 
   // Mutating git: still TTL (the hard-deny scopes below are what force freshness).
-  await harness.runPipeline({ name: 'bash', callId: 'ttl-git', arguments: { command: 'git commit -m x', workdir: colo } });
+  await harness.runPipeline({
+    name: 'bash',
+    callId: 'ttl-git',
+    arguments: { command: 'git commit -m x', workdir: colo },
+  });
   assert.equal(detects, 2);
   assert.equal(warms, 0);
 
   // Destructive/repo-wide/scope-creep jj commands keep the forced refresh.
-  await harness.runPipeline({ name: 'bash', callId: 'ttl-restore', arguments: { command: 'jj restore', workdir: colo } });
+  await harness.runPipeline({
+    name: 'bash',
+    callId: 'ttl-restore',
+    arguments: { command: 'jj restore', workdir: colo },
+  });
   assert.equal(warms, 1);
   await harness.runPipeline({ name: 'bash', callId: 'ttl-undo', arguments: { command: 'jj undo', workdir: colo } });
   assert.equal(warms, 2);
@@ -818,7 +899,9 @@ test('the guard entry warns once about config keys owned by other rows', () => {
   applyGuardEntry(ctx, { guardMutatingGit: 'deny', commitStyle: 'angular', defaultLogLimit: 10 });
   const messages = harness.logged.map((entry) => String(entry));
   assert.ok(
-    messages.some((message) => /`commitStyle` belongs to the jj-runtime row; this row \(jj-guard\) ignores it/.test(message)),
+    messages.some((message) =>
+      /`commitStyle` belongs to the jj-runtime row; this row \(jj-guard\) ignores it/.test(message),
+    ),
     `expected a commitStyle ownership warning, got: ${messages.join(' | ')}`,
   );
   assert.ok(
@@ -833,4 +916,3 @@ test('the guard entry warns once about config keys owned by other rows', () => {
   harness.runGuard(bash('git commit -m x'));
   assert.equal(harness.guards.length, 1);
 });
-

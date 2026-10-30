@@ -105,7 +105,11 @@ export interface ToolContext {
   readonly cwdFor: (exec: { agent?: unknown; signal?: AbortSignal }) => Promise<string>;
 }
 
-export async function requireWorkspace(context: ToolContext, cwd: string, signal?: AbortSignal): Promise<VcsDescriptor> {
+export async function requireWorkspace(
+  context: ToolContext,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<VcsDescriptor> {
   const descriptor = await context.service.detect(cwd, signal);
   if (descriptor.kind === 'jj-colocated' || descriptor.kind === 'jj-native') return descriptor;
   throw new Error(jjRefusalText(descriptor, cwd, context.config.jjCommand));
@@ -138,7 +142,7 @@ export function workspaceCleanupText(descriptor: VcsDescriptor, cleanupOwned: bo
 export function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescriptor, cleanupOwned: boolean): string {
   const cleanup = workspaceCleanupText(descriptor, cleanupOwned);
   if (result.needsCommit) {
-    return 'Commit the working copy with jj_commit (a description following this repository\'s style), then call jj_handoff again. Do not ask the user to commit.';
+    return "Commit the working copy with jj_commit (a description following this repository's style), then call jj_handoff again. Do not ask the user to commit.";
   }
   if (result.ambiguousRoots.length > 0) {
     return `Pass firstChange with one of these change ids and call jj_handoff again: ${result.ambiguousRoots.join(', ')}.`;
@@ -161,4 +165,3 @@ export function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescrip
   }
   return `Rebase finished and verified: the stack now sits directly on ${result.destination}. Report the rebased change ids, the destination, and the resolved-by-fallback provenance (destinationSource) to the user.${cleanupNote} ${cleanup}`;
 }
-

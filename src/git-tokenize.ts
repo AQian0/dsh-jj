@@ -63,19 +63,68 @@ const BASH_LIKE_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash']);
  * wrappers, but skipping them keeps `! git commit`, `{ git commit; }`, and
  * `then git commit` classifiable.
  */
-const SHELL_KEYWORDS = new Set(['!', '{', '}', 'then', 'do', 'else', 'elif', 'fi', 'done', 'while', 'until', 'for', 'case', 'esac', 'if']);
+const SHELL_KEYWORDS = new Set([
+  '!',
+  '{',
+  '}',
+  'then',
+  'do',
+  'else',
+  'elif',
+  'fi',
+  'done',
+  'while',
+  'until',
+  'for',
+  'case',
+  'esac',
+  'if',
+]);
 
 /** Multi-call wrappers whose inner command cannot be resolved statically. */
 const DYNAMIC_WRAPPERS = new Set(['busybox', 'toybox', 'unbuffer', 'parallel']);
 
 const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  sudo: ['-u', '-g', '-p', '-C', '-h', '-r', '-t', '-U', '--user', '--group', '--prompt', '--chdir', '--host', '--role', '--type', '--other-user'],
+  sudo: [
+    '-u',
+    '-g',
+    '-p',
+    '-C',
+    '-h',
+    '-r',
+    '-t',
+    '-U',
+    '--user',
+    '--group',
+    '--prompt',
+    '--chdir',
+    '--host',
+    '--role',
+    '--type',
+    '--other-user',
+  ],
   doas: ['-u', '-C'],
   env: ['-u', '--unset', '-S', '--split-string', '-C', '--chdir'],
   nice: ['-n', '--adjustment'],
   ionice: ['-c', '-n', '-p'],
   stdbuf: ['-i', '-o', '-e'],
-  xargs: ['-I', '-n', '-P', '-d', '-E', '-s', '-a', '-L', '--arg-file', '--max-args', '--max-procs', '--delimiter', '--eof', '--max-chars', '--replace'],
+  xargs: [
+    '-I',
+    '-n',
+    '-P',
+    '-d',
+    '-E',
+    '-s',
+    '-a',
+    '-L',
+    '--arg-file',
+    '--max-args',
+    '--max-procs',
+    '--delimiter',
+    '--eof',
+    '--max-chars',
+    '--replace',
+  ],
   timeout: ['-s', '--signal', '-k', '--kill-after'],
   command: [],
 });
@@ -123,7 +172,10 @@ export function nestedCommandStrings(segment: RawSegment): string[] {
   const name = baseName(program);
   const nested: string[] = [];
   if (SHELL_WRAPPERS.has(name)) {
-    const inner = shellWrapperInnerCommand(name, segment.words.slice(1).map((token) => token.value));
+    const inner = shellWrapperInnerCommand(
+      name,
+      segment.words.slice(1).map((token) => token.value),
+    );
     if (inner !== undefined && inner.length > 0) nested.push(inner);
   }
   if (name === 'env') {
@@ -196,7 +248,11 @@ function parseHeredocDelimiter(commandLine: string, start: number): { delimiter?
  * @returns the index of the last consumed character, or `undefined` when a body
  *   is unterminated (the shell would wait for more input).
  */
-function consumeHeredocBodies(commandLine: string, start: number, heredocs: readonly HeredocSpec[]): number | undefined {
+function consumeHeredocBodies(
+  commandLine: string,
+  start: number,
+  heredocs: readonly HeredocSpec[],
+): number | undefined {
   let index = start;
   for (const heredoc of heredocs) {
     let lineStart = index;
@@ -216,7 +272,11 @@ function consumeHeredocBodies(commandLine: string, start: number, heredocs: read
 }
 
 /** Split a command line into words and operator-delimited segments. */
-export function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting: number): { segments: RawSegment[]; warnings: string[] } {
+export function tokenize(
+  commandLine: string,
+  kind: 'command' | 'substitution',
+  nesting: number,
+): { segments: RawSegment[]; warnings: string[] } {
   const segments: RawSegment[] = [];
   const warnings: string[] = [];
   let words: Token[] = [];
@@ -469,7 +529,10 @@ export function tokenize(commandLine: string, kind: 'command' | 'substitution', 
 }
 
 /** Split arguments into flags and positionals, honouring value-taking flags. */
-export function scanArgs(args: readonly string[], valueFlags: readonly string[]): { flags: string[]; positionals: string[] } {
+export function scanArgs(
+  args: readonly string[],
+  valueFlags: readonly string[],
+): { flags: string[]; positionals: string[] } {
   const flags: string[] = [];
   const positionals: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -504,7 +567,10 @@ export function skipPrelude(words: readonly Token[], warnings: string[]): number
       continue;
     }
     if (SHELL_WRAPPERS.has(name)) {
-      const inner = shellWrapperInnerCommand(name, words.slice(index + 1).map((token) => token.value));
+      const inner = shellWrapperInnerCommand(
+        name,
+        words.slice(index + 1).map((token) => token.value),
+      );
       if (inner !== undefined && inner.length > 0) {
         warnings.push(...tokenize(inner, 'substitution', MAX_NESTING).warnings);
       }

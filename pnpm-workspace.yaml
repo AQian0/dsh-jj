@@ -1,0 +1,17 @@
+# pnpm settings for this single-package repository.
+#
+# `vite-plus` bundles its own Vite/Vitest copies. Alias every transitive `vite`
+# request to the bundled core package and pin `vitest` to the bundled runner so
+# plugins never resolve a second, incompatible copy. Keep the alias version in
+# sync with the `vite-plus` devDependency (test/build.test.ts enforces this).
+# See https://viteplus.dev/guide/local-cli#manual-installation.
+overrides:
+  vite@*: npm:@voidzero-dev/vite-plus-core@1.4.0
+  vitest@*: 5.0.5
+
+# The aliased Vite core deliberately reports the `vite-plus` version, which does
+# not satisfy Vitest's upstream `vite` peer range. The alias above is the
+# supported combination, so keep `pnpm peers check` quiet about it.
+peerDependencyRules:
+  allowedVersions:
+    vite: '*'

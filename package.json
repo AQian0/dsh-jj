@@ -2,19 +2,29 @@
   "name": "@aqian0/dsh-jj",
   "version": "0.3.1",
   "description": "First-class Jujutsu (jj) support for DeepSeek Harness",
+  "keywords": [
+    "deepseek-harness",
+    "jj",
+    "jujutsu"
+  ],
+  "homepage": "https://github.com/AQian0/dsh-jj#readme",
+  "bugs": {
+    "url": "https://github.com/AQian0/dsh-jj/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AQian0/dsh-jj.git"
   },
-  "homepage": "https://github.com/AQian0/dsh-jj#readme",
-  "bugs": {
-    "url": "https://github.com/AQian0/dsh-jj/issues"
-  },
-  "keywords": [
-    "jujutsu",
-    "jj",
-    "deepseek-harness"
+  "files": [
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "tools/locale/*.json",
+    "guard/locale/*.json",
+    "icon.svg",
+    "src/**/*.ts"
   ],
   "type": "module",
   "main": "lib/index.js",
@@ -50,40 +60,40 @@
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
-  "files": [
-    "lib/**/*.js",
-    "lib/types/**/*.d.ts",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "tools/locale/*.json",
-    "guard/locale/*.json",
-    "icon.svg",
-    "src/**/*.ts"
-  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "setup": "node scripts/setup-links.ts",
-    "setup:check": "node scripts/setup-links.ts --check",
     "build": "tsc -p tsconfig.json",
-    "prepack": "npm run build",
+    "prepack": "pnpm run build",
+    "format": "vp fmt",
+    "format:check": "vp fmt --check",
+    "lint": "vp lint",
+    "lint:fix": "vp lint --fix",
+    "check": "vp check --deny-warnings",
+    "check:fix": "vp check --fix",
+    "typecheck": "tsc -p tsconfig.test.json",
     "test:unit": "node --test \"test/**/*.test.ts\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='lib/**' \"test/**/*.test.ts\"",
-    "test": "node scripts/setup-links.ts && tsc -p tsconfig.test.json && node --test \"test/**/*.test.ts\"",
-    "check": "tsc -p tsconfig.json --noEmit",
-    "typecheck": "tsc -p tsconfig.test.json"
+    "test": "pnpm run check && pnpm run typecheck && pnpm run test:unit"
   },
+  "devDependencies": {
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.5",
+    "@types/node": "26.6.5",
+    "typescript": "6.0.3",
+    "vite-plus": "1.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-subprocess": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-working-directory": "^0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "packageManager": "pnpm@12.16.1",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
-    "@deepseek-ai/dsh-tools": "^0.2.1-rc.2",
-    "@deepseek-ai/dsh-subprocess": "^0.2.1-rc.2",
-    "@deepseek-ai/dsh-working-directory": "^0.2.1-rc.2",
-    "@deepseek-ai/schemastery": "~3.18.5"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }

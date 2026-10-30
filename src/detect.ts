@@ -252,7 +252,11 @@ export function sniffVcsSync(cwd: string, options: SniffOptions = {}): VcsSniff 
     const repoEntry = entryInfo(join(jj.path, 'repo'));
     if (repoEntry === undefined) {
       diagnostics.push(
-        notice('jj-metadata-incomplete', 'error', `.jj exists at ${jj.path} but .jj/repo is missing; the workspace metadata looks incomplete.`),
+        notice(
+          'jj-metadata-incomplete',
+          'error',
+          `.jj exists at ${jj.path} but .jj/repo is missing; the workspace metadata looks incomplete.`,
+        ),
       );
     } else {
       jjRepoEntryKind = repoEntry.kind;
@@ -273,16 +277,18 @@ export function sniffVcsSync(cwd: string, options: SniffOptions = {}): VcsSniff 
   if (git !== undefined) gitDir = git.kind === 'file' ? readPointerPath(git) : git.path;
 
   // nearest wins (F6): a nested Git repository owns the directory
-  const gitShadowed = jj !== undefined && git !== undefined && jjDepth !== undefined && gitDepth !== undefined && gitDepth < jjDepth;
-  const kind: VcsKind = jj === undefined
-    ? git !== undefined
-      ? 'git'
-      : 'none'
-    : gitShadowed
-      ? 'git'
-      : gitRelation === 'same-root'
-        ? 'jj-colocated'
-        : 'jj-native';
+  const gitShadowed =
+    jj !== undefined && git !== undefined && jjDepth !== undefined && gitDepth !== undefined && gitDepth < jjDepth;
+  const kind: VcsKind =
+    jj === undefined
+      ? git !== undefined
+        ? 'git'
+        : 'none'
+      : gitShadowed
+        ? 'git'
+        : gitRelation === 'same-root'
+          ? 'jj-colocated'
+          : 'jj-native';
 
   if (gitShadowed && jj !== undefined && git !== undefined) {
     diagnostics.push(
@@ -383,7 +389,7 @@ function adaptRunner(
       cwd: options.cwd,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       timeoutMs: options.timeoutMs ?? defaultTimeoutMs,
-      env: { ...baseEnv, ...(options.env ?? {}) },
+      env: { ...baseEnv, ...options.env },
     });
     if (result.errorCode !== undefined && result.errorCode !== '') {
       // Contract-shaped runners signal a missing executable by throwing (see probe()).
@@ -436,7 +442,10 @@ async function probe(
 }
 
 /** Resolve the jj store layout from `.jj/repo/store/git_target` (contract §6.2 step 7). */
-function readJjStore(jjRoot: string, jjRepoPath: string | undefined): 'external-git-dir' | 'internal-git-dir' | undefined {
+function readJjStore(
+  jjRoot: string,
+  jjRepoPath: string | undefined,
+): 'external-git-dir' | 'internal-git-dir' | undefined {
   const repoDir = jjRepoPath ?? join(jjRoot, '.jj', 'repo');
   const text = readFileText(join(repoDir, 'store', 'git_target'))?.trim();
   if (text === undefined || text.length === 0) return undefined;
@@ -486,12 +495,15 @@ export async function detectVcs(
   signal?: AbortSignal,
   options: DetectVcsOptions = {},
 ): Promise<VcsDescriptor> {
-  if (typeof input !== 'function' && (typeof input !== 'object' || input === null || typeof input.runJj !== 'function')) {
+  if (
+    typeof input !== 'function' &&
+    (typeof input !== 'object' || input === null || typeof input.runJj !== 'function')
+  ) {
     throw new TypeError('detectVcs(cwd, input, signal?): `input` must be a RunCommand or DetectDeps with runJj/runGit');
   }
 
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
-  const extraEnv = { ...(options.env ?? {}) };
+  const extraEnv = { ...options.env };
   const notices: VcsNotice[] = [];
   const confirmedBy: VcsEvidenceSource[] = [];
   const probedAt = Date.now();
@@ -510,21 +522,23 @@ export async function detectVcs(
     const deps: DetectDeps = input;
     jjCommand = deps.jjCommand ?? 'jj';
     gitCommand = deps.gitCommand ?? 'git';
-    const depsEnv = { ...extraEnv, ...(deps.env ?? {}) };
+    const depsEnv = { ...extraEnv, ...deps.env };
     const depsTimeout = deps.timeoutMs ?? timeoutMs;
     runJj = async (runOptions) =>
       deps.runJj({
         ...runOptions,
-        env: { ...depsEnv, ...(runOptions.env ?? {}) },
+        env: { ...depsEnv, ...runOptions.env },
         timeoutMs: runOptions.timeoutMs ?? depsTimeout,
         ...(runOptions.graceMs === undefined && deps.graceMs !== undefined ? { graceMs: deps.graceMs } : {}),
-        ...(runOptions.maxOutputBytes === undefined && deps.maxOutputBytes !== undefined ? { maxOutputBytes: deps.maxOutputBytes } : {}),
+        ...(runOptions.maxOutputBytes === undefined && deps.maxOutputBytes !== undefined
+          ? { maxOutputBytes: deps.maxOutputBytes }
+          : {}),
       });
     const rawRunGit = deps.runGit;
     runGit = async (runOptions) =>
       rawRunGit({
         ...runOptions,
-        env: { ...depsEnv, ...(runOptions.env ?? {}) },
+        env: { ...depsEnv, ...runOptions.env },
         timeoutMs: runOptions.timeoutMs ?? depsTimeout,
       });
     statKind = deps.statKind ?? defaultStatKind;
@@ -535,34 +549,41 @@ export async function detectVcs(
   const start = sniff.cwd;
   const hasJj = sniff.jjRoot !== undefined;
 
-  const finish = (fields: AssembleInput): VcsDescriptor => ({
-    kind: fields.kind,
-    root: fields.root,
-    cwd: fields.cwd,
-    jjRoot: fields.jjRoot ?? undefined,
-    jjWorkspaceRoot: fields.jjWorkspaceRoot ?? undefined,
-    workspaceName: fields.workspaceName ?? undefined,
-    workspaces: Object.freeze([...(fields.workspaces ?? [])]),
-    colocated: fields.colocated ?? false,
-    jjStore: fields.jjStore ?? undefined,
-    gitRoot: fields.gitRoot ?? undefined,
-    gitDir: fields.gitDir ?? undefined,
-    jjVersion: fields.jjVersion ?? undefined,
-    gitVersion: fields.gitVersion ?? undefined,
-    remotes: Object.freeze([...(fields.remotes ?? [])]),
-    verified: fields.verified,
-    notices: Object.freeze([...notices]),
-    probedAt,
-    confidence: fields.confidence,
-    confirmedBy: Object.freeze([...fields.confirmedBy]),
-    jjAvailable: fields.jjAvailable,
-    gitAvailable: fields.gitAvailable,
-    gitCeilingApplied: fields.gitCeilingApplied,
-    jjRepoPath: fields.jjRepoPath ?? undefined,
-  } as VcsDescriptor);
+  const finish = (fields: AssembleInput): VcsDescriptor =>
+    ({
+      kind: fields.kind,
+      root: fields.root,
+      cwd: fields.cwd,
+      jjRoot: fields.jjRoot ?? undefined,
+      jjWorkspaceRoot: fields.jjWorkspaceRoot ?? undefined,
+      workspaceName: fields.workspaceName ?? undefined,
+      workspaces: Object.freeze([...(fields.workspaces ?? [])]),
+      colocated: fields.colocated ?? false,
+      jjStore: fields.jjStore ?? undefined,
+      gitRoot: fields.gitRoot ?? undefined,
+      gitDir: fields.gitDir ?? undefined,
+      jjVersion: fields.jjVersion ?? undefined,
+      gitVersion: fields.gitVersion ?? undefined,
+      remotes: Object.freeze([...(fields.remotes ?? [])]),
+      verified: fields.verified,
+      notices: Object.freeze([...notices]),
+      probedAt,
+      confidence: fields.confidence,
+      confirmedBy: Object.freeze([...fields.confirmedBy]),
+      jjAvailable: fields.jjAvailable,
+      gitAvailable: fields.gitAvailable,
+      gitCeilingApplied: fields.gitCeilingApplied,
+      jjRepoPath: fields.jjRepoPath ?? undefined,
+    }) as VcsDescriptor;
 
   if (signal?.aborted === true) {
-    notices.push(notice('cancelled', 'warning', 'detection was cancelled before any probe ran; the result comes from the filesystem sniff only.'));
+    notices.push(
+      notice(
+        'cancelled',
+        'warning',
+        'detection was cancelled before any probe ran; the result comes from the filesystem sniff only.',
+      ),
+    );
     return finish({
       kind: sniff.kind,
       root: sniff.jjRoot ?? sniff.gitMarkRoot ?? start,
@@ -599,7 +620,12 @@ export async function detectVcs(
   // Stop Git at a jj workspace boundary only when an outer Git repository exists (F7):
   // the caller's own GIT_CEILING_DIRECTORIES is never overridden.
   let ceiling: string | undefined;
-  if (hasJj && sniff.gitRelation === 'ancestor-of-jj-root' && sniff.jjRoot !== undefined && extraEnv.GIT_CEILING_DIRECTORIES === undefined) {
+  if (
+    hasJj &&
+    sniff.gitRelation === 'ancestor-of-jj-root' &&
+    sniff.jjRoot !== undefined &&
+    extraEnv.GIT_CEILING_DIRECTORIES === undefined
+  ) {
     const parent = dirname(sniff.jjRoot);
     if (parent !== sniff.jjRoot) ceiling = parent;
   }
@@ -627,7 +653,14 @@ export async function detectVcs(
       const stderr = revParse.result?.stderr ?? '';
       if (exitCode !== 128 && !/not a git repository|不是 Git 仓库/i.test(stderr)) {
         gitProbeFailed = true;
-        notices.push(notice('git-probe-failed', 'warning', `\`${gitCommand} rev-parse\` exited with code ${exitCode ?? 'null'}.`, outputTail(stderr)));
+        notices.push(
+          notice(
+            'git-probe-failed',
+            'warning',
+            `\`${gitCommand} rev-parse\` exited with code ${exitCode ?? 'null'}.`,
+            outputTail(stderr),
+          ),
+        );
       }
     }
   }
@@ -635,7 +668,10 @@ export async function detectVcs(
   // An outer Git repository must never be reported as this directory's repository.
   const outerGitRoot = sniff.gitRelation === 'ancestor-of-jj-root' ? sniff.gitMarkRoot : undefined;
   let gitCeilingApplied = false;
-  if (outerGitRoot !== undefined && (gitRoot === undefined || sniff.jjRoot === undefined || !isInside(sniff.jjRoot, gitRoot))) {
+  if (
+    outerGitRoot !== undefined &&
+    (gitRoot === undefined || sniff.jjRoot === undefined || !isInside(sniff.jjRoot, gitRoot))
+  ) {
     gitRoot = undefined;
     gitDir = undefined;
     gitCeilingApplied = true;
@@ -652,7 +688,9 @@ export async function detectVcs(
   if (!hasJj) {
     const kind: VcsKind = gitRoot !== undefined ? 'git' : 'none';
     if (kind === 'none') {
-      notices.push(notice('not-a-repository', 'info', 'no `.jj` directory or `.git` entry was found at or above this directory.'));
+      notices.push(
+        notice('not-a-repository', 'info', 'no `.jj` directory or `.git` entry was found at or above this directory.'),
+      );
     }
     if (gitRoot !== undefined) confirmedBy.push('git-cli');
     confirmedBy.push('filesystem-sniff');
@@ -664,7 +702,14 @@ export async function detectVcs(
       ...(gitDir !== undefined ? { gitDir } : {}),
       ...(gitVersion !== undefined ? { gitVersion } : {}),
       verified: true,
-      confidence: kind === 'none' ? (gitAvailable && !gitProbeFailed ? 'high' : 'medium') : gitRoot !== undefined ? 'high' : 'medium',
+      confidence:
+        kind === 'none'
+          ? gitAvailable && !gitProbeFailed
+            ? 'high'
+            : 'medium'
+          : gitRoot !== undefined
+            ? 'high'
+            : 'medium',
       confirmedBy,
       jjAvailable: false,
       gitAvailable,
@@ -676,7 +721,13 @@ export async function detectVcs(
   // ---- step 5: a nearer Git repository owns the directory (F6)
   if (sniff.kind === 'git' && sniff.gitMarkRoot !== undefined) {
     if (gitRoot === undefined) {
-      notices.push(notice('git-probe-failed', 'warning', `${gitCommand} did not resolve the nearer Git repository at ${sniff.gitMarkRoot}.`));
+      notices.push(
+        notice(
+          'git-probe-failed',
+          'warning',
+          `${gitCommand} did not resolve the nearer Git repository at ${sniff.gitMarkRoot}.`,
+        ),
+      );
     }
     confirmedBy.push('filesystem-sniff');
     if (gitRoot !== undefined) confirmedBy.push('git-cli');
@@ -710,15 +761,28 @@ export async function detectVcs(
   let verified = false;
   let jjStore = readJjStore(jjRoot, sniff.jjRepoPath);
 
-  const authority = await probe(runJj, jjRoot, [...JJ_GLOBAL_ARGS, 'workspace', 'list', '-T', TPL_WORKSPACE_LIST], signal, timeoutMs, {
-    ...JJ_PROBE_ENV,
-    ...extraEnv,
-  });
+  const authority = await probe(
+    runJj,
+    jjRoot,
+    [...JJ_GLOBAL_ARGS, 'workspace', 'list', '-T', TPL_WORKSPACE_LIST],
+    signal,
+    timeoutMs,
+    {
+      ...JJ_PROBE_ENV,
+      ...extraEnv,
+    },
+  );
 
   const fileLayerKind: VcsKind = entryInfo(join(jjRoot, '.git')) === undefined ? 'jj-native' : 'jj-colocated';
 
   if (authority.missing) {
-    notices.push(notice('jj-cli-missing', 'warning', `\`${jjCommand}\` could not be started; the layout was sniffed from disk only.`));
+    notices.push(
+      notice(
+        'jj-cli-missing',
+        'warning',
+        `\`${jjCommand}\` could not be started; the layout was sniffed from disk only.`,
+      ),
+    );
     confirmedBy.push('filesystem-sniff');
     return finish({
       kind: fileLayerKind,
@@ -742,7 +806,9 @@ export async function detectVcs(
   }
 
   if (authority.timedOut || authority.result?.killedByTimeout === true) {
-    notices.push(notice('jj-cli-timeout', 'warning', `\`${jjCommand} workspace list\` exceeded its ${timeoutMs} ms deadline.`));
+    notices.push(
+      notice('jj-cli-timeout', 'warning', `\`${jjCommand} workspace list\` exceeded its ${timeoutMs} ms deadline.`),
+    );
     confirmedBy.push('filesystem-sniff');
     return finish({
       kind: fileLayerKind,
@@ -765,7 +831,14 @@ export async function detectVcs(
   const authorityExit = authority.result?.exitCode ?? null;
   const authorityStderr = authority.result?.stderr ?? '';
   if (authorityExit === 255 || /appears broken or inaccessible/i.test(authorityStderr)) {
-    notices.push(notice('jj-repo-broken', 'error', `the jj repository at ${jjRoot} is unusable (exit ${authorityExit ?? 'null'}).`, outputTail(authorityStderr)));
+    notices.push(
+      notice(
+        'jj-repo-broken',
+        'error',
+        `the jj repository at ${jjRoot} is unusable (exit ${authorityExit ?? 'null'}).`,
+        outputTail(authorityStderr),
+      ),
+    );
     confirmedBy.push('filesystem-sniff');
     return finish({
       kind: 'none',
@@ -787,7 +860,14 @@ export async function detectVcs(
     });
   }
   if (authorityExit === 1 && /Cannot access/i.test(authorityStderr)) {
-    notices.push(notice('jj-pointer-broken', 'error', `the \`.jj/repo\` pointer at ${jjRoot} cannot be resolved.`, outputTail(authorityStderr)));
+    notices.push(
+      notice(
+        'jj-pointer-broken',
+        'error',
+        `the \`.jj/repo\` pointer at ${jjRoot} cannot be resolved.`,
+        outputTail(authorityStderr),
+      ),
+    );
     confirmedBy.push('filesystem-sniff');
     return finish({
       kind: 'none',
@@ -808,7 +888,12 @@ export async function detectVcs(
     notices.push(
       authority.result === undefined
         ? notice('probe-failed', 'error', `\`${jjCommand} workspace list\` could not be executed at all.`)
-        : notice('jj-repo-unreadable', 'error', `\`${jjCommand} workspace list\` exited with code ${authorityExit ?? 'null'}.`, outputTail(authorityStderr)),
+        : notice(
+            'jj-repo-unreadable',
+            'error',
+            `\`${jjCommand} workspace list\` exited with code ${authorityExit ?? 'null'}.`,
+            outputTail(authorityStderr),
+          ),
     );
     confirmedBy.push('filesystem-sniff');
     return finish({
@@ -892,7 +977,8 @@ export async function detectVcs(
   }
 
   let colocated = fileLayerKind === 'jj-colocated';
-  if (gitRoot !== undefined) colocated = (await statKind(join(jjWorkspaceRoot, '.git'))) !== 'missing' && samePath(gitRoot, jjWorkspaceRoot);
+  if (gitRoot !== undefined)
+    colocated = (await statKind(join(jjWorkspaceRoot, '.git'))) !== 'missing' && samePath(gitRoot, jjWorkspaceRoot);
   const kind: VcsKind = colocated ? 'jj-colocated' : 'jj-native';
   jjStore = readJjStore(jjRoot, sniff.jjRepoPath);
 
@@ -907,7 +993,10 @@ export async function detectVcs(
   // F13: a jj-native workspace that sits inside a parent Git repository — Git
   // would act on that unrelated repository (the root cause of the git-only
   // workspace-changes card describing `.jj` metadata as "changes").
-  if (kind === 'jj-native' && (sniff.gitRelation === 'ancestor-of-jj-root' || (gitRoot !== undefined && !samePath(gitRoot, jjWorkspaceRoot)))) {
+  if (
+    kind === 'jj-native' &&
+    (sniff.gitRelation === 'ancestor-of-jj-root' || (gitRoot !== undefined && !samePath(gitRoot, jjWorkspaceRoot)))
+  ) {
     notices.push(
       notice(
         'jj-native-under-git-parent',

@@ -116,14 +116,20 @@ export function classifyJjFailure(result: JjRunResult, aborted: boolean): JjErro
   if (result.signal !== null) return 'JJ_SIGNALED';
   if (result.exitCode === 255 || /appears broken or inaccessible/i.test(stderr)) return 'JJ_REPO_BROKEN';
   if (/There is no jj repo in/i.test(stderr)) return 'JJ_NOT_A_REPO';
-  if (/Failed to parse revset|doesn't exist|no such revision|Revision .* doesn't exist/i.test(stderr)) return 'JJ_BAD_REVSET';
+  if (/Failed to parse revset|doesn't exist|no such revision|Revision .* doesn't exist/i.test(stderr))
+    return 'JJ_BAD_REVSET';
   if (result.exitCode === 2) return 'JJ_BAD_INPUT';
   if (/Cannot access/i.test(stderr)) return 'JJ_REPO_BROKEN';
   return 'JJ_COMMAND_FAILED';
 }
 
 /** Human-readable, model-facing message for one failure. */
-export function jjErrorMessage(code: JjErrorCode, argv: readonly string[], result: JjRunResult, jjCommand: string): string {
+export function jjErrorMessage(
+  code: JjErrorCode,
+  argv: readonly string[],
+  result: JjRunResult,
+  jjCommand: string,
+): string {
   const command = `jj ${argv.join(' ')}`;
   switch (code) {
     case 'JJ_NOT_INSTALLED': {
@@ -158,7 +164,10 @@ function emptyResult(): JjRunResult {
 }
 
 /** Read one collected stream completely (contract: `readFrom(0)` after settlement). */
-function readCollected(reader: { readFrom(fromByte: number): { text: string; lossy: boolean } } | undefined): { text: string; lossy: boolean } {
+function readCollected(reader: { readFrom(fromByte: number): { text: string; lossy: boolean } } | undefined): {
+  text: string;
+  lossy: boolean;
+} {
   if (reader === undefined) return { text: '', lossy: false };
   try {
     const read = reader.readFrom(0);
@@ -289,7 +298,7 @@ export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): R
       cwd: options.cwd,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       timeoutMs: options.timeoutMs || config.timeoutMs,
-      env: { NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...(options.env ?? {}) },
+      env: { NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...options.env },
     });
     return {
       exitCode: result.errorCode !== undefined ? null : result.exitCode,
@@ -323,7 +332,7 @@ export function createRunGit(ctx: Context, config: ResolvedJjConfig): RunJj {
       GIT_TERMINAL_PROMPT: '0',
       GIT_PAGER: 'cat',
       GIT_OPTIONAL_LOCKS: '0',
-      ...(options.env ?? {}),
+      ...options.env,
     };
     return await runSpawned(ctx, config, options, argv, env);
   };
@@ -337,7 +346,7 @@ export function createCommandRunGit(run: RunCommand, config: ResolvedJjConfig): 
       cwd: options.cwd,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       timeoutMs: options.timeoutMs || config.timeoutMs,
-      env: { NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...(options.env ?? {}) },
+      env: { NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...options.env },
     });
     return {
       exitCode: result.errorCode !== undefined ? null : result.exitCode,

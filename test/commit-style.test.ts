@@ -77,7 +77,14 @@ test('detectCommitStyle asks the user when history is too thin', () => {
 });
 
 test('detectCommitStyle asks the user when the sample is mixed', () => {
-  const detection = detectCommitStyle(['feat: one', 'fix: two', 'Add three', 'Explain four', 'feat: five', 'Fix five again']);
+  const detection = detectCommitStyle([
+    'feat: one',
+    'fix: two',
+    'Add three',
+    'Explain four',
+    'feat: five',
+    'Fix five again',
+  ]);
   assert.equal(detection.style, 'mixed');
   assert.equal(detection.confidence, 'low');
   assert.equal(detection.needsUserChoice, true);
@@ -112,7 +119,8 @@ test('auto policy asks the user when the sample cannot decide', () => {
   assert.equal(policy.style, 'auto');
   assert.equal(policy.source, 'needs-user-choice');
   assert.equal(policy.needsUserChoice, true);
-  for (const choice of COMMIT_STYLE_CHOICES) assert.match(policy.guidance, new RegExp(choice.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const choice of COMMIT_STYLE_CHOICES)
+    assert.match(policy.guidance, new RegExp(choice.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(policy.guidance, /ask_user_question/);
 });
 

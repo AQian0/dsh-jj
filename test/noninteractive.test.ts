@@ -40,7 +40,11 @@ function installRecorderEditor(root: string): RecorderEditor {
   const calls = join(root, 'editor-calls.txt');
   writeFileSync(recorder, `#!/bin/sh\necho "EDITOR-CALLED $@" >> ${calls}\nexit 0\n`);
   chmodSync(recorder, 0o755);
-  return { recorder, calls, called: () => (existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').length : 0) };
+  return {
+    recorder,
+    calls,
+    called: () => (existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').length : 0),
+  };
 }
 
 /** Prepare a change with content on top of a described parent so squash has work to do. */
@@ -69,7 +73,11 @@ test('V2 §5.9: the non-interactive environment shields every editor and prompt 
   for (const key of ['JJ_EDITOR', 'GIT_EDITOR', 'EDITOR', 'VISUAL']) {
     assert.equal(env[key], '/bin/false', `${key} must point at an immediately failing command`);
   }
-  assert.equal(env.JJ_EDITOR === 'false', false, 'the CLI --config ui.editor=false is rejected by jj 0.46; env is the supported shield');
+  assert.equal(
+    env.JJ_EDITOR === 'false',
+    false,
+    'the CLI --config ui.editor=false is rejected by jj 0.46; env is the supported shield',
+  );
   assert.equal(env.GIT_ASKPASS, '');
   assert.equal(env.SSH_ASKPASS, '');
   assert.equal(env.GIT_TERMINAL_PROMPT, '0');
@@ -86,14 +94,11 @@ test('V2: `jj_squash` with no message never launches an editor (operation layer)
   const editor = installRecorderEditor(fx.root);
 
   const calls: string[][] = [];
-  const runJj = createCommandRunJj(
-    async (argv, options) => {
-      calls.push([...argv]);
-      // The recorder wins over the shield, so a jj editor launch would be visible.
-      return await fx.run(argv, { ...options, env: { ...(options.env ?? {}), JJ_EDITOR: editor.recorder } });
-    },
-    resolveConfig({}),
-  );
+  const runJj = createCommandRunJj(async (argv, options) => {
+    calls.push([...argv]);
+    // The recorder wins over the shield, so a jj editor launch would be visible.
+    return await fx.run(argv, { ...options, env: { ...options.env, JJ_EDITOR: editor.recorder } });
+  }, resolveConfig({}));
   const operations = new JjOperations({ runJj, config: {} });
 
   // §7.3.6: with neither message path the operation refuses before spawning jj.
@@ -109,7 +114,10 @@ test('V2: `jj_squash` with no message never launches an editor (operation layer)
   assert.equal(typeof change.changeId, 'string');
   assert.equal(editor.called(), 0, 'jj must not launch any editor');
   const squashCall = calls.find((argv) => argv.includes('squash'));
-  assert.ok(squashCall?.includes('--use-destination-message'), `explicit useDestinationMessage must reach jj: ${squashCall?.join(' ')}`);
+  assert.ok(
+    squashCall?.includes('--use-destination-message'),
+    `explicit useDestinationMessage must reach jj: ${squashCall?.join(' ')}`,
+  );
 
   // Control: prove the recorder really is reachable as jj's editor. `jj describe`
   // without `-m` always edits, so a jj-initiated editor launch would be recorded.
@@ -125,12 +133,12 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
   const calls: string[][] = [];
   const runJj = createCommandRunJj(async (argv, options) => {
     calls.push([...argv]);
-    return await fx.run(argv, { ...options, env: { ...(options.env ?? {}), JJ_EDITOR: editor.recorder } });
+    return await fx.run(argv, { ...options, env: { ...options.env, JJ_EDITOR: editor.recorder } });
   }, resolveConfig({}));
   const operations = new JjOperations({ runJj, config: {} });
   const definitions = new Map(
     jjToolDefinitions({
-      service: { operations, detect: async () => (await detectVcs(repo, fx.run)) },
+      service: { operations, detect: async () => await detectVcs(repo, fx.run) },
       config: resolveConfig({}),
       host: { tools: { register: () => () => {} } },
       cwdFor: async () => repo,
@@ -143,7 +151,10 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
   assert.equal(calls.filter((argv) => argv.includes('squash')).length, 0, 'no jj squash process was spawned');
   assert.equal(editor.called(), 0, 'the tool path must not launch an editor either');
 
-  const value = (await toolDefinition(definitions, 'jj_squash').execute({ useDestinationMessage: true }, toolRunContext())) as SquashValue;
+  const value = (await toolDefinition(definitions, 'jj_squash').execute(
+    { useDestinationMessage: true },
+    toolRunContext(),
+  )) as SquashValue;
   assert.equal(typeof value.changeId, 'string');
   assert.equal(editor.called(), 0);
   assert.ok(calls.some((argv) => argv.includes('--use-destination-message')));
@@ -164,10 +175,17 @@ test('V4: probe argv carries each non-interactive flag exactly once', async (t) 
   assert.ok(calls.length >= 2, 'the jj authority probe ran');
   const jjCalls = calls.filter((argv) => argv[0] === 'jj');
   assert.ok(jjCalls.length >= 2, `expected jj probes, saw ${jjCalls.length}`);
-  assert.ok(calls.some((argv) => argv[0] === 'git'), 'the read-only git probe is still allowed');
+  assert.ok(
+    calls.some((argv) => argv[0] === 'git'),
+    'the read-only git probe is still allowed',
+  );
   for (const argv of jjCalls) {
     assert.equal(argv.filter((token) => token === '--no-pager').length, 1, `duplicate --no-pager: ${argv.join(' ')}`);
-    assert.equal(argv.filter((token) => token === '--color=never').length, 1, `duplicate --color=never: ${argv.join(' ')}`);
+    assert.equal(
+      argv.filter((token) => token === '--color=never').length,
+      1,
+      `duplicate --color=never: ${argv.join(' ')}`,
+    );
     // `--version` needs no repository, so it carries no --ignore-working-copy.
     const expectedIgnore = argv.includes('--version') ? 0 : 1;
     assert.equal(

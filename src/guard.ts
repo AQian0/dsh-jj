@@ -180,9 +180,7 @@ const BROKEN_JJ_NOTICE_CODE = 'jj-metadata-incomplete';
 
 /** True when a sniff found jj markers but detected unusable/error metadata. */
 function sniffHasBrokenMetadata(sniff: VcsSniff): boolean {
-  return sniff.diagnostics.some(
-    (notice) => notice.severity === 'error' || notice.code === BROKEN_JJ_NOTICE_CODE,
-  );
+  return sniff.diagnostics.some((notice) => notice.severity === 'error' || notice.code === BROKEN_JJ_NOTICE_CODE);
 }
 
 /**
@@ -242,7 +240,7 @@ function staticChangeDir(cursor: string, target: string): string | undefined {
 /** Reason text for one kind (contract §8.5, verbatim). */
 export function gitConfusionWhy(kind: VcsKind): string {
   return kind === 'jj-native'
-    ? 'This is a jj-native repository: it has no root .git, so git would act on an unrelated Git repository found in a parent directory (or on nothing at all). Either way the jj repository\'s state would be untouched and the result misleading.'
+    ? "This is a jj-native repository: it has no root .git, so git would act on an unrelated Git repository found in a parent directory (or on nothing at all). Either way the jj repository's state would be untouched and the result misleading."
     : 'This is a colocated repository: git and jj share one working copy, but only jj knows the real change graph. A git write here does not create a jj change, is invisible to the jj operation log, and cannot be undone with jj undo — and jj then resets the working-copy parent to the new Git HEAD, so your original @ becomes an extra head while bookmarks do not advance.';
 }
 
@@ -292,7 +290,7 @@ export function buildGitPreferenceNotice(invocation: GitInvocation, descriptor: 
 export function buildWorktreeToolRefusalMessage(toolName: string, descriptor: GuardDescriptorLike): string {
   return [
     `Blocked: \`${toolName}\` in a Jujutsu (jj) workspace (${descriptor.kind}: ${descriptor.root}).`,
-    'This tool creates a raw Git worktree and a Git branch. jj does not see such a checkout as one of its workspaces, so the new directory would be invisible to jj (no working-copy change, no operation-log entry) while this session\'s working directory moved into it.',
+    "This tool creates a raw Git worktree and a Git branch. jj does not see such a checkout as one of its workspaces, so the new directory would be invisible to jj (no working-copy change, no operation-log entry) while this session's working directory moved into it.",
     'Measured facts about `git worktree` inside a jj repository:',
     '  - the checkout is not listed by `jj workspace list` (it has no working-copy commit);',
     '  - the new Git branch is imported as a jj bookmark on the next snapshot/import;',
@@ -395,7 +393,11 @@ export function buildJjWorkspaceForgetRefusal(
 }
 
 /** One-time warning text for a repository-wide jj command (contract §8.3b, verbatim). */
-export function buildJjRepoWideWarning(invocation: JjInvocation, descriptor: GuardDescriptorLike, headOperationId?: string): string {
+export function buildJjRepoWideWarning(
+  invocation: JjInvocation,
+  descriptor: GuardDescriptorLike,
+  headOperationId?: string,
+): string {
   const head =
     headOperationId === undefined || headOperationId === 'unknown'
       ? ''
@@ -436,7 +438,8 @@ export function evaluateGitCommand(
     for (const invocationIndex of segment.invocationIndexes) {
       const invocation = classification.invocations[invocationIndex];
       if (invocation === undefined) continue;
-      const effective = invocation.changeDir === undefined ? cursor : staticChangeDir(cursor, invocation.changeDir) ?? cursor;
+      const effective =
+        invocation.changeDir === undefined ? cursor : (staticChangeDir(cursor, invocation.changeDir) ?? cursor);
       effectiveCwds[invocationIndex] = effective;
       if (!invocation.mutating) continue;
       const descriptor = sniff(effective);
@@ -526,7 +529,8 @@ export function installGitConfusionGuard(
     if (commandLine === undefined) return false;
     try {
       return classifyJjInvocation(commandLine).invocations.some(
-        (invocation) => invocation.scope === 'destructive' || invocation.scope === 'repo-wide' || invocation.repository !== undefined,
+        (invocation) =>
+          invocation.scope === 'destructive' || invocation.scope === 'repo-wide' || invocation.repository !== undefined,
       );
     } catch {
       return false;
@@ -609,7 +613,11 @@ export function installGitConfusionGuard(
     return {
       degraded: diagnoseCwdFailure(
         execution,
-        lastError === undefined ? 'the working directory was empty' : lastError instanceof Error ? lastError.message : String(lastError),
+        lastError === undefined
+          ? 'the working directory was empty'
+          : lastError instanceof Error
+            ? lastError.message
+            : String(lastError),
       ),
     };
   };
@@ -749,7 +757,9 @@ export function installGitConfusionGuard(
         // Compare canonical paths: the same workspace reached through a symlink is
         // not another repository (macOS `/tmp` → `/private/tmp` was a false denial).
         if (invocation.repository !== undefined) {
-          const target = isAbsolute(invocation.repository) ? invocation.repository : safeResolvePath(resolve(cwd, invocation.repository));
+          const target = isAbsolute(invocation.repository)
+            ? invocation.repository
+            : safeResolvePath(resolve(cwd, invocation.repository));
           const targetDescriptor = peek(target);
           const sameRepository =
             descriptorAtCwd === undefined ||
@@ -767,7 +777,8 @@ export function installGitConfusionGuard(
             ].join('\n');
           }
         }
-        const descriptor = descriptorAtCwd ?? baseDescriptor ?? { kind: 'none' as VcsKind, jjRoot: undefined, root: cwd };
+        const descriptor = descriptorAtCwd ??
+          baseDescriptor ?? { kind: 'none' as VcsKind, jjRoot: undefined, root: cwd };
         if (!isJjKind(descriptor.kind)) continue;
 
         // Hard denies (contract §8.3b): never short-circuited by config.
@@ -777,7 +788,11 @@ export function installGitConfusionGuard(
         if (invocation.scope !== 'repo-wide') continue;
 
         // `jj workspace forget <other>` affects someone else's workspace: always deny.
-        if (invocation.subcommand === 'workspace forget' && invocation.targetWorkspace !== undefined && invocation.targetWorkspace !== descriptor.workspaceName) {
+        if (
+          invocation.subcommand === 'workspace forget' &&
+          invocation.targetWorkspace !== undefined &&
+          invocation.targetWorkspace !== descriptor.workspaceName
+        ) {
           return buildJjWorkspaceForgetRefusal(invocation, descriptor, cwd);
         }
         const mode = resolved.guardJjRepositoryWide;
@@ -790,7 +805,11 @@ export function installGitConfusionGuard(
             cwd,
             kind: descriptor.kind,
             subcommand: invocation.subcommand,
-            message: buildJjRepoWideWarning(invocation, descriptor, headOperations.get(cwd) ?? headOperations.get(baseCwd)),
+            message: buildJjRepoWideWarning(
+              invocation,
+              descriptor,
+              headOperations.get(cwd) ?? headOperations.get(baseCwd),
+            ),
           },
           'jj/repo-wide-op',
         );
@@ -799,7 +818,10 @@ export function installGitConfusionGuard(
     return undefined;
   };
 
-  const decideGitCommand = (execution: GuardExecutionLike, args: Record<string, unknown> | undefined): string | undefined => {
+  const decideGitCommand = (
+    execution: GuardExecutionLike,
+    args: Record<string, unknown> | undefined,
+  ): string | undefined => {
     if (resolved.guardMutatingGit === 'off') return undefined;
     if (!resolved.guardTools.includes(execution.name)) return undefined;
     const commandLine = readCommandLine(args);
@@ -818,7 +840,8 @@ export function installGitConfusionGuard(
       for (const invocationIndex of segment.invocationIndexes) {
         const invocation = classification.invocations[invocationIndex];
         if (invocation === undefined) continue;
-        const cwd = invocation.changeDir === undefined ? cursor : staticChangeDir(cursor, invocation.changeDir) ?? cursor;
+        const cwd =
+          invocation.changeDir === undefined ? cursor : (staticChangeDir(cursor, invocation.changeDir) ?? cursor);
         const descriptor = peek(cwd);
         if (descriptor === undefined) continue; // fail-open (contract §8.4)
         if (!isJjKind(descriptor.kind)) {
@@ -830,7 +853,8 @@ export function installGitConfusionGuard(
               cwd,
               kind: descriptor.kind,
               subcommand: invocation.subcommand ?? '',
-              message: 'Notice: this directory is owned by a Git repository nested inside a jj workspace; the jj workspace was not used for the decision.',
+              message:
+                'Notice: this directory is owned by a Git repository nested inside a jj workspace; the jj workspace was not used for the decision.',
             });
           }
           continue;
@@ -850,7 +874,13 @@ export function installGitConfusionGuard(
                 '  jj log / jj status / jj diff / jj show (jj-native inspection)',
               ].join('\n');
             }
-            emitOnce(`${cwd}|read-jj-native|${invocation.subcommand ?? ''}`, { tool: execution.name, cwd, kind: descriptor.kind, subcommand: invocation.subcommand ?? '', message });
+            emitOnce(`${cwd}|read-jj-native|${invocation.subcommand ?? ''}`, {
+              tool: execution.name,
+              cwd,
+              kind: descriptor.kind,
+              subcommand: invocation.subcommand ?? '',
+              message,
+            });
           } else if (descriptor.kind === 'jj-colocated' && resolved.readOnlyGitNotice) {
             emitOnce(`${cwd}|read-colocated|${invocation.subcommand ?? ''}`, {
               tool: execution.name,
@@ -1016,7 +1046,7 @@ export function installGitConfusionGuard(
           const existing = Array.isArray(decision.content)
             ? decision.content
             : Array.isArray((result as { content?: unknown } | undefined)?.content)
-              ? ((result as { content: unknown[] }).content)
+              ? (result as { content: unknown[] }).content
               : [];
           return { ...decision, content: [...existing, { type: 'text', text: notice }] };
         },

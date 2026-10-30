@@ -1,12 +1,11 @@
 name: ci
 
-# Push/PR quality gate for the documented pre-commit command (`npm test`).
+# Push/PR quality gate for the documented pre-commit command (`pnpm test`).
 #
-# The repository ships no devDependencies and no lockfile on purpose: every run
-# installs the public peer dependencies plus the exact compiler pair the release
-# workflow pins, then exercises the real jj/git toolchain (tests are not mocked).
-# `npm test` starts with the portable setup-links bootstrap, which no-ops once
-# the dependencies above are installed.
+# The repository is a pnpm project: `pnpm-lock.yaml` is committed, the static
+# toolchain (vite-plus / tsc) lives in devDependencies, and the public DSH peer
+# dependencies are installed by pnpm from the ranges declared in package.json.
+# Tests exercise the real jj/git toolchain (nothing is mocked).
 
 on:
   push:
@@ -32,22 +31,32 @@ jobs:
         # `git ls-remote`); keep the `# v6 (vX.Y.Z)` comment in sync when upgrading.
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 (v6.1.0)
 
+      - name: Set up pnpm
+        # No `version` input: the action installs the exact `packageManager`
+        # version pinned in package.json.
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4 (v4.4.0)
+
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 (v6.5.0)
         with:
-          node-version: "24"
-          package-manager-cache: false
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        # Reproducible install from the committed pnpm-lock.yaml. DSH peer
+        # dependencies come from the ranges in package.json (pnpm installs them).
+        run: pnpm install --frozen-lockfile
 
       - name: Install Jujutsu (jj) for the test fixtures
         env:
-          JJ_VERSION: "0.46.0"
+          JJ_VERSION: '0.46.0'
           # SHA-256 of jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz, as published by
           # GitHub's release asset digest for
           # https://github.com/jj-vcs/jj/releases/expanded_assets/v0.46.0 and
           # re-verified locally by hashing the downloaded asset. jj 0.46.0 publishes
           # no SHA256SUMS asset, so this GitHub-displayed digest is the authoritative
           # checksum for the exact asset URL below. Bump it together with JJ_VERSION.
-          JJ_TARBALL_SHA256: "fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08"
+          JJ_TARBALL_SHA256: 'fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08'
         run: |
           archive="${RUNNER_TEMP}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
           mkdir -p "$HOME/.local/bin"
@@ -69,45 +78,20 @@ jobs:
               ;;
           esac
 
-      - name: Install public peer dependencies and the pinned compiler
-        # Same install recipe as release.yml: no lockfile, no new dependencies,
-        # lifecycle scripts disabled, and the exact tsc/@types pair.
-        # `@deepseek-ai/dsh-session-projection` is test-only: test/guard-cwd.test.ts
-        # imports it to build the real WorkingDirectoryService stack, but it is not a
-        # peer dependency of this plugin. Do NOT hardcode its version: the caret peer
-        # ranges above resolve to the newest published 0.2.1-rcN tree, and upstream
-        # packages declare their siblings as *exact* peers (rc.5 requires
-        # projection@0.2.1-rc.5), so pinning an older rc makes this second install fail
-        # with ERESOLVE before any test runs. Read the exact peer version from the tree
-        # step 1 just installed instead, so the test-only dependency always matches
-        # the upstream tree that was actually resolved.
-        run: |
-          npm install --no-package-lock --ignore-scripts --no-audit --no-fund
-          projection="$(node -p "require('./node_modules/@deepseek-ai/dsh-working-directory/package.json').peerDependencies['@deepseek-ai/dsh-session-projection']")"
-          if [ -z "${projection}" ] || [ "${projection}" = "undefined" ]; then
-            echo "::error::cannot read the @deepseek-ai/dsh-session-projection peer version from the installed DSH tree"
-            exit 1
-          fi
-          npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
-            typescript@6.0.3 @types/node@26.6.5 "@deepseek-ai/dsh-session-projection@${projection}"
-
-      - name: Check the offline bootstrap
-        # After the install above, scripts/setup-links.ts must no-op; this also
-        # exercises the script that `npm test` runs first.
-        run: npm run setup:check
-
       - name: Run the documented pre-commit gate
-        # `npm test` = setup-links (no-op here) + tsc type-check + node --test with
-        # the real jj/git binaries; build.test.ts builds lib/ as part of the run.
-        run: npm test
+        # `pnpm test` = `vp check --deny-warnings` (Oxfmt + Oxlint) + tsc
+        # type-check + `node --test` against the real jj/git binaries;
+        # build.test.ts builds lib/ as part of the run.
+        run: pnpm test
 
       - name: Smoke-check the publishable tarball
         # release.yml asserts the full manifest; this catches a broken `files`
         # config without spending network time (lib/ was just built by the tests).
+        # `--ignore-scripts` keeps prepack from rebuilding lib/ during the smoke check.
         run: |
-          npm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
+          pnpm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
           node -e "
-            const manifest = require(process.env.RUNNER_TEMP + '/pack.json')[0];
+            const manifest = require(process.env.RUNNER_TEMP + '/pack.json');
             const packaged = new Set(manifest.files.map((entry) => entry.path));
             for (const required of ['lib/index.js', 'lib/types/index.d.ts', 'cordis.patch.yml', 'icon.svg']) {
               if (!packaged.has(required)) {
@@ -115,5 +99,5 @@ jobs:
                 process.exit(1);
               }
             }
-            console.log('tarball smoke check passed (' + manifest.entryCount + ' entries)');
+            console.log('tarball smoke check passed (' + manifest.files.length + ' entries)');
           "

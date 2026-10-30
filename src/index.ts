@@ -17,7 +17,12 @@ import type { VcsKind } from './types.ts';
 // Type-only: loads the `@deepseek-ai/dsh-tools` module augmentation that adds `ctx.tools`.
 import type {} from '@deepseek-ai/dsh-tools';
 import { assertServiceableConfig, Config, resolveConfig, warnMisplacedConfig, type JjPluginConfig } from './config.ts';
-import { installGitConfusionGuard, type GitConfusionGuardHandle, type GuardServiceLike, type ToolGuardHost } from './guard.ts';
+import {
+  installGitConfusionGuard,
+  type GitConfusionGuardHandle,
+  type GuardServiceLike,
+  type ToolGuardHost,
+} from './guard.ts';
 import type { JjLiveSession } from './multi-session.ts';
 import { installJjPromptContext } from './prompt-context.ts';
 import { JjService } from './service.ts';
@@ -214,12 +219,14 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
             try {
               const service = get?.call(ctx, 'jj') as
                 | {
-                    peek?: (cwd: string) => {
-                      kind: VcsKind;
-                      root: string;
-                      workspaceName?: string;
-                      jjRepoPath?: string;
-                    } | undefined;
+                    peek?: (cwd: string) =>
+                      | {
+                          kind: VcsKind;
+                          root: string;
+                          workspaceName?: string;
+                          jjRepoPath?: string;
+                        }
+                      | undefined;
                   }
                 | undefined;
               return service?.peek?.(cwd);
@@ -247,8 +254,27 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   if (typeof effect === 'function') effect.call(ctx, () => () => promptContext(), 'dsh-jj: jj prompt context');
 }
 
-export { JjService, JjOperations, ROOT_COMMIT_ID, TPL_STATUS, TPL_LOG, TPL_DESCRIPTION, TPL_OP_LOG, TPL_BOOKMARK_LIST, TPL_WORKSPACE_LIST_TAB } from './service.ts';
-export { JjError, classifyJjFailure, createCommandRunGit, createCommandRunJj, createRunGit, createRunJj, jjErrorMessage, jjNonInteractiveEnv } from './jj-command.ts';
+export {
+  JjService,
+  JjOperations,
+  ROOT_COMMIT_ID,
+  TPL_STATUS,
+  TPL_LOG,
+  TPL_DESCRIPTION,
+  TPL_OP_LOG,
+  TPL_BOOKMARK_LIST,
+  TPL_WORKSPACE_LIST_TAB,
+} from './service.ts';
+export {
+  JjError,
+  classifyJjFailure,
+  createCommandRunGit,
+  createCommandRunJj,
+  createRunGit,
+  createRunJj,
+  jjErrorMessage,
+  jjNonInteractiveEnv,
+} from './jj-command.ts';
 export { jjRefusalText, jjToolDefinitions, registerJjTools } from './tools.ts';
 export { describeVcsKind } from './types.ts';
 export {
@@ -289,7 +315,13 @@ export {
   JJ_PROBE_ENV,
   TPL_WORKSPACE_LIST,
 } from './detect.ts';
-export { classifyGitInvocation, gitEquivalence, hasMutatingGitInvocation, GIT_SUBCOMMAND_RULES, JJ_EQUIVALENCE } from './git-command.ts';
+export {
+  classifyGitInvocation,
+  gitEquivalence,
+  hasMutatingGitInvocation,
+  GIT_SUBCOMMAND_RULES,
+  JJ_EQUIVALENCE,
+} from './git-command.ts';
 export {
   buildGitRefusalMessage,
   buildJjWorkspaceForgetRefusal,
@@ -320,7 +352,13 @@ export type {
   VcsSniff,
 } from './types.ts';
 export type { DetectVcsOptions, JjWorkspaceEntry, SniffOptions } from './detect.ts';
-export type { GitCommandClassification, GitInvocation, GitSafety, GitSafetySubtype, ParsedSegment } from './git-command.ts';
+export type {
+  GitCommandClassification,
+  GitInvocation,
+  GitSafety,
+  GitSafetySubtype,
+  ParsedSegment,
+} from './git-command.ts';
 export type {
   EvaluateGitCommandOptions,
   GitCommandEvaluation,
@@ -349,7 +387,12 @@ export type {
   ConcreteCommitStyleId,
   ResolveCommitStyleOptions,
 } from './commit-style.ts';
-export type { JjPeekedDescriptor, JjPromptCommitOptions, JjPromptContextOptions, JjPromptMultiSessionOptions } from './prompt-context.ts';
+export type {
+  JjPeekedDescriptor,
+  JjPromptCommitOptions,
+  JjPromptContextOptions,
+  JjPromptMultiSessionOptions,
+} from './prompt-context.ts';
 export type {
   JjLiveSession,
   JjWorkspaceIdentity,

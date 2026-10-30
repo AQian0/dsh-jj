@@ -29,7 +29,13 @@ test('resolveConfig applies the commit-description defaults', () => {
 
 test('the schemastery Config defaults agree with resolveConfig', () => {
   const defaults = Config({}) as Record<string, unknown>;
-  for (const key of ['commitGuidance', 'commitStyle', 'commitStyleCustom', 'preferSplitCommits', 'commitStyleSampleLimit'] as const) {
+  for (const key of [
+    'commitGuidance',
+    'commitStyle',
+    'commitStyleCustom',
+    'preferSplitCommits',
+    'commitStyleSampleLimit',
+  ] as const) {
     assert.deepEqual(defaults[key], resolveConfig({})[key], `default mismatch for ${key}`);
   }
 });
@@ -55,7 +61,9 @@ test("commitStyle 'custom' requires non-empty commitStyleCustom rules", () => {
     () => assertServiceableConfig(resolveConfig({ commitStyle: 'custom', commitStyleCustom: '   ' })),
     /commitStyleCustom/,
   );
-  assert.doesNotThrow(() => assertServiceableConfig(resolveConfig({ commitStyle: 'custom', commitStyleCustom: 'lowercase subjects' })));
+  assert.doesNotThrow(() =>
+    assertServiceableConfig(resolveConfig({ commitStyle: 'custom', commitStyleCustom: 'lowercase subjects' })),
+  );
   // Non-custom styles do not need custom rules.
   assert.doesNotThrow(() => assertServiceableConfig(resolveConfig({ commitStyle: 'conventional' })));
 });
@@ -63,7 +71,11 @@ test("commitStyle 'custom' requires non-empty commitStyleCustom rules", () => {
 test('commitStyleSampleLimit must be a positive safe integer', () => {
   for (const value of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
     const resolved = { ...resolveConfig({}), commitStyleSampleLimit: value };
-    assert.throws(() => assertServiceableConfig(resolved), /commitStyleSampleLimit/, `value ${String(value)} must be rejected`);
+    assert.throws(
+      () => assertServiceableConfig(resolved),
+      /commitStyleSampleLimit/,
+      `value ${String(value)} must be rejected`,
+    );
   }
   assert.doesNotThrow(() => assertServiceableConfig(resolveConfig({ commitStyleSampleLimit: 1 })));
 });
@@ -161,7 +173,14 @@ test('CONFIG_OWNERSHIP maps every config key to exactly one bundle row', () => {
       'commitStyleSampleLimit',
     ],
     tools: ['defaultLogLimit', 'maxLogLimit', 'defaultCwd'],
-    guard: ['guardMutatingGit', 'guardGitInJjNative', 'guardJjRepositoryWide', 'guardTools', 'guardCreateWorktree', 'readOnlyGitNotice'],
+    guard: [
+      'guardMutatingGit',
+      'guardGitInJjNative',
+      'guardJjRepositoryWide',
+      'guardTools',
+      'guardCreateWorktree',
+      'readOnlyGitNotice',
+    ],
   };
   for (const owner of ['runtime', 'tools', 'guard'] as const) {
     const actual = (Object.keys(CONFIG_OWNERSHIP) as (keyof typeof CONFIG_OWNERSHIP)[])
@@ -180,20 +199,38 @@ test('misplacedConfigKeys reports only explicitly configured keys owned by other
   assert.deepEqual(misplacedConfigKeys({}, 'runtime'), [], 'nothing configured means nothing to report');
   assert.deepEqual(misplacedConfigKeys({ commitStyle: 'angular' }, 'runtime'), [], 'a key on its own row is fine');
   assert.deepEqual(misplacedConfigKeys({ guardMutatingGit: 'deny' }, 'runtime'), ['guardMutatingGit']);
-  assert.deepEqual(misplacedConfigKeys({ guardMutatingGit: undefined }, 'runtime'), [], 'undefined is not a configuration mistake');
   assert.deepEqual(
-    misplacedConfigKeys({ defaultCwd: '/tmp', readOnlyGitNotice: false, guardTools: ['bash'], maxLogLimit: 5 }, 'runtime'),
+    misplacedConfigKeys({ guardMutatingGit: undefined }, 'runtime'),
+    [],
+    'undefined is not a configuration mistake',
+  );
+  assert.deepEqual(
+    misplacedConfigKeys(
+      { defaultCwd: '/tmp', readOnlyGitNotice: false, guardTools: ['bash'], maxLogLimit: 5 },
+      'runtime',
+    ),
     ['defaultCwd', 'guardTools', 'maxLogLimit', 'readOnlyGitNotice'],
     'results are sorted so warnings and tests are deterministic',
   );
-  assert.deepEqual(misplacedConfigKeys({ defaultLogLimit: 5, defaultCwd: '/tmp' }, 'tools'), [], 'the tools row owns both');
-  assert.deepEqual(misplacedConfigKeys({ commitStyle: 'auto', defaultLogLimit: 5 }, 'guard'), ['commitStyle', 'defaultLogLimit']);
+  assert.deepEqual(
+    misplacedConfigKeys({ defaultLogLimit: 5, defaultCwd: '/tmp' }, 'tools'),
+    [],
+    'the tools row owns both',
+  );
+  assert.deepEqual(misplacedConfigKeys({ commitStyle: 'auto', defaultLogLimit: 5 }, 'guard'), [
+    'commitStyle',
+    'defaultLogLimit',
+  ]);
 });
 
 test('warnMisplacedConfig warns once per misplaced key and never throws', () => {
   const messages: string[] = [];
   const logger = { warn: (message: string) => messages.push(message) };
-  warnMisplacedConfig(logger, { guardMutatingGit: 'deny', readOnlyGitNotice: false, commitStyle: 'angular' }, 'runtime');
+  warnMisplacedConfig(
+    logger,
+    { guardMutatingGit: 'deny', readOnlyGitNotice: false, commitStyle: 'angular' },
+    'runtime',
+  );
   assert.equal(messages.length, 2, 'one warning per misplaced key, none for the local commitStyle');
   assert.match(messages[0] ?? '', /`guardMutatingGit` belongs to the jj-guard row; this row \(jj-runtime\) ignores it/);
   assert.match(messages[1] ?? '', /`readOnlyGitNotice` belongs to the jj-guard row/);
@@ -203,6 +240,14 @@ test('warnMisplacedConfig warns once per misplaced key and never throws', () => 
   assert.doesNotThrow(() => warnMisplacedConfig({}, { guardTools: ['bash'] }, 'runtime'));
   assert.doesNotThrow(() => warnMisplacedConfig({ warn: 'not-a-function' }, { guardTools: ['bash'] }, 'runtime'));
   assert.doesNotThrow(() =>
-    warnMisplacedConfig({ warn: () => { throw new Error('logger down'); } }, { guardTools: ['bash'] }, 'runtime'),
+    warnMisplacedConfig(
+      {
+        warn: () => {
+          throw new Error('logger down');
+        },
+      },
+      { guardTools: ['bash'] },
+      'runtime',
+    ),
   );
 });

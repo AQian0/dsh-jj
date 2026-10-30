@@ -101,7 +101,10 @@ test('jj CLI unavailable in a jj-native workspace still classifies from the layo
 test('jj timeout is reported as jj-cli-timeout', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-fail-timeout');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
-  const { wrapped } = intercept(fx.run, (argv) => argv[0] === 'jj' && argv.includes('workspace'), { timedOut: true, signal: 'SIGKILL' });
+  const { wrapped } = intercept(fx.run, (argv) => argv[0] === 'jj' && argv.includes('workspace'), {
+    timedOut: true,
+    signal: 'SIGKILL',
+  });
   const descriptor = await detectVcs(colo, wrapped);
   assert.equal(descriptor.verified, false);
   assert.ok(descriptor.notices.some((entry) => entry.code === 'jj-cli-timeout' || entry.code === 'jj-repo-unreadable'));
@@ -149,12 +152,26 @@ test('contract-shaped DetectDeps input works (runJj/runGit, argv without the pro
     runJj: async ({ cwd, argv, timeoutMs }) => {
       calls.push(['jj', ...argv]);
       const result = await fx.run(['jj', ...argv], { cwd, timeoutMs });
-      return { exitCode: result.exitCode, signal: result.signal, stdout: result.stdout, stderr: result.stderr, truncated: false, killedByTimeout: result.timedOut };
+      return {
+        exitCode: result.exitCode,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        truncated: false,
+        killedByTimeout: result.timedOut,
+      };
     },
     runGit: async ({ cwd, argv, timeoutMs }) => {
       calls.push(['git', ...argv]);
       const result = await fx.run(['git', ...argv], { cwd, timeoutMs });
-      return { exitCode: result.exitCode, signal: result.signal, stdout: result.stdout, stderr: result.stderr, truncated: false, killedByTimeout: result.timedOut };
+      return {
+        exitCode: result.exitCode,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        truncated: false,
+        killedByTimeout: result.timedOut,
+      };
     },
     statKind: async (path) => {
       try {
@@ -169,8 +186,14 @@ test('contract-shaped DetectDeps input works (runJj/runGit, argv without the pro
   const descriptor = await detectVcs(colo, deps);
   assert.equal(descriptor.kind, 'jj-colocated');
   assert.equal(descriptor.verified, true);
-  assert.ok(calls.some((call) => call[0] === 'jj' && call.includes('workspace')), 'the jj authority probe ran');
-  assert.ok(calls.every((call) => call[1] !== undefined), 'the program name is supplied by the adapter, never by deps');
+  assert.ok(
+    calls.some((call) => call[0] === 'jj' && call.includes('workspace')),
+    'the jj authority probe ran',
+  );
+  assert.ok(
+    calls.every((call) => call[1] !== undefined),
+    'the program name is supplied by the adapter, never by deps',
+  );
 });
 /** DetectDeps whose jj workspace-list probe returns a synthetic result. */
 function depsWithWorkspaceList(
@@ -191,7 +214,14 @@ function depsWithWorkspaceList(
   return {
     runJj: async (options) => {
       if (options.argv.includes('workspace')) {
-        return { exitCode: 0, signal: null, stdout: synthetic.stdout, stderr: '', truncated: synthetic.truncated, killedByTimeout: false };
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: synthetic.stdout,
+          stderr: '',
+          truncated: synthetic.truncated,
+          killedByTimeout: false,
+        };
       }
       return delegateJj(options);
     },
@@ -228,7 +258,9 @@ test('M6: an unparsable workspace list is diagnosed instead of silently high con
   const descriptor = await detectVcs(colo, deps);
   assert.equal(descriptor.confidence, 'low');
   assert.ok(
-    descriptor.notices.some((entry) => entry.code === 'jj-metadata-incomplete' && /could not be parsed/.test(entry.message ?? '')),
+    descriptor.notices.some(
+      (entry) => entry.code === 'jj-metadata-incomplete' && /could not be parsed/.test(entry.message ?? ''),
+    ),
   );
 });
 

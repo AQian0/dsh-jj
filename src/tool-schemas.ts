@@ -19,15 +19,28 @@ export const CHANGE_PROPERTIES = {
   commitId: { type: 'string', description: 'Commit id of this change right now.', required: true },
   description: { type: 'string', description: 'Change description (may be empty).', required: true },
   empty: { type: 'boolean', description: 'True when the change has no content changes.', required: true },
-  conflict: { type: 'boolean', description: 'True when the change contains conflicts (jj tracks them as first-class).', required: true },
+  conflict: {
+    type: 'boolean',
+    description: 'True when the change contains conflicts (jj tracks them as first-class).',
+    required: true,
+  },
   currentWorkingCopy: { type: 'boolean', description: 'True for the working-copy change @.', required: true },
-  bookmarks: { type: 'array', description: 'Local bookmarks pointing at this change.', items: { type: 'string' }, required: true },
+  bookmarks: {
+    type: 'array',
+    description: 'Local bookmarks pointing at this change.',
+    items: { type: 'string' },
+    required: true,
+  },
   author: { type: 'string', description: 'Author email.', required: true },
 } as const;
 
 export const CHANGE_SCHEMA = { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES } as const;
 
-export function workspaceFields(descriptor: VcsDescriptor): { kind: 'jj-colocated' | 'jj-native'; workspaceRoot: string; workspaceName: string } {
+export function workspaceFields(descriptor: VcsDescriptor): {
+  kind: 'jj-colocated' | 'jj-native';
+  workspaceRoot: string;
+  workspaceName: string;
+} {
   return {
     kind: descriptor.kind === 'jj-colocated' ? 'jj-colocated' : 'jj-native',
     workspaceRoot: descriptor.root,
@@ -67,4 +80,3 @@ export function changeView(change: {
     author: change.author,
   };
 }
-

@@ -141,8 +141,16 @@ export interface CommitStyleChoice {
 
 /** Choices offered when the history cannot determine a style (last is always "custom"). */
 export const COMMIT_STYLE_CHOICES: readonly CommitStyleChoice[] = [
-  { id: 'conventional', label: 'Conventional Commits', summary: 'feat(scope): subject — feat/fix/docs/refactor/test/chore/…' },
-  { id: 'angular', label: 'Angular convention', summary: 'type(scope): subject with the Angular type list and strict subject rules' },
+  {
+    id: 'conventional',
+    label: 'Conventional Commits',
+    summary: 'feat(scope): subject — feat/fix/docs/refactor/test/chore/…',
+  },
+  {
+    id: 'angular',
+    label: 'Angular convention',
+    summary: 'type(scope): subject with the Angular type list and strict subject rules',
+  },
   { id: 'gitmoji', label: 'Gitmoji', summary: ':sparkles: subject — an emoji/shortcode prefix for the change kind' },
   { id: 'plain', label: 'Plain subjects', summary: 'A short descriptive sentence with no prefix' },
   { id: 'custom', label: 'Custom style', summary: 'The user pastes their own rules or an example description' },
@@ -155,7 +163,7 @@ export const COMMIT_STYLE_CHOICES: readonly CommitStyleChoice[] = [
 const PENDING_HISTORY_GUIDANCE = [
   "Commit descriptions: inherit this repository's existing style instead of inventing one.",
   'Before your first description or commit in this session, call jj_commit_style when the jj_* tools are installed: it samples recent jj/Git descriptions (including their bodies) and classifies their style. Without those tools, inspect recent descriptions with jj_log and copy their first-line grammar.',
-  "Copy the existing grammar (type prefix, scope), capitalization, language, subject length, and — when the examples show them — body/footer habits; an explicit style instruction from the user always wins over the profile config and the history.",
+  'Copy the existing grammar (type prefix, scope), capitalization, language, subject length, and — when the examples show them — body/footer habits; an explicit style instruction from the user always wins over the profile config and the history.',
   'If jj_commit_style reports needsUserChoice, ask the user before writing any description — do not guess.',
 ].join('\n');
 
@@ -324,7 +332,12 @@ export function resolveCommitStylePolicy(options: ResolveCommitStyleOptions = {}
     };
   }
   if (configured !== 'auto') {
-    return { style: configured, source: 'config', guidance: COMMIT_STYLE_PRESETS[configured].guidance, needsUserChoice: false };
+    return {
+      style: configured,
+      source: 'config',
+      guidance: COMMIT_STYLE_PRESETS[configured].guidance,
+      needsUserChoice: false,
+    };
   }
   const detection = options.detection;
   if (detection === undefined) {
@@ -340,7 +353,13 @@ export function resolveCommitStylePolicy(options: ResolveCommitStyleOptions = {}
     };
   }
   const style = detection.style;
-  return { style, source: 'history', guidance: COMMIT_STYLE_PRESETS[style].guidance, needsUserChoice: false, detection };
+  return {
+    style,
+    source: 'history',
+    guidance: COMMIT_STYLE_PRESETS[style].guidance,
+    needsUserChoice: false,
+    detection,
+  };
 }
 
 /** Options for {@link commitStylePromptText}. */
