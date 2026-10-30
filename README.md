@@ -14,7 +14,7 @@
 
 ## 安装
 
-需要 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 Jujutsu CLI（见 [jj-vcs.dev](https://jj-vcs.dev)）：`jj` 需在 `PATH` 中，也可以用 `jjCommand` 配置指定路径。插件本身没有其他运行时依赖。
+需要 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 Jujutsu CLI（见 [jj-vcs.dev](https://jj-vcs.dev)）：`jj` 需在 `PATH` 中（需要 jj 0.46.x：CI 以 0.46.0 验证，更低版本未测试），也可以用 `jjCommand` 配置指定路径。插件本身没有其他运行时依赖。
 
 **从 npm 安装**：
 
@@ -26,7 +26,7 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 **从本地目录安装**：首次先按 [AGENTS.md](./AGENTS.md)「环境与准备」准备构建依赖（`npm run setup`，或一次性 `npm install` 公开 peer 依赖与 `tsc`）；然后在仓库根目录执行 `npm run build`（`lib/` 是构建产物，不入库），再把本仓库的绝对路径作为 spec 安装。Web GUI 在「设置 → 插件管理」中操作，Agent 侧用 `plugin_manager` 的 `install_bundle`。
 
-安装后会自动启用 `jj-runtime`、`jj-tools`、`jj-guard` 三个入口，并给 `agent-instructions` 加上 `.jj` 项目根标记；可以在插件管理页面或 `list_plugins` 中确认。
+安装后会自动启用 `jj-runtime`、`jj-tools`、`jj-guard` 三个入口，并给 `agent-instructions` 加上 `.jj` 项目根标记（headless / CLI profile 生效；Web profile 见「已知限制」）；可以在插件管理页面或 `list_plugins` 中确认。
 
 ## 使用
 
@@ -141,13 +141,16 @@ Use the jj equivalent instead:
 | `defaultLogLimit` / `maxLogLimit` | `30` / `200` | `jj_log` 的默认与最大返回条数 |
 | `defaultCwd` | `''` | 工具没有 `workdir` 时的回退目录（空 = 进程 cwd） |
 
-> `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `commitStyleSampleLimit`
-> 与 `multiSessionGuidance` / `rebaseTarget` 只由 `jj-runtime` 行读取；`guard*` 开头的键和 `readOnlyGitNotice`
-> 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` / `defaultCwd` 由 `jj-tools` 行读取。
+> `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `commitStyleSampleLimit` /
+> `multiSessionGuidance` / `rebaseTarget` / `preferJjContext` / `jjCommand` / `gitCommand` / `timeoutMs` / `graceMs` /
+> `maxOutputBytes` / `detectCacheTtlMs` 由 `jj-runtime` 行读取（超时、截断与命令名经 `ctx.jj` 作用于全部工具）；
+> `guard*` 开头的键和 `readOnlyGitNotice` 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` / `defaultCwd`
+> 由 `jj-tools` 行读取。
 
 ## 已知限制
 
 - **只支持 jj 仓库**：jj 未安装或目录不是 jj workspace 时，`jj_*` 工具会报错并给出处理建议，不会退回 git。
+- **平台支持**：当前仅在 macOS / Linux 验证；测试依赖 POSIX 工具链（`/bin/sh`、`bash -c`、`chmod` 等）。Windows 未验证也不支持，`guardTools` 默认包含 `pwsh` 只是工具名匹配，不代表 Windows 可用。
 - **guard 是启发式**：只做静态命令分类。无法静态求值的 shell 形式（git alias、shell function、wrapper script、`eval`、`$VAR`、`find -exec` 等）按 fail-open 放行，并可能附一次性提示；heredoc 正文按数据忽略，因此写在脚本/文档内容里的命令不会被分析。
 - **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`。
 - **描述风格靠推断**：风格判定只看描述首行，历史太少或风格混杂时会请求你选择；Angular 与 Conventional Commits 语法相同，自动识别统一报 `conventional`，需要严格规则时可配置 `commitStyle: angular`。
