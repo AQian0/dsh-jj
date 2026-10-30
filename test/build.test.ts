@@ -53,32 +53,151 @@ function tscCommand(): string {
   return existsSync(local) ? local : 'tsc';
 }
 
+/** Hand-written source modules (`src/<name>.ts`), derived from disk instead of a hardcoded list. */
+function sourceModuleNames(): string[] {
+  return readdirSync(join(packageDir, 'src'))
+    .filter((entry) => entry.endsWith('.ts'))
+    .map((entry) => entry.slice(0, -'.ts'.length))
+    .sort();
+}
+
+/**
+ * Modules that must stay free of DSH runtime imports (AGENTS.md rule 3).
+ *
+ * `build.test.ts` asserts this list still matches the source tree and that the
+ * compiled output only imports DSH packages with a declared runtime dependency.
+ */
+const PURE_MODULES = ['detect', 'git-command', 'types', 'commit-style', 'multi-session'] as const;
+
+/** Manifest fields the packaging guard inspects. */
+interface PackageManifest {
+  readonly main?: string;
+  readonly types?: string;
+  readonly exports?: Readonly<Record<string, unknown>>;
+  readonly files?: readonly string[];
+  readonly peerDependencies?: Readonly<Record<string, string>>;
+}
+
+/** Read and parse the package manifest. */
+function readPackageManifest(): PackageManifest {
+  return JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as PackageManifest;
+}
+
+/** Strip the leading `./` from a `package.json` path target. */
+function packageTargetPath(target: string): string {
+  return target.replace(/^\.\//, '');
+}
+
+/**
+ * Assert one `exports` target exists.
+ *
+ * Object targets are checked recursively. Wildcard targets (`./locale/*.json`,
+ * `./src/*`) are checked as directory patterns: the static prefix must resolve to
+ * a directory and at least one entry must match the suffix — never one literal file.
+ */
+function assertExportTarget(specifier: string, target: unknown): void {
+  if (typeof target === 'string') {
+    const relativeTarget = packageTargetPath(target);
+    const wildcard = relativeTarget.indexOf('*');
+    if (wildcard >= 0) {
+      const prefix = relativeTarget.slice(0, wildcard);
+      const directory = prefix.endsWith('/') ? prefix.slice(0, -1) : dirname(prefix);
+      const suffix = relativeTarget.slice(wildcard + 1);
+      const directoryPath = join(packageDir, directory);
+      assert.ok(existsSync(directoryPath), `exports ${specifier}: wildcard directory ${directory}/ is missing`);
+      const entries = readdirSync(directoryPath);
+      assert.ok(
+        entries.some((entry) => suffix.length === 0 || entry.endsWith(suffix)),
+        `exports ${specifier}: no ${directory}/*${suffix} file exists`,
+      );
+      return;
+    }
+    assert.ok(existsSync(join(packageDir, relativeTarget)), `exports ${specifier}: target ${target} is missing`);
+    return;
+  }
+  if (target !== null && typeof target === 'object') {
+    for (const [condition, nested] of Object.entries(target as Record<string, unknown>)) {
+      assertExportTarget(`${specifier} (${condition})`, nested);
+    }
+    return;
+  }
+  assert.fail(`exports ${specifier}: unsupported target ${JSON.stringify(target)}`);
+}
+
+/** Assert one `files` entry actually ships something (literal path or wildcard directory). */
+function assertFilesEntry(entry: string): void {
+  const wildcard = entry.indexOf('*');
+  const basePath = wildcard >= 0 ? entry.slice(0, wildcard).replace(/\/$/, '') : entry;
+  assert.ok(existsSync(join(packageDir, basePath)), `files entry ${entry} does not resolve to a shipped path`);
+}
+
 test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', async () => {
   await ensureLinks();
   const result = await execFileAsync(tscCommand(), ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
   assert.equal(String(result.stderr).trim(), '', `tsc stderr: ${String(result.stderr)}`);
-  for (const file of ['index.js', 'tools.js', 'guard.js', 'detect.js', 'git-command.js', 'types.js', 'config.js', 'commit-style.js', 'multi-session.js', 'prompt-context.js', 'service.js']) {
-    assert.ok(existsSync(join(packageDir, 'lib', file)), `missing build artifact lib/${file}`);
+  const modules = sourceModuleNames();
+  for (const required of ['index', 'tools', 'guard', 'jj-command']) {
+    assert.ok(modules.includes(required), `src/${required}.ts is missing from ${modules.join(', ')}`);
   }
-  for (const file of ['index.d.ts', 'tools.d.ts', 'guard.d.ts', 'detect.d.ts', 'git-command.d.ts', 'types.d.ts', 'config.d.ts', 'commit-style.d.ts', 'multi-session.d.ts', 'prompt-context.d.ts', 'service.d.ts']) {
-    assert.ok(existsSync(join(packageDir, 'lib', 'types', file)), `missing declaration lib/types/${file}`);
+  for (const name of modules) {
+    assert.ok(existsSync(join(packageDir, 'lib', `${name}.js`)), `missing build artifact lib/${name}.js`);
+    assert.ok(existsSync(join(packageDir, 'lib', 'types', `${name}.d.ts`)), `missing declaration lib/types/${name}.d.ts`);
   }
 });
 
 test('pure modules stay free of runtime @deepseek-ai imports', () => {
-  for (const file of ['detect.js', 'git-command.js', 'types.js', 'commit-style.js', 'multi-session.js']) {
-    const source = readFileSync(join(packageDir, 'lib', file), 'utf8');
-    assert.ok(!/from\s*"@deepseek-ai\//.test(source), `${file} must not import a DSH package at runtime`);
+  const modules = sourceModuleNames();
+  for (const name of PURE_MODULES) {
+    assert.ok(modules.includes(name), `pure module src/${name}.ts is missing from ${modules.join(', ')}`);
+    const source = readFileSync(join(packageDir, 'lib', `${name}.js`), 'utf8');
+    assert.ok(
+      !/from\s*['"]@deepseek-ai\//.test(source),
+      `lib/${name}.js must not import a DSH package at runtime (single or double quotes)`,
+    );
   }
 });
 
-/** Manifest fields this build test inspects. */
-interface PackageManifest {
-  readonly peerDependencies?: Readonly<Record<string, string>>;
-}
+/** `exports` subpaths the published package must keep. */
+const REQUIRED_EXPORTS = ['.', './tools', './guard', './detect', './git-command'] as const;
+
+/** `files` entries the published package must ship (`lib/` artifacts plus the runtime data). */
+const REQUIRED_FILES = [
+  'lib/**/*.js',
+  'lib/types/**/*.d.ts',
+  'cordis.patch.yml',
+  'locale/*.json',
+  'tools/locale/*.json',
+  'guard/locale/*.json',
+  'icon.svg',
+] as const;
+
+test('the published package manifest points only at shipped artifacts', () => {
+  // This test runs after the build test above: every manifest target is compiled output.
+  assert.ok(existsSync(join(packageDir, 'lib', 'index.js')), 'lib/ is missing: run this file so the build test runs first');
+  const manifest = readPackageManifest();
+
+  const main = manifest.main;
+  assert.ok(typeof main === 'string', 'package.json main must be a string');
+  assert.ok(existsSync(join(packageDir, packageTargetPath(main))), `main ${main} does not exist`);
+  const types = manifest.types;
+  assert.ok(typeof types === 'string', 'package.json types must be a string');
+  assert.ok(existsSync(join(packageDir, packageTargetPath(types))), `types ${types} does not exist`);
+
+  const exportsMap = manifest.exports ?? {};
+  for (const specifier of REQUIRED_EXPORTS) {
+    assert.ok(specifier in exportsMap, `package.json exports is missing the ${specifier} entry`);
+  }
+  for (const [specifier, target] of Object.entries(exportsMap)) assertExportTarget(specifier, target);
+
+  const files = manifest.files ?? [];
+  for (const entry of REQUIRED_FILES) {
+    assert.ok(files.includes(entry), `package.json files is missing ${entry}`);
+  }
+  for (const entry of files) assertFilesEntry(entry);
+});
 
 test('DSH peer ranges admit later 0.2.x releases instead of pinning one runtime', () => {
-  const manifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as PackageManifest;
+  const manifest = readPackageManifest();
   const dshPeers = Object.entries(manifest.peerDependencies ?? {}).filter(
     ([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'),
   );
@@ -325,6 +444,42 @@ function collectJavaScript(dir: string, found: string[] = []): string[] {
 test('all hand-written source is TypeScript (only built lib/ may contain JavaScript)', () => {
   const offenders = ['src', 'test', 'scripts'].flatMap((dir) => collectJavaScript(join(packageDir, dir)));
   assert.deepEqual(offenders, [], `hand-written JavaScript must be migrated to TypeScript: ${offenders.join(', ')}`);
+});
+
+/** Recursively collect hand-written TypeScript files under one directory. */
+function collectTypeScript(dir: string, found: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectTypeScript(path, found);
+    } else if (entry.name.endsWith('.ts')) {
+      found.push(path);
+    }
+  }
+  return found;
+}
+
+test('hand-written TypeScript has no tabs, trailing whitespace, or CRLF line endings', (t) => {
+  const problems: string[] = [];
+  const longLines: string[] = [];
+  for (const dir of ['src', 'test', 'scripts']) {
+    for (const file of collectTypeScript(join(packageDir, dir))) {
+      const relativePath = relative(packageDir, file);
+      const text = readFileSync(file, 'utf8');
+      if (text.includes('\r')) problems.push(`${relativePath}: CRLF line ending`);
+      text.split('\n').forEach((line, index) => {
+        const location = `${relativePath}:${index + 1}`;
+        if (line.includes('\t')) problems.push(`${location}: tab character`);
+        if (/[ \t]+$/.test(line)) problems.push(`${location}: trailing whitespace`);
+        if (line.length > 120) longLines.push(location);
+      });
+    }
+  }
+  assert.deepEqual(problems, [], `style problems: ${problems.join(', ')}`);
+  if (longLines.length > 0) {
+    // The repository already has many long lines; report them without failing the build.
+    t.diagnostic(`${longLines.length} lines exceed 120 columns (warning only, not failing): ${longLines.slice(0, 5).join(', ')}`);
+  }
 });
 
 test('bundle patch carries the jj-aware project-root row (task-10)', () => {
