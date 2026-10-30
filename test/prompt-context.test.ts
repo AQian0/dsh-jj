@@ -123,7 +123,10 @@ test('a warm cache wins over the sniff, and a missing systemPrompt is harmless',
 
 test('the shared text helper is stable', () => {
   const text = jjPreferenceContextText('jj-colocated', '/repo', 'default');
-  assert.match(text, /^This session's working directory is a Jujutsu \(jj\) workspace \(jj-colocated: \/repo \(workspace "default"\)\)\./);
+  assert.match(
+    text,
+    /^This session's working directory is a Jujutsu \(jj\) workspace \(jj-colocated: \/repo \(workspace "default"\)\)\./,
+  );
   assert.match(text, /jj describe/);
   assert.match(text, /jj_commit_style/, 'the default text explains how to learn the description style');
 });
@@ -152,7 +155,10 @@ test('configured and custom styles are reflected in the prompt text', () => {
   assert.ok(angular.includes('<type>(<scope>): <subject>'));
 
   const rules = 'Chinese imperative subject, no prefix, body optional.';
-  const custom = jjPreferenceContextText('jj-native', '/repo', undefined, { commitStyle: 'custom', commitStyleCustom: rules });
+  const custom = jjPreferenceContextText('jj-native', '/repo', undefined, {
+    commitStyle: 'custom',
+    commitStyleCustom: rules,
+  });
   assert.ok(custom.includes(rules), 'custom rules are copied verbatim');
 
   const noSplit = jjPreferenceContextText('jj-native', '/repo', undefined, { preferSplitCommits: false });
@@ -177,7 +183,11 @@ test('the install options forward into the registered context text', () => {
 // ---------------------------------------------------------------------------
 
 /** Sniff double: the current checkout is a colocated jj workspace. */
-function colocatedSniff(root: string, workspaceRoot = root, jjRepoPath = `${root}/.jj/repo`): (cwd: string) => VcsSniff {
+function colocatedSniff(
+  root: string,
+  workspaceRoot = root,
+  jjRepoPath = `${root}/.jj/repo`,
+): (cwd: string) => VcsSniff {
   return (cwd) => ({ cwd, kind: 'jj-colocated', jjRoot: workspaceRoot, jjRepoPath, diagnostics: [] });
 }
 
@@ -186,7 +196,12 @@ test('a parallel session sharing the working copy gets the isolate-now guidance'
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   const session = { id: 'parallel-current' };
   const peer = { id: 'parallel-peer' };
-  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
+  const { host, captured } = fakeHost({
+    cwdBySession: new Map<FakeSession, string>([
+      [session, repo],
+      [peer, repo],
+    ]),
+  });
   installJjPromptContext(host, {
     sniff: colocatedSniff(repo),
     liveRootSessions: () => [
@@ -206,7 +221,12 @@ test('a peer whose turn already ended does not trigger the isolate-now guidance'
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   const session = { id: 'idle-current' };
   const peer = { id: 'idle-peer' };
-  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
+  const { host, captured } = fakeHost({
+    cwdBySession: new Map<FakeSession, string>([
+      [session, repo],
+      [peer, repo],
+    ]),
+  });
   installJjPromptContext(host, {
     sniff: colocatedSniff(repo),
     // The host keeps the peer's Agent alive after its turn ended; presence is not parallel work.
@@ -228,7 +248,12 @@ test('sibling workspaces of one repository get the coordination wording and the 
   const peerRoot = fx.path('repo-w2');
   const session = { id: 'sibling-current' };
   const peer = { id: 'sibling-peer' };
-  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, peerRoot]]) });
+  const { host, captured } = fakeHost({
+    cwdBySession: new Map<FakeSession, string>([
+      [session, repo],
+      [peer, peerRoot],
+    ]),
+  });
   installJjPromptContext(host, {
     sniff: (cwd) =>
       cwd === peerRoot
@@ -306,7 +331,12 @@ test('peeked peer descriptors avoid re-sniffing peer directories', async (t) => 
   const peer = { id: 'peek-peer' };
   const peerRoot = fx.path('repo-peek-w2');
   const sniffed: string[] = [];
-  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, peerRoot]]) });
+  const { host, captured } = fakeHost({
+    cwdBySession: new Map<FakeSession, string>([
+      [session, repo],
+      [peer, peerRoot],
+    ]),
+  });
   installJjPromptContext(host, {
     peek: (cwd) =>
       cwd === repo
@@ -334,7 +364,12 @@ test('a session that saw a parallel peer keeps the finish checklist after the pe
   const session = { id: 'latch-current' };
   const peer = { id: 'latch-peer' };
   const live = { state: 'active' as 'active' | 'idle' | 'ended' };
-  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
+  const { host, captured } = fakeHost({
+    cwdBySession: new Map<FakeSession, string>([
+      [session, repo],
+      [peer, repo],
+    ]),
+  });
   installJjPromptContext(host, {
     sniff: colocatedSniff(repo),
     liveRootSessions: () =>
@@ -358,12 +393,20 @@ test('a session that saw a parallel peer keeps the finish checklist after the pe
   live.state = 'idle';
   const afterPeerWentIdle = captured[0].text({ agent: { session } });
   assert.ok(!afterPeerWentIdle.includes('Parallel sessions'), 'an idle peer no longer claims concurrent work');
-  assert.match(afterPeerWentIdle, /standard rebase hand-off/, 'the hand-off checklist is latched for the rest of the session');
+  assert.match(
+    afterPeerWentIdle,
+    /standard rebase hand-off/,
+    'the hand-off checklist is latched for the rest of the session',
+  );
 
   live.state = 'ended';
   const afterPeerLeft = captured[0].text({ agent: { session } });
   assert.ok(!afterPeerLeft.includes('Parallel sessions'), 'the stale peer claim is gone');
-  assert.match(afterPeerLeft, /standard rebase hand-off/, 'the hand-off checklist survives the peer for the rest of the session');
+  assert.match(
+    afterPeerLeft,
+    /standard rebase hand-off/,
+    'the hand-off checklist survives the peer for the rest of the session',
+  );
 });
 
 test('subagents never receive multi-session guidance, even in always mode', async (t) => {

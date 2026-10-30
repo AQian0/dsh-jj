@@ -257,7 +257,10 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
         kind = peeked.kind;
         root = peeked.root;
         workspaceName = peeked.workspaceName;
-        identity = { workspaceRoot: root, ...(peeked.jjRepoPath !== undefined ? { jjRepoPath: peeked.jjRepoPath } : {}) };
+        identity = {
+          workspaceRoot: root,
+          ...(peeked.jjRepoPath !== undefined ? { jjRepoPath: peeked.jjRepoPath } : {}),
+        };
       } else {
         const sniffed = (options.sniff ?? sniffVcsSync)(cwd);
         if (!sniffed.kind.startsWith('jj-')) return '';
@@ -288,7 +291,8 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
           // A session that already saw a parallel peer keeps the finish checklist even
           // after the peer ends: that is exactly when its stack is handed off.
           const latched = mode !== 'off' && isObject(agent.session) && parallelSeen.has(agent.session);
-          if (multiSessionText.length === 0 && latched) multiSessionText = multiSessionFinishChecklistText(rebaseTarget);
+          if (multiSessionText.length === 0 && latched)
+            multiSessionText = multiSessionFinishChecklistText(rebaseTarget);
         }
       } catch {
         multiSessionText = '';

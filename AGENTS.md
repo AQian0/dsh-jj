@@ -1,7 +1,7 @@
 # AGENTS.md
 
 面向在本仓库工作的 AI 代理(以及人类协作者)的开发说明。用户文档在 [README.md](./README.md);
-本文件只讲环境、架构、约定、验证与提交流程。内容以代码和 `npm test` 为准,发现过期请直接修正。
+本文件只讲环境、架构、约定、验证与提交流程。内容以代码和 `pnpm test` 为准,发现过期请直接修正。
 本仓库自身是 **jj-colocated** 工作区,版本控制一律用 jj。
 
 ## 项目速览
@@ -12,84 +12,91 @@
   - `dsh-jj/tools`(`jj-tools`):17 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护。
 - 纯 TypeScript + ESM,**零运行时依赖**:DSH 包全部通过 `peerDependencies` 由宿主提供(版本见 `package.json`)。
-- 没有任何构建工具链依赖:构建只用 `tsc`,测试只用 `node --test`。
+- 开发工具链只在 `devDependencies` 里(`vite-plus` / `typescript` / `@types/node` + 测试专用的
+  `@deepseek-ai/dsh-session-projection`);构建仍只用 `tsc`,测试仍只用 `node --test`。
 
 ## 环境与准备
 
-- Node.js 24+:测试直接由 Node 内置类型擦除运行 `.ts`;CI 固定 Node 24。
+- Node.js 24.11+:`vite-plus@1.4.0` 的 engines 要求;测试直接由 Node 内置类型擦除运行 `.ts`;CI 固定 Node 24。
+- pnpm 12.16.1:`package.json` 的 `packageManager` 固定该版本,`pnpm-lock.yaml` 已提交,是工具链与公开 peer
+  依赖的唯一解析来源。
+- 首次准备:仓库根执行 `pnpm install`(仅首次需要网络,之后离线)。pnpm 会按 `peerDependencies` 自动安装公开的
+  DSH 包——所有依赖(含 `tsc`)都从本地 `node_modules` 解析,不需要手工 `npm install` 或单独安装编译器。
 - 真实 `jj`(CI 固定 0.46.0)和 `git` 必须在 `PATH`:测试用真实仓库夹具,不 mock 二进制行为。
-- `tsc` 6.x(CI 固定 `typescript@6.0.3`、`@types/node@26.6.5`;仓库刻意不带 devDependencies)与 DSH 的公开
-  peer 类型都需要下面准备的依赖:软链方式只提供 DSH 类型,`tsc` 需在 `PATH` 或本地 `node_modules/.bin` 中。
-- 首次准备(二选一;`npm run setup` 自动探测,已就绪时直接 no-op):
-  1. **软链到 DSH 安装**(CLI / bun 全局安装):`npm run setup` 把 `node_modules/@deepseek-ai`、
-     `node_modules/@types` 软链到本机 DSH 的 `node_modules`。源依次尝试 `DSH_NODE_MODULES`、
-     `$HOME/.cache/.bun/install/global/node_modules`、`$HOME/.bun/install/global/node_modules`。
-     桌面版 DSH(macOS / Windows)把依赖放在 app bundle 内、无法软链,用第 2 种方式。
-  2. **npm 安装公开 peer 依赖**(仅首次需要网络;不写 lockfile、不新增依赖):仓库根执行
-     `npm install --no-package-lock --ignore-scripts`,再装编译器
-     `npm install --no-save typescript@6.0.3 @types/node@26.6.5`。之后 `npm run setup` / `npm test`
-     检测到依赖已可解析会直接 no-op,日常开发保持离线。
-- `npm run setup:check`(即 `node scripts/setup-links.ts --check`)只探测不写文件,适合 CI 或提交前确认 bootstrap。
-  只有 `tsc`(构建、`npm run typecheck`)需要这些依赖;`node --test` 本身不依赖软链。
-- 日常开发全程离线:不要新增依赖、不要提交 lockfile、不要让测试访问网络。
-- 查 DSH API:类型与实现位于本仓库 `node_modules/@deepseek-ai/*`(`lib/` + `lib/types/*.d.ts`),由上面的
-  bootstrap 提供;桌面版 app bundle 内的副本不直接可读。
+- `devDependencies` 只放工具链:`vite-plus@1.4.0`(提供 `vp` CLI / Oxfmt / Oxlint)、`typescript@6.0.3`、
+  `@types/node@26.6.5`,以及测试专用的 `@deepseek-ai/dsh-session-projection`(只有 `test/guard-cwd.test.ts`
+  用它构建真实的 `WorkingDirectoryService` 栈;本插件不是它的 peer)。该测试依赖必须与安装树里
+  `@deepseek-ai/dsh-working-directory` 声明的 exact peer 保持一致:上游 `0.2.1-rcN` 升级时同步改这个
+  devDependency,再重跑 `pnpm install` 更新 lockfile,并确认 `pnpm peers check` 没有新告警。
+- 依赖变更保持克制:运行时依赖仍为零,不新增运行时依赖;lockfile 随任何依赖变更一起提交,测试不得访问网络。
+- 查 DSH API:类型与实现位于本仓库 `node_modules/@deepseek-ai/*`(`lib/` + `lib/types/*.d.ts`),由 `pnpm install`
+  解析到本地;桌面版 app bundle 内的副本不直接可读。
 
 ## 常用命令
 
-| 命令 | 作用 |
-|---|---|
-| `npm test` | 提交前必须全绿:setup-links(依赖已就绪则 no-op)→ 测试类型检查 → `node --test`(`build.test.ts` 负责构建 `lib/`)|
-| `npm run build` | `tsc -p tsconfig.json`:`src/` → `lib/`(构建产物,不入库) |
-| `npm run typecheck` | 对 `src/` + `test/` + `scripts/` 做类型检查(`tsconfig.test.json`,`noEmit`) |
-| `npm run check` | 构建项目的 `noEmit` 检查 |
-| `npm run test:unit` | 只跑测试;仍要求真实 jj/git,`build.test.ts` 会先构建 `lib/` |
-| `npm run test:coverage` | 用 Node 内置覆盖率跑全部测试(`--test-coverage-include='src/**/*.ts'`,排除 `lib/`);当前 line ≈96% |
-| `npm run setup` | 准备离线依赖:软链 DSH 安装,或检测到 npm 安装的依赖后 no-op |
-| `npm run setup:check` | 只探测依赖是否就绪(`--check`,不写文件) |
+| 命令                                        | 作用                                                                                                                                                     |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test`                                 | 提交前必须全绿:`pnpm run check`(`vp check --deny-warnings`:Oxfmt + Oxlint)→ `pnpm run typecheck` → `pnpm run test:unit`(`build.test.ts` 负责构建 `lib/`) |
+| `pnpm run build`                            | `tsc -p tsconfig.json`:`src/` → `lib/`(构建产物,不入库)                                                                                                  |
+| `pnpm run typecheck`                        | 对 `src/` + `test/` + `vite.config.ts` 做类型检查(`tsconfig.test.json`,`noEmit`)                                                                         |
+| `pnpm run check`                            | 静态门禁:`vp check --deny-warnings`(Oxfmt 格式检查 + Oxlint,警告也失败)                                                                                  |
+| `pnpm run check:fix`                        | 同 `check`,并自动修复能修的格式/lint 问题                                                                                                                |
+| `pnpm run lint` / `pnpm run lint:fix`       | 只跑 Oxlint / 自动修复                                                                                                                                   |
+| `pnpm run format` / `pnpm run format:check` | 用 Oxfmt 格式化 / 只检查(提交前跑 `format`)                                                                                                              |
+| `pnpm run test:unit`                        | 只跑测试(`node --test`);仍要求真实 jj/git,`build.test.ts` 会先构建 `lib/`                                                                                |
+| `pnpm run test:coverage`                    | 用 Node 内置覆盖率跑全部测试(`--test-coverage-include='src/**/*.ts'`,排除 `lib/`);当前 line ≈96%                                                         |
+| `pnpm run prepack`                          | 由 `pnpm pack` / `npm publish` 自动触发的发布前构建(即 `pnpm run build`)                                                                                 |
 
-没有 lint / format 脚本;push / PR CI 运行 `npm test`(`.github/workflows/ci.yml`);`release.yml` 在发布前复用同一门禁
-(`npm test`,`build.test.ts` 负责构建 `lib/`),再显式构建、校验发布内容并发布。两个 workflow 的 jj 安装会校验资产
-SHA-256,actions 固定到 commit SHA(注释写明来源与升级方式),并安装测试专用依赖
-`@deepseek-ai/dsh-session-projection`(本插件不是它的 peer)。该依赖的版本必须从刚安装好的依赖树里读
-`dsh-working-directory` 声明的 exact peer,不要硬编码:上游 `0.2.1-rcN` 树会移动且彼此声明 exact peer,
-钉死旧 rc 会让第二次 `npm install` 在跑测试前就 ERESOLVE(2026-10 曾因此连续三轮 CI 红)。
+测试仍是 `node --test`、构建仍是 `tsc`:测试需要真实 jj/git 仓库夹具与 Node 的类型擦除,包本身零运行时依赖,
+产物就是 `tsc` 的 `lib/`,因此刻意不启用 `vp test`(Vitest)与 `vp build`(tsdown);`vite.config.ts` 只配置
+`fmt` / `lint` 两件事。
+
+push / PR CI(`.github/workflows/ci.yml`)先用 `pnpm/action-setup`(固定 commit SHA)安装 `packageManager` 指定的
+pnpm,`setup-node` 开启 pnpm 缓存,`pnpm install --frozen-lockfile` 后跑 `pnpm test`,再用
+`pnpm pack --dry-run --ignore-scripts --json` 做发布 tarball 的 smoke check。
+`release.yml` 在发布前复用同一门禁,再显式 `pnpm run build`、用同一 `pnpm pack` 命令校验发布内容,最后用
+npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已发布。
+`npm` 只出现在发布链路,本地一切命令都用 pnpm / `vp`。两个 workflow 的 jj 安装会校验资产 SHA-256,actions
+固定到 commit SHA(注释写明来源与升级方式)。锁文件固定上游解析结果;升级上游时同步 `devDependencies` 里的
+`@deepseek-ai/dsh-session-projection` 并重跑 `pnpm install`(更新 lockfile),确认 `pnpm peers check` 无新告警。
 
 ## 仓库布局
 
-| 路径 | 内容 |
-|---|---|
-| `src/index.ts` | 运行时入口:`JjService` 注册 + 全局 prompt context;`assembleBaseLayer` 供测试 |
-| `src/service.ts` | `JjOperations`(17 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service` |
-| `src/jj-templates.ts` | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess) |
-| `src/jj-service.ts` | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并 |
-| `src/tools.ts` | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry` |
-| `src/tool-schemas.ts` | 共享输出 schema 与 change view(纯数据/视图) |
-| `src/tool-shared.ts` | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型 |
-| `src/tool-definitions.ts` | `jjToolDefinitions` 与 17 个 `defineTool`(含 session workspace 所有权) |
-| `src/tool-entry.ts` | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor` |
-| `src/detect.ts` | 仓库识别:同步文件系统 sniff + CLI 权威探测 |
-| `src/git-command.ts` | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules` |
-| `src/git-tokenize.ts` | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数) |
-| `src/git-equivalence.ts` | git 安全分类与等价命令表类型/规则(纯数据) |
-| `src/git-rules.ts` | git 子命令规则表与 `classifyGitInvocation`(纯函数) |
-| `src/jj-rules.ts` | jj 子命令 scope 表与 `classifyJjInvocation`(纯函数) |
-| `src/guard.ts` | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案 |
-| `src/jj-command.ts` | jj/git 子进程适配、非交互 env、错误归类 |
-| `src/config.ts` | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验 |
-| `src/commit-style.ts` | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)与拆分提交指引(纯模块,无 I/O) |
-| `src/types.ts` | 共享类型与词汇(纯声明) |
-| `src/prompt-context.ts` | 会话开始时注入「优先用 jj」、提交描述/拆分提交与多会话/收尾 rebase 的模型可见上下文 |
-| `src/multi-session.ts` | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess) |
-| `test/**/*.test.ts` | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner |
-| `test/multi-session.test.ts` | 多会话检测模式与指引文案的单元测试 |
-| `test/service.test.ts` | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试 |
-| `test/jj-command.test.ts` | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试 |
-| `scripts/setup-links.ts` | 可移植的离线依赖引导:已就绪时 no-op、`--check` 只探测、否则软链到 DSH 安装 |
-| `.github/workflows/` | CI:`ci.yml`(push / PR 跑 `npm test`)、`release.yml`(tag 触发发布,复用同一门禁) |
-| `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`) |
-| `cordis.patch.yml` | bundle patch:三行 `insert` + `agent-instructions` 配置覆盖 |
-| `lib/` | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定 |
+| 路径                                        | 内容                                                                                                                                                                                    |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.ts`                              | 运行时入口:`JjService` 注册 + 全局 prompt context;`assembleBaseLayer` 供测试                                                                                                            |
+| `src/service.ts`                            | `JjOperations`(17 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                               |
+| `src/jj-templates.ts`                       | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess)                                                                                                                  |
+| `src/jj-service.ts`                         | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                              |
+| `src/tools.ts`                              | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
+| `src/tool-schemas.ts`                       | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
+| `src/tool-shared.ts`                        | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
+| `src/tool-definitions.ts`                   | `jjToolDefinitions` 与 17 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
+| `src/tool-entry.ts`                         | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
+| `src/detect.ts`                             | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
+| `src/git-command.ts`                        | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
+| `src/git-tokenize.ts`                       | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                   |
+| `src/git-equivalence.ts`                    | git 安全分类与等价命令表类型/规则(纯数据)                                                                                                                                               |
+| `src/git-rules.ts`                          | git 子命令规则表与 `classifyGitInvocation`(纯函数)                                                                                                                                      |
+| `src/jj-rules.ts`                           | jj 子命令 scope 表与 `classifyJjInvocation`(纯函数)                                                                                                                                     |
+| `src/guard.ts`                              | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案                                                                                                                                         |
+| `src/jj-command.ts`                         | jj/git 子进程适配、非交互 env、错误归类                                                                                                                                                 |
+| `src/config.ts`                             | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验                                                                                                                       |
+| `src/commit-style.ts`                       | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)与拆分提交指引(纯模块,无 I/O)                                                                                                       |
+| `src/types.ts`                              | 共享类型与词汇(纯声明)                                                                                                                                                                  |
+| `src/prompt-context.ts`                     | 会话开始时注入「优先用 jj」、提交描述/拆分提交与多会话/收尾 rebase 的模型可见上下文                                                                                                     |
+| `src/multi-session.ts`                      | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess)                                                            |
+| `test/**/*.test.ts`                         | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
+| `test/multi-session.test.ts`                | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
+| `test/service.test.ts`                      | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                            |
+| `test/jj-command.test.ts`                   | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试                                                                                                                         |
+| `vite.config.ts`                            | Vite+ 工具链配置:Oxfmt(`printWidth: 120` / `singleQuote`)与 Oxlint(`unicorn` / `typescript` / `oxc` / `import`),格式与 lint 规则的唯一来源                                              |
+| `pnpm-workspace.yaml`                       | 单包 pnpm 设置:把 `vite` 别名到 `vite-plus` 自带 core、把 `vitest` 钉到自带运行器,并放行对应 peer 版本(别名版本与 `vite-plus` devDependency 同步,`build.test.ts` 会校验)                |
+| `pnpm-lock.yaml`                            | 提交的锁文件:工具链与公开 peer 依赖的唯一解析来源,由 `pnpm install` 生成/更新                                                                                                           |
+| `.github/workflows/`                        | CI:`ci.yml`(push / PR:`pnpm install --frozen-lockfile` + `pnpm test` + `pnpm pack` smoke check)、`release.yml`(tag 触发:同一门禁 + `pnpm run build` + `pnpm pack` 校验后 npm OIDC 发布) |
+| `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`)                                                                                                                                        |
+| `cordis.patch.yml`                          | bundle patch:三行 `insert` + `agent-instructions` 配置覆盖                                                                                                                              |
+| `lib/`                                      | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定                                                                                                                            |
 
 ## 架构与硬性规则
 
@@ -156,10 +163,15 @@ SHA-256,actions 固定到 commit SHA(注释写明来源与升级方式),并安�
 
 ## 代码约定
 
+- 任何改动都必须让 `pnpm test` 全绿(`vp check --deny-warnings` → `tsc` 类型检查 → `node --test`);改行为先补测试。
 - TypeScript strict,`noUnusedLocals` / `noUnusedParameters` / `verbatimModuleSyntax` / `isolatedModules` /
   **`erasableSyntaxOnly`** 全开:不要用 `enum`、`namespace`、构造函数参数属性等不可擦除语法;类型导入用 `import type`。
 - 相对导入带 `.ts` 扩展名(`rewriteRelativeImportExtensions` 在构建时改写为 `.js`)。
-- 风格:2 空格缩进、单引号、分号、约 120 列;模块头用 JSDoc `@module`,导出的 API 写 JSDoc。
+- 格式与 lint 由 Vite+ 统一,`vite.config.ts` 是唯一配置:Oxfmt(`printWidth: 120`、`singleQuote`、分号;缩进/换行
+  由 `.editorconfig` 决定:2 空格、LF、结尾换行)与 Oxlint(默认 correctness 规则 + `unicorn` / `typescript` /
+  `oxc` / `import` 插件)。不要手工对齐、排序或逐行修补格式——改完运行 `pnpm run format`(只检查用
+  `pnpm run format:check`),提交前跑 `pnpm run lint`。门禁 `vp check --deny-warnings` 会把 lint warning 也当
+  失败,不要用注释静默关规则来绕过门禁。模块头用 JSDoc `@module`,导出的 API 写 JSDoc。
   源码与测试注释用英文,README 等用户文档用中文。
 - 源码注释中的 `design contract §…` 指历史设计文档(不在本仓库):以现有实现和测试对齐,不要臆造契约条款。
 - 测试:`node:test` + `node:assert/strict`,一个测试文件对应一个模块;夹具用 `mktemp` 隔离、显式 `cwd`、
@@ -167,7 +179,9 @@ SHA-256,actions 固定到 commit SHA(注释写明来源与升级方式),并安�
   不要 mock 仓库行为;改行为先补测试。
 - `test/build.test.ts` 额外守护:产物清单从 `src/*.ts` 推导(含 `lib/types/*.d.ts`)、`package.json` 的
   `main`/`types`/`exports`/`files` 目标必须存在、纯模块的 DSH 运行时 import(单/双引号)均被拒绝、
-  以及手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示)。新增源模块或改打包配置时先让这些断言通过。
+  手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示),以及 pnpm + Vite+ 工具链接线(`packageManager`、
+  `devDependencies`、`vp` 脚本、`pnpm-lock.yaml` / `pnpm-workspace.yaml` / `vite.config.ts` 存在,`vite` 别名
+  版本与 `vite-plus` 一致)。新增源模块或改打包/工具链配置时先让这些断言通过。
 
 ## 常见任务
 
@@ -229,20 +243,26 @@ git 嵌套 / 共享 workspace 等场景;同步 README「已知限制」。
 - 提交信息:Conventional Commits + 中文简述,例如 `docs(readme): 简化安装说明`、`fix(detect): …`、
   `refactor(bundle): …`、`ci(release): …`。已用类型:feat / fix / refactor / docs / chore / ci / build / test。
 - 未经用户明确要求不要 push;推送用 `jj git push --bookmark main`。
-- `.gitignore` 由 jj/git 共用(没有 `.jjignore`);`lib/`、`node_modules/`、`scratch/`、`*.tgz`、lockfile 均已忽略。
+- `.gitignore` 由 jj/git 共用(没有 `.jjignore`);`lib/`、`node_modules/`、`scratch/`、`*.tgz`、`package-lock.json`、
+  `yarn.lock`、`.npmrc` 均已忽略。**`pnpm-lock.yaml` 必须提交**,依赖变更时一起更新。
 - 发布:插件版本号只在 `package.json`。发版步骤(jj 0.46):
   1. `jj commit -m "chore(release): vX.Y.Z"`(或 `jj describe -m …` 后 `jj new`)提交版本号改动,再 `jj bookmark set main -r @-`;
   2. `jj tag set -r @- vX.Y.Z` 创建 tag,`jj tag list` 确认(移动已存在的 tag 需加 `--allow-move`);
   3. `jj git push --bookmark main` 推送提交,`jj git push --tag vX.Y.Z` 推送 tag(触发 `release.yml`);
-  4. 观察 `release.yml`:校验 tag 与 `package.json` 版本一致 → 跑同一门禁 `npm test` → 显式 `npm run build` →
-     npm OIDC 发布 → GitHub Release;失败可用 `workflow_dispatch` 传入同一 tag 重跑。
-- 工具链 pin(Node 24、jj 0.46.0、typescript 6.0.3、`@types/node` 26.6.5)集中在 `.github/workflows/ci.yml`、
-  `release.yml` 与本文件「环境与准备」,升级时三处同步修改;不要手改插件版本号以外的 workflow 版本。
+  4. 观察 `release.yml`:校验 tag 与 `package.json` 版本一致 → 跑同一门禁 `pnpm test` → 显式 `pnpm run build` →
+     `pnpm pack --dry-run --ignore-scripts --json` 校验发布内容 → npm OIDC 发布 → GitHub Release;
+     失败可用 `workflow_dispatch` 传入同一 tag 重跑。
+- 工具链 pin 集中在 `package.json`(`packageManager: pnpm@12.16.1` 与 `devDependencies`)、`pnpm-lock.yaml`、
+  `.github/workflows/ci.yml` / `release.yml` 与本文件「环境与准备」:Node 24(CI;`vite-plus` 要求 24.11+)、
+  jj 0.46.0、`vite-plus` 1.4.0、`typescript` 6.0.3、`@types/node` 26.6.5;测试专用的
+  `@deepseek-ai/dsh-session-projection` 跟随安装树里 `dsh-working-directory` 的 exact peer。升级时同步修改,
+  lockfile 用 `pnpm install` 重算;不要手改插件版本号以外的 workflow 版本。
 
 ## 提交前检查清单
 
-- [ ] `npm test` 全绿
-- [ ] `jj diff` 只含预期改动;没有把 `lib/`、`node_modules/` 或临时夹具带进来
+- [ ] `pnpm test` 全绿(`vp check --deny-warnings` → `tsc` 类型检查 → `node --test`)
+- [ ] 改动已格式化:`pnpm run format` 后再用 `pnpm run format:check` 复核;没有手写对齐或排序
+- [ ] `jj diff` 只含预期改动;没有把 `lib/`、`node_modules/` 或临时夹具带进来;`pnpm-lock.yaml` 的改动与依赖变更对应
 - [ ] 用户可见变化已同步 `README.md`(功能/安装/工具表/配置表/已知限制)与对应 `locale/*.json`
-- [ ] 没有新增运行时依赖、网络安装或 lockfile
+- [ ] 没有新增运行时依赖,`devDependencies` 只放工具链;依赖变更已更新 `pnpm-lock.yaml`
 - [ ] 没有绕过 guard、`jjNonInteractiveEnv` 或 runner 抽象

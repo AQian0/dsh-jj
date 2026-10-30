@@ -1,21 +1,21 @@
 name: release
 
 # 推 v<version> tag 触发：校验 tag 与 package.json 版本一致、tag 提交在 main 上 →
-# 跑文档门禁 `npm test`（setup-links no-op + 类型检查 + node --test，build.test.ts
-# 负责构建 lib/）→ 显式 `npm run build` → 校验 npm pack 内容 → 用 npm 可信发布
-# （GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成 → 创建 GitHub Release
-# （已存在则跳过，可用 workflow_dispatch 传已有 tag 重跑）。
+# 跑文档门禁 `pnpm test`（vp check 的 Oxfmt/Oxlint + tsc 类型检查 + node --test，
+# build.test.ts 负责构建 lib/）→ 显式 `pnpm run build` → 校验 pnpm pack 内容 →
+# 用 npm 可信发布（GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成 →
+# 创建 GitHub Release（已存在则跳过，可用 workflow_dispatch 传已有 tag 重跑）。
 # 首次发布由本机 Bun 手动完成（Bun 不支持 npm OIDC）。
 
 on:
   push:
     tags:
-      - "v*.*.*"
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       tag:
         # 有意不写具体版本号：格式示例保持与版本无关，发版时无需修改此处。
-        description: "Existing release tag to publish (format: vX.Y.Z)"
+        description: 'Existing release tag to publish (format: vX.Y.Z)'
         required: true
         type: string
 
@@ -47,23 +47,37 @@ jobs:
           ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
+      - name: Set up pnpm
+        # No `version` input: the action installs the exact `packageManager`
+        # version pinned in package.json.
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4 (v4.4.0)
+
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 (v6.5.0)
         with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+
+      - name: Install dependencies
+        # Reproducible install from the committed pnpm-lock.yaml. The lockfile
+        # pins the resolved DSH upstream tree (including the test-only
+        # @deepseek-ai/dsh-session-projection type dependency), so no dynamic
+        # version probe is needed. Upgrading that tree is a dependency change:
+        # refresh the devDependency + lockfile with `pnpm install` and re-check
+        # `pnpm peers check` instead of patching versions in this workflow.
+        run: pnpm install --frozen-lockfile
 
       - name: Install Jujutsu (jj) for the test fixtures
         env:
-          JJ_VERSION: "0.46.0"
+          JJ_VERSION: '0.46.0'
           # SHA-256 of jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz, as published by
           # GitHub's release asset digest for
           # https://github.com/jj-vcs/jj/releases/expanded_assets/v0.46.0 and
           # re-verified locally by hashing the downloaded asset. jj 0.46.0 publishes
           # no SHA256SUMS asset, so this GitHub-displayed digest is the authoritative
           # checksum for the exact asset URL below. Bump it together with JJ_VERSION.
-          JJ_TARBALL_SHA256: "fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08"
+          JJ_TARBALL_SHA256: 'fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08'
         run: |
           archive="${RUNNER_TEMP}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
           mkdir -p "$HOME/.local/bin"
@@ -106,44 +120,24 @@ jobs:
           fi
           echo "${RELEASE_TAG} is on main"
 
-      - name: Install test-only dependencies
-        # 与 .github/workflows/ci.yml 保持同一套安装配方：仓库保持零依赖、不带
-        # lockfile，这里临时安装公开 peer 依赖和固定版本编译器。
-        # `@deepseek-ai/dsh-session-projection` 仅测试使用（test/guard-cwd.test.ts
-        # 用它构建真实的 WorkingDirectoryService 栈），不是本插件的 peer 依赖。
-        # 不要硬编码它的版本：上面的 caret peer 范围会解析到最新的 0.2.1-rcN 上游树，
-        # 而上游包彼此声明 exact peer（rc.5 要求 projection@0.2.1-rc.5），钉住旧 rc 会让
-        # 第二次 npm install 在任何测试前就 ERESOLVE 失败；改为从刚装好的依赖树里读
-        # exact peer 版本，保证测试专用依赖始终与本次解析出的上游树一致。
-        run: |
-          npm install --no-package-lock --ignore-scripts --no-audit --no-fund
-          projection="$(node -p "require('./node_modules/@deepseek-ai/dsh-working-directory/package.json').peerDependencies['@deepseek-ai/dsh-session-projection']")"
-          if [ -z "${projection}" ] || [ "${projection}" = "undefined" ]; then
-            echo "::error::cannot read the @deepseek-ai/dsh-session-projection peer version from the installed DSH tree"
-            exit 1
-          fi
-          npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
-            typescript@6.0.3 @types/node@26.6.5 "@deepseek-ai/dsh-session-projection@${projection}"
-
       - name: Run the documented test gate
-        # `npm test` = setup-links（依赖已安装则 no-op）+ tsc -p tsconfig.test.json +
-        # node --test；build.test.ts 会构建 lib/。原先分散的 typecheck/build/test
-        # 三步合并到这里，避免双构建，也避免“文档门禁没被 CI 验证”的漂移。
-        run: npm test
+        # `pnpm test` = vp check（Oxfmt + Oxlint，warning 视为失败）+ tsc -p
+        # tsconfig.test.json + node --test；build.test.ts 会构建 lib/。
+        run: pnpm test
 
       - name: Build the published output
-        # lib/ 不入库。npm publish 的 prepack 也会构建，但这里显式再构建一次，
-        # 让下面的 pack 校验与最终发布看到同一份确定的产物（tsc 构建 < 1s）。
-        run: npm run build
+        # lib/ 不入库。prepack 也会构建，但这里显式再构建一次，让下面的 pack
+        # 校验与最终发布看到同一份确定的产物（tsc 构建 < 1s）。
+        run: pnpm run build
 
       - name: Validate the publishable tarball
         # 用 --ignore-scripts 防止再次触发 prepack；缺失 lib/types 或 locale 的包
         # 对该版本不可挽回，所以显式断言内容而不是只信 package.json.files。
         run: |
-          npm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
+          pnpm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
           node - <<'NODE'
           const fs = require('node:fs');
-          const manifest = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/pack.json`, 'utf8'))[0];
+          const manifest = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/pack.json`, 'utf8'));
           const packaged = new Set(manifest.files.map((entry) => entry.path));
           const required = [
             'lib/index.js',
@@ -162,11 +156,12 @@ jobs:
             console.error(`::error::publishable tarball is missing: ${missing.join(', ')}`);
             process.exit(1);
           }
-          console.log(`npm pack contains all ${required.length} required files (${manifest.entryCount} entries)`);
+          console.log(`pnpm pack contains all ${required.length} required files (${manifest.files.length} entries)`);
           NODE
 
       - name: Publish to npm with OIDC
         # 已发布则跳过（warning），使重跑可恢复；prerelease 走 next dist-tag。
+        # 发布本身仍走 npm 的 trusted publishing（OIDC），pnpm 只负责本地工具链。
         run: |
           version="${RELEASE_TAG#v}"
           if npm view "@aqian0/dsh-jj@${version}" version >/dev/null 2>&1; then

@@ -33,7 +33,7 @@ export function createRun(defaultEnv: TestEnv = {}): RunCommand {
   return async function run(argv, options): Promise<RunResult> {
     const started = Date.now();
     const [command, ...args] = argv;
-    const env: NodeJS.ProcessEnv = { ...process.env, ...defaultEnv, ...(options.env ?? {}) };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...defaultEnv, ...options.env };
     return await new Promise<RunResult>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let settled = false;
@@ -43,9 +43,7 @@ export function createRun(defaultEnv: TestEnv = {}): RunCommand {
         clearTimeout(timer);
         resolve(result);
       };
-      const spawned = (():
-        | { readonly child: ReturnType<typeof spawn> }
-        | { readonly spawnError: unknown } => {
+      const spawned = ((): { readonly child: ReturnType<typeof spawn> } | { readonly spawnError: unknown } => {
         try {
           return { child: spawn(command, args, { cwd: options.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] }) };
         } catch (error) {

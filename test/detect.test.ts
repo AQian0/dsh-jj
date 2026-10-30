@@ -9,7 +9,15 @@ import assert from 'node:assert/strict';
 import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { detectVcs, sniffVcsSync, parseWorkspaceList, TPL_WORKSPACE_LIST } from '../src/detect.ts';
-import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, realpath } from './helpers/fixtures.ts';
+import {
+  assertToolchain,
+  initGit,
+  initJjColocated,
+  initJjNative,
+  makeFixture,
+  mustRun,
+  realpath,
+} from './helpers/fixtures.ts';
 
 /**
  * Compare two paths by their canonical realpath.
@@ -174,7 +182,7 @@ test('jj workspace inside a parent Git repository: Git does not escape the jj bo
   const descriptor = await detectVcs(workspace, fx.run);
 
   assert.equal(descriptor.kind, 'jj-native');
-  assert.equal(descriptor.gitRoot, undefined, 'the parent Git repository is not this directory\'s repository');
+  assert.equal(descriptor.gitRoot, undefined, "the parent Git repository is not this directory's repository");
   assert.equal(descriptor.gitDir, undefined);
   assert.equal(descriptor.gitCeilingApplied, true);
   assert.ok(descriptor.notices.some((entry) => entry.code === 'git-ceiling-applied'));
@@ -261,8 +269,16 @@ test('TPL_WORKSPACE_LIST parses as one JSON object per line', async (t) => {
 test('detection does not snapshot the working copy (op log unchanged)', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-detect-noside');
   const colo = await initJjColocated(fx.run, fx.path('colo'));
-  const before = await mustRun(fx.run, ['jj', '--ignore-working-copy', '--no-pager', 'op', 'log', '--limit', '1', '--no-graph', '-T', 'self.id()'], colo);
+  const before = await mustRun(
+    fx.run,
+    ['jj', '--ignore-working-copy', '--no-pager', 'op', 'log', '--limit', '1', '--no-graph', '-T', 'self.id()'],
+    colo,
+  );
   await detectVcs(colo, fx.run);
-  const after = await mustRun(fx.run, ['jj', '--ignore-working-copy', '--no-pager', 'op', 'log', '--limit', '1', '--no-graph', '-T', 'self.id()'], colo);
+  const after = await mustRun(
+    fx.run,
+    ['jj', '--ignore-working-copy', '--no-pager', 'op', 'log', '--limit', '1', '--no-graph', '-T', 'self.id()'],
+    colo,
+  );
   assert.equal(after.stdout, before.stdout, 'detection must not create a jj operation');
 });

@@ -165,8 +165,14 @@ test('classifyJjFailure: a successful exit wins the race with a caller abort', (
 });
 
 test('classifyJjFailure: timeout, abort, external signal, and spawn failure stay distinct', () => {
-  assert.equal(classifyJjFailure(settled({ exitCode: null, signal: null, killedByTimeout: true }), false), 'JJ_TIMEOUT');
-  assert.equal(classifyJjFailure(settled({ exitCode: null, signal: 'SIGKILL', killedByTimeout: true }), false), 'JJ_TIMEOUT');
+  assert.equal(
+    classifyJjFailure(settled({ exitCode: null, signal: null, killedByTimeout: true }), false),
+    'JJ_TIMEOUT',
+  );
+  assert.equal(
+    classifyJjFailure(settled({ exitCode: null, signal: 'SIGKILL', killedByTimeout: true }), false),
+    'JJ_TIMEOUT',
+  );
   assert.equal(classifyJjFailure(settled({ exitCode: 1 }), true), 'JJ_ABORTED');
   // Node reports `exitCode: null` for both an external signal and a failed
   // spawn; only the signal field tells them apart (audit M2).
@@ -196,7 +202,12 @@ test('classifyJjFailure: jj failure vocabulary is table-driven', () => {
 
 test('jjErrorMessage: every code produces model-facing text naming the command', () => {
   for (const code of ERROR_CODES) {
-    const message = jjErrorMessage(code, ['log', '-r', '@'], settled({ exitCode: 1, stdout: 'out', stderr: 'err' }), 'jj');
+    const message = jjErrorMessage(
+      code,
+      ['log', '-r', '@'],
+      settled({ exitCode: 1, stdout: 'out', stderr: 'err' }),
+      'jj',
+    );
     assert.ok(message.length > 25, `${code} message must be actionable: ${message}`);
     if (code === 'JJ_NOT_INSTALLED') {
       // Not-installed text names the executable (the command never ran), not argv.
@@ -262,7 +273,10 @@ test('createRunJj: spawns the documented non-interactive command with bounded co
 
 test('createRunJj: per-call options override the configured program, limits, and env', async () => {
   const fake = fakeSubprocess();
-  await createRunJj(fake.ctx, CONFIG)({
+  await createRunJj(
+    fake.ctx,
+    CONFIG,
+  )({
     cwd: '/repo',
     argv: ['log'],
     jjCommand: '/opt/jj',
@@ -356,23 +370,19 @@ test('createRunGit: spawns a Git probe with the scrubbed Git environment', async
   assert.equal(result.stdout, 'rev\n');
 });
 
-test(
-  'createRunGit: a hung Git probe is bounded by the plugin timeout and terminated',
-  { timeout: 5_000 },
-  async () => {
-    const fake = fakeSubprocess({ hangUntilAborted: true });
-    const config = resolveConfig({ timeoutMs: 20, graceMs: 5 });
-    const started = Date.now();
-    const result = await createRunGit(fake.ctx, config)({ cwd: '/repo', argv: ['rev-parse', '--show-toplevel'] });
-    const spawn = fake.spawns[0];
-    assert.equal(result.killedByTimeout, true, 'the Git probe honours the configured deadline (audit M7)');
-    assert.equal(result.exitCode, null);
-    assert.equal(spawn.spec.graceMs, 5);
-    assert.equal(spawn.spec.signal?.aborted, true);
-    assert.equal(spawn.calls.terminate, 1);
-    assert.ok(Date.now() - started < 2_000, 'a 20ms deadline must end the probe, not wait for the default');
-  },
-);
+test('createRunGit: a hung Git probe is bounded by the plugin timeout and terminated', { timeout: 5_000 }, async () => {
+  const fake = fakeSubprocess({ hangUntilAborted: true });
+  const config = resolveConfig({ timeoutMs: 20, graceMs: 5 });
+  const started = Date.now();
+  const result = await createRunGit(fake.ctx, config)({ cwd: '/repo', argv: ['rev-parse', '--show-toplevel'] });
+  const spawn = fake.spawns[0];
+  assert.equal(result.killedByTimeout, true, 'the Git probe honours the configured deadline (audit M7)');
+  assert.equal(result.exitCode, null);
+  assert.equal(spawn.spec.graceMs, 5);
+  assert.equal(spawn.spec.signal?.aborted, true);
+  assert.equal(spawn.calls.terminate, 1);
+  assert.ok(Date.now() - started < 2_000, 'a 20ms deadline must end the probe, not wait for the default');
+});
 
 test('createRunGit: a pre-aborted caller spawns nothing', async () => {
   const fake = fakeSubprocess();
@@ -393,50 +403,67 @@ test('runJjChecked: success passes the result through', async () => {
 
 test('runJjChecked: a failed command throws JjError with code, message, and raw detail', async () => {
   const failure = settled({ exitCode: 255, stderr: 'Error: The repository appears broken or inaccessible' });
-  await assert.rejects(runJjChecked(async () => failure, { cwd: '/repo', argv: ['log', '-r', '@'] }, CONFIG), (error: unknown) => {
-    if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
-    assert.equal(error.code, 'JJ_REPO_BROKEN');
-    assert.match(error.message, /jj log -r @/);
-    assert.match(error.message, /broken or inaccessible/);
-    assert.deepEqual([...error.detail.argv], ['log', '-r', '@']);
-    assert.equal(error.detail.exitCode, 255);
-    assert.equal(error.detail.stderr, failure.stderr);
-    assert.equal(error.detail.stdout, '');
-    return true;
-  });
+  await assert.rejects(
+    runJjChecked(async () => failure, { cwd: '/repo', argv: ['log', '-r', '@'] }, CONFIG),
+    (error: unknown) => {
+      if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
+      assert.equal(error.code, 'JJ_REPO_BROKEN');
+      assert.match(error.message, /jj log -r @/);
+      assert.match(error.message, /broken or inaccessible/);
+      assert.deepEqual([...error.detail.argv], ['log', '-r', '@']);
+      assert.equal(error.detail.exitCode, 255);
+      assert.equal(error.detail.stderr, failure.stderr);
+      assert.equal(error.detail.stdout, '');
+      return true;
+    },
+  );
 });
 
 test('runJjChecked: an externally signalled process is JJ_SIGNALED, not "jj missing"', async () => {
   const killed = settled({ exitCode: null, signal: 'SIGTERM', stderr: 'killed' });
-  await assert.rejects(runJjChecked(async () => killed, { cwd: '/repo', argv: ['rebase'] }, CONFIG), (error: unknown) => {
-    if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
-    assert.equal(error.code, 'JJ_SIGNALED');
-    assert.match(error.message, /SIGTERM/);
-    assert.match(error.message, /jj_op_log/);
-    return true;
-  });
+  await assert.rejects(
+    runJjChecked(async () => killed, { cwd: '/repo', argv: ['rebase'] }, CONFIG),
+    (error: unknown) => {
+      if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
+      assert.equal(error.code, 'JJ_SIGNALED');
+      assert.match(error.message, /SIGTERM/);
+      assert.match(error.message, /jj_op_log/);
+      return true;
+    },
+  );
 });
 
 test('runJjChecked: a spawn-failure result is JJ_NOT_INSTALLED with the underlying error', async () => {
   const failure = settled({ exitCode: null, stderr: 'ENOENT: jj not found' });
-  await assert.rejects(runJjChecked(async () => failure, { cwd: '/repo', argv: ['status'] }, CONFIG), (error: unknown) => {
-    if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
-    assert.equal(error.code, 'JJ_NOT_INSTALLED');
-    assert.match(error.message, /ENOENT: jj not found/);
-    return true;
-  });
+  await assert.rejects(
+    runJjChecked(async () => failure, { cwd: '/repo', argv: ['status'] }, CONFIG),
+    (error: unknown) => {
+      if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
+      assert.equal(error.code, 'JJ_NOT_INSTALLED');
+      assert.match(error.message, /ENOENT: jj not found/);
+      return true;
+    },
+  );
 });
 
 test('runJjChecked: a completed command is not reported as cancelled by a late abort', async () => {
   const signal = abortedSignal();
-  const result = await runJjChecked(async () => settled({ stdout: 'done' }), { cwd: '/repo', argv: ['status'], signal }, CONFIG);
+  const result = await runJjChecked(
+    async () => settled({ stdout: 'done' }),
+    { cwd: '/repo', argv: ['status'], signal },
+    CONFIG,
+  );
   assert.equal(result.stdout, 'done');
 });
 
 test('runJjChecked: a pre-aborted call is JJ_ABORTED and warns about partial effects', async () => {
   const signal = abortedSignal();
   await assert.rejects(
-    runJjChecked(async () => settled({ exitCode: null }), { cwd: '/repo', argv: ['commit', '-m', 'x'], signal }, CONFIG),
+    runJjChecked(
+      async () => settled({ exitCode: null }),
+      { cwd: '/repo', argv: ['commit', '-m', 'x'], signal },
+      CONFIG,
+    ),
     (error: unknown) => {
       if (!(error instanceof JjError)) assert.fail(`expected a JjError, got ${String(error)}`);
       assert.equal(error.code, 'JJ_ABORTED');

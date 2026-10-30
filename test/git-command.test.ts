@@ -195,7 +195,11 @@ for (const commandLine of READ_CASES) {
   test(`read: ${commandLine}`, () => {
     const invocation = only(commandLine);
     assert.equal(invocation.mutating, false, `${commandLine} must not be mutating`);
-    assert.equal(invocation.safety, 'read', `expected read for ${commandLine}, got ${invocation.safety}: ${invocation.reason}`);
+    assert.equal(
+      invocation.safety,
+      'read',
+      `expected read for ${commandLine}, got ${invocation.safety}: ${invocation.reason}`,
+    );
     assert.equal(invocation.confidence, 'high');
   });
 }
@@ -230,7 +234,7 @@ const PROGRAM_FORMS: readonly string[] = [
   'git status; git commit -m x',
   'git commit -m x\ngit status',
   'bash -c "git commit -m x"',
-  'sh -c \'git commit -m x\'',
+  "sh -c 'git commit -m x'",
   'echo "$(git rev-parse HEAD)" && git commit -m x',
   'echo "`git push`"',
 ];
@@ -258,7 +262,10 @@ test('global options are extracted and lower the confidence for the non-canonica
 
 test('compound command keeps invocation order and records the cd target', () => {
   const classification = classifyGitInvocation('cd /tmp/repo && git status; git log');
-  assert.deepEqual(classification.invocations.map((entry) => entry.subcommand), ['status', 'log']);
+  assert.deepEqual(
+    classification.invocations.map((entry) => entry.subcommand),
+    ['status', 'log'],
+  );
   assert.ok(classification.segments.some((segment) => segment.cdTarget === '/tmp/repo'));
 });
 
@@ -294,7 +301,27 @@ test('variable program and eval are not misclassified', () => {
 });
 
 test('dangerous subcommands from the DSH audit are all covered', () => {
-  const dangerous = ['commit', 'checkout', 'switch', 'reset', 'restore', 'stash', 'merge', 'rebase', 'cherry-pick', 'revert', 'worktree', 'branch', 'update-ref', 'pull', 'push', 'fetch', 'gc', 'prune', 'filter-branch'];
+  const dangerous = [
+    'commit',
+    'checkout',
+    'switch',
+    'reset',
+    'restore',
+    'stash',
+    'merge',
+    'rebase',
+    'cherry-pick',
+    'revert',
+    'worktree',
+    'branch',
+    'update-ref',
+    'pull',
+    'push',
+    'fetch',
+    'gc',
+    'prune',
+    'filter-branch',
+  ];
   for (const subcommand of dangerous) {
     assert.ok(GIT_SUBCOMMAND_RULES[subcommand], `${subcommand} must be in the table`);
   }
@@ -330,7 +357,15 @@ test('classifyJjInvocation: repository-wide commands', async () => {
 
 test('classifyJjInvocation: workspace-local, read-only, and at-op replay', async () => {
   const { classifyJjInvocation } = await import('../src/git-command.ts');
-  for (const command of ['jj new', 'jj describe -m x', 'jj commit -m x', 'jj squash', 'jj rebase -d main', 'jj restore file', 'jj split']) {
+  for (const command of [
+    'jj new',
+    'jj describe -m x',
+    'jj commit -m x',
+    'jj squash',
+    'jj rebase -d main',
+    'jj restore file',
+    'jj split',
+  ]) {
     assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'workspace-local', command);
   }
   for (const command of ['jj status', 'jj log', 'jj diff', 'jj show', 'jj evolog', 'jj op log', 'jj file list']) {
@@ -372,7 +407,7 @@ test('classifyJjInvocation exposes segments with a statically resolvable changeD
   assert.equal(classification.segments[0]?.changeDir, '/tmp/repo');
   assert.equal(classification.segments[0]?.invocationIndexes.length, 0);
   assert.equal(classification.segments[1]?.changeDir, undefined);
-  assert.deepEqual([...classification.segments[1]?.invocationIndexes ?? []], [0]);
+  assert.deepEqual([...(classification.segments[1]?.invocationIndexes ?? [])], [0]);
   assert.equal(classification.invocations[0]?.subcommand, 'undo');
 });
 
@@ -390,9 +425,15 @@ test('classifyJjInvocation only sets changeDir for statically resolvable cd targ
 test('classifyJjInvocation tracks cd per segment and across wrapper substitutions', async () => {
   const { classifyJjInvocation } = await import('../src/git-command.ts');
   const flat = classifyJjInvocation('jj log; cd /tmp/x; jj status');
-  assert.deepEqual(flat.segments.map((segment) => segment.changeDir), [undefined, '/tmp/x', undefined]);
-  assert.deepEqual([...flat.invocations.map((invocation) => invocation.subcommand)], ['log', 'status']);
-  assert.deepEqual([...flat.segments[2]?.invocationIndexes ?? []], [1]);
+  assert.deepEqual(
+    flat.segments.map((segment) => segment.changeDir),
+    [undefined, '/tmp/x', undefined],
+  );
+  assert.deepEqual(
+    flat.invocations.map((invocation) => invocation.subcommand),
+    ['log', 'status'],
+  );
+  assert.deepEqual([...(flat.segments[2]?.invocationIndexes ?? [])], [1]);
 
   const nested = classifyJjInvocation('bash -c "cd /tmp/x && jj undo"');
   assert.equal(nested.invocations[0]?.subcommand, 'undo');
@@ -448,20 +489,32 @@ test('heredoc bodies are data, not commands', () => {
   assert.equal(tabs.invocations.length, 0);
   // Commands before/after the heredoc are still classified.
   const around = classifyGitInvocation('git status <<EOF\nrm -rf /tmp/x\nEOF\ngit commit -m y');
-  assert.deepEqual(around.invocations.map((invocation) => invocation.subcommand), ['status', 'commit']);
+  assert.deepEqual(
+    around.invocations.map((invocation) => invocation.subcommand),
+    ['status', 'commit'],
+  );
   const multiple = classifyGitInvocation('cat <<A <<B\na\nA\nb\nB\ngit status');
-  assert.deepEqual(multiple.invocations.map((invocation) => invocation.subcommand), ['status']);
+  assert.deepEqual(
+    multiple.invocations.map((invocation) => invocation.subcommand),
+    ['status'],
+  );
 });
 
 test('an unterminated heredoc invalidates the parsed command', () => {
   const classification = classifyGitInvocation('git commit -m x <<EOF\nno terminator');
   assert.equal(classification.invocations.length, 0);
-  assert.ok(classification.warnings.some((warning) => warning.includes('heredoc')), 'the parser reports the missing heredoc');
+  assert.ok(
+    classification.warnings.some((warning) => warning.includes('heredoc')),
+    'the parser reports the missing heredoc',
+  );
 });
 
 test('quotes inside command substitutions do not cut the substitution short', () => {
   const classification = classifyGitInvocation('echo "$(echo ")")" && git commit -m x');
-  assert.deepEqual(classification.invocations.map((invocation) => invocation.subcommand), ['commit']);
+  assert.deepEqual(
+    classification.invocations.map((invocation) => invocation.subcommand),
+    ['commit'],
+  );
   assert.equal(classification.warnings.length, 0);
   const status = classifyGitInvocation('echo "$(echo "a)b")" && git status');
   assert.ok(status.invocations.some((invocation) => invocation.subcommand === 'status'));
@@ -507,7 +560,12 @@ test('jj restore --into a revision other than @ is repository-wide', async () =>
     assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'repo-wide', command);
   }
   // `--into @` is the default working-copy target: keep the local semantics.
-  for (const command of ['jj restore --into @ file.txt', 'jj restore --to=@ file.txt', 'jj restore -t @ file.txt', 'jj restore file.txt']) {
+  for (const command of [
+    'jj restore --into @ file.txt',
+    'jj restore --to=@ file.txt',
+    'jj restore -t @ file.txt',
+    'jj restore file.txt',
+  ]) {
     assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'workspace-local', command);
   }
   // `--into @` without a fileset still discards the whole working-copy change.
@@ -552,7 +610,10 @@ test('jj op abandon and workspace rename are repository-wide', async () => {
 test('jj workspace forget target is parsed flag-aware', async () => {
   const { classifyJjInvocation } = await import('../src/git-command.ts');
   assert.equal(classifyJjInvocation('jj workspace forget other').invocations[0]?.targetWorkspace, 'other');
-  assert.equal(classifyJjInvocation('jj workspace forget --ignore-working-copy other').invocations[0]?.targetWorkspace, 'other');
+  assert.equal(
+    classifyJjInvocation('jj workspace forget --ignore-working-copy other').invocations[0]?.targetWorkspace,
+    'other',
+  );
   assert.equal(classifyJjInvocation('jj -R /tmp/repo workspace forget other').invocations[0]?.targetWorkspace, 'other');
 });
 
@@ -576,7 +637,10 @@ test('wrapped commands expose the inner Git invocation', () => {
     'nu -c "git commit -m x"',
   ]) {
     const classification = classifyGitInvocation(commandLine);
-    assert.ok(classification.invocations.some((entry) => entry.mutating), `expected mutating git in: ${commandLine}`);
+    assert.ok(
+      classification.invocations.some((entry) => entry.mutating),
+      `expected mutating git in: ${commandLine}`,
+    );
   }
 });
 
@@ -651,13 +715,23 @@ test('newly covered git mutate subcommands and fsck --lost-found', () => {
   ]) {
     assert.equal(only(commandLine).mutating, true, `${commandLine} must be mutating`);
   }
-  for (const commandLine of ['git fsck', 'git fsck --unreachable', 'git commit-graph verify', 'git multi-pack-index verify']) {
+  for (const commandLine of [
+    'git fsck',
+    'git fsck --unreachable',
+    'git commit-graph verify',
+    'git multi-pack-index verify',
+  ]) {
     assert.equal(only(commandLine).mutating, false, `${commandLine} must stay read-only`);
   }
 });
 
 test('other dynamic wrappers produce warnings instead of silent misses', () => {
-  for (const commandLine of ['busybox git commit -m x', 'unbuffer git commit -m x', 'find . -exec git commit -m x {} \\;', "ssh host 'git commit -m x'"]) {
+  for (const commandLine of [
+    'busybox git commit -m x',
+    'unbuffer git commit -m x',
+    'find . -exec git commit -m x {} \\;',
+    "ssh host 'git commit -m x'",
+  ]) {
     const classification = classifyGitInvocation(commandLine);
     assert.equal(classification.invocations.length, 0, `${commandLine} stays unclassified (fail-open)`);
     assert.ok(classification.warnings.length > 0, `${commandLine} must carry a warning`);
@@ -672,7 +746,13 @@ test('cd - is not treated as a statically resolvable changeDir', async () => {
 
 test('jj help invocations are read-only instead of destructive/repo-wide', async () => {
   const { classifyJjInvocation } = await import('../src/git-command.ts');
-  for (const command of ['jj restore --help', 'jj abandon --help', 'jj undo --help', 'jj new -h', 'jj restore -f @- --help']) {
+  for (const command of [
+    'jj restore --help',
+    'jj abandon --help',
+    'jj undo --help',
+    'jj new -h',
+    'jj restore -f @- --help',
+  ]) {
     assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'read-only', command);
   }
   assert.equal(classifyJjInvocation('jj restore').invocations[0]?.scope, 'destructive');
@@ -691,7 +771,7 @@ test('every redirection spelling drops its target from the command words', () =>
   ];
   for (const [commandLine, words] of cases) {
     const classification = classifyGitInvocation(commandLine);
-    assert.deepEqual([...classification.segments[0]?.words ?? []], [...words], commandLine);
+    assert.deepEqual([...(classification.segments[0]?.words ?? [])], [...words], commandLine);
     assert.equal(classification.invocations.length, 1, commandLine);
   }
 });

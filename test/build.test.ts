@@ -34,18 +34,11 @@ interface BuiltJjService {
   describe(kind: string): string;
 }
 
-/** Ensure the offline @deepseek-ai symlinks exist before building. */
-async function ensureLinks(): Promise<void> {
-  if (!existsSync(join(packageDir, 'node_modules', '@deepseek-ai'))) {
-    await execFileAsync('node', ['scripts/setup-links.ts'], { cwd: packageDir, timeout: 60_000 });
-  }
-}
-
 /**
  * Compiler the build test must use.
  *
  * Prefer the workspace-local `tsc` so a direct `node --test test/build.test.ts`
- * produces the same emit as `npm test`/CI (a different global compiler preserves
+ * produces the same emit as `pnpm test`/CI (a different global compiler preserves
  * different string quotes and would make the committed lib/ look stale).
  */
 function tscCommand(): string {
@@ -80,13 +73,16 @@ const PURE_MODULES = [
   'multi-session',
 ] as const;
 
-/** Manifest fields the packaging guard inspects. */
+/** Manifest fields the packaging and toolchain guards inspect. */
 interface PackageManifest {
   readonly main?: string;
   readonly types?: string;
   readonly exports?: Readonly<Record<string, unknown>>;
   readonly files?: readonly string[];
   readonly peerDependencies?: Readonly<Record<string, string>>;
+  readonly devDependencies?: Readonly<Record<string, string>>;
+  readonly scripts?: Readonly<Record<string, string>>;
+  readonly packageManager?: string;
 }
 
 /** Read and parse the package manifest. */
@@ -143,7 +139,6 @@ function assertFilesEntry(entry: string): void {
 }
 
 test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', async () => {
-  await ensureLinks();
   const result = await execFileAsync(tscCommand(), ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
   assert.equal(String(result.stderr).trim(), '', `tsc stderr: ${String(result.stderr)}`);
   const modules = sourceModuleNames();
@@ -152,7 +147,10 @@ test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', 
   }
   for (const name of modules) {
     assert.ok(existsSync(join(packageDir, 'lib', `${name}.js`)), `missing build artifact lib/${name}.js`);
-    assert.ok(existsSync(join(packageDir, 'lib', 'types', `${name}.d.ts`)), `missing declaration lib/types/${name}.d.ts`);
+    assert.ok(
+      existsSync(join(packageDir, 'lib', 'types', `${name}.d.ts`)),
+      `missing declaration lib/types/${name}.d.ts`,
+    );
   }
 });
 
@@ -184,7 +182,10 @@ const REQUIRED_FILES = [
 
 test('the published package manifest points only at shipped artifacts', () => {
   // This test runs after the build test above: every manifest target is compiled output.
-  assert.ok(existsSync(join(packageDir, 'lib', 'index.js')), 'lib/ is missing: run this file so the build test runs first');
+  assert.ok(
+    existsSync(join(packageDir, 'lib', 'index.js')),
+    'lib/ is missing: run this file so the build test runs first',
+  );
   const manifest = readPackageManifest();
 
   const main = manifest.main;
@@ -225,6 +226,54 @@ test('DSH peer ranges admit later 0.2.x releases instead of pinning one runtime'
   }
 });
 
+test('pnpm and Vite+ are wired as the repository toolchain', () => {
+  const manifest = readPackageManifest();
+  assert.equal(
+    manifest.packageManager?.startsWith('pnpm@'),
+    true,
+    'package.json must pin the pnpm version used locally and in CI',
+  );
+  const devDependencies = manifest.devDependencies ?? {};
+  for (const name of ['vite-plus', 'typescript', '@types/node', '@deepseek-ai/dsh-session-projection']) {
+    assert.ok((devDependencies[name] ?? '').length > 0, `package.json devDependencies is missing ${name}`);
+  }
+
+  const scripts = manifest.scripts ?? {};
+  for (const name of [
+    'build',
+    'format',
+    'format:check',
+    'lint',
+    'lint:fix',
+    'check',
+    'typecheck',
+    'test',
+    'test:unit',
+  ]) {
+    assert.ok((scripts[name] ?? '').length > 0, `package.json scripts.${name} is missing`);
+  }
+  assert.equal(scripts.format, 'vp fmt', 'formatting must go through the Vite+ CLI');
+  assert.equal(scripts['format:check'], 'vp fmt --check', 'CI must check formatting through the Vite+ CLI');
+  assert.equal(scripts.lint, 'vp lint', 'linting must go through the Vite+ CLI');
+  assert.equal(scripts.check, 'vp check --deny-warnings', 'the static gate must deny Oxlint warnings');
+  assert.match(scripts.test ?? '', /pnpm run check/, 'the test gate must run the static checks');
+
+  for (const file of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'vite.config.ts']) {
+    assert.ok(existsSync(join(packageDir, file)), `${file} must exist at the repository root`);
+  }
+  const workspace = readFileSync(join(packageDir, 'pnpm-workspace.yaml'), 'utf8');
+  const alias = /vite@\*:\s*npm:@voidzero-dev\/vite-plus-core@(\S+)/.exec(workspace);
+  assert.ok(alias !== null, 'pnpm-workspace.yaml must alias vite to the Vite+ core package');
+  assert.equal(
+    alias[1],
+    devDependencies['vite-plus'],
+    'the pnpm vite alias must track the installed vite-plus version',
+  );
+  const viteConfig = readFileSync(join(packageDir, 'vite.config.ts'), 'utf8');
+  assert.match(viteConfig, /fmt:\s*\{/, 'vite.config.ts must configure Oxfmt');
+  assert.match(viteConfig, /lint:\s*\{/, 'vite.config.ts must configure Oxlint');
+});
+
 test('all three entries import under plain Node with name/inject/apply/Config', async () => {
   const entries: ReadonlyArray<readonly [string, string, readonly string[]]> = [
     ['.', 'jj', ['subprocess', 'workingDirectory']],
@@ -234,7 +283,11 @@ test('all three entries import under plain Node with name/inject/apply/Config', 
   for (const [specifier, expectedName, expectedInject] of entries) {
     const module = (await import(pathToFileURL(join(packageDir, 'lib', entryFile(specifier))).href)) as BuiltModule;
     assert.equal(module.name, expectedName, `${specifier} name`);
-    assert.deepEqual([...((module.inject as readonly string[] | undefined) ?? [])], expectedInject, `${specifier} inject`);
+    assert.deepEqual(
+      [...((module.inject as readonly string[] | undefined) ?? [])],
+      expectedInject,
+      `${specifier} inject`,
+    );
     assert.equal(typeof module.apply, 'function', `${specifier} apply`);
     assert.ok(module.Config !== undefined, `${specifier} must export Config`);
   }
@@ -260,7 +313,11 @@ test('the bare package name resolves each documented export', async () => {
   assert.equal(typeof root.multiSessionFinishChecklistText, 'function');
   assert.equal(typeof root.detectParallelSessions, 'function');
   assert.equal(typeof root.parallelPeerCwds, 'function', 'the activity-aware peer selection is part of the public API');
-  assert.equal(typeof root.buildJjWorkspaceForgetRefusal, 'function', 'the workspace-forget refusal is part of the public API');
+  assert.equal(
+    typeof root.buildJjWorkspaceForgetRefusal,
+    'function',
+    'the workspace-forget refusal is part of the public API',
+  );
   assert.equal(root.ROOT_COMMIT_ID, '0'.repeat(40), 'the empty root commit id is exported for hand-off logic');
 });
 
@@ -301,7 +358,9 @@ test('the runtime entry forwards the commit policy into the registered prompt co
   }
 
   /** Apply the runtime entry over a fresh Cordis context with the two DSH services faked. */
-  const applyWith = (config: Parameters<typeof runtimeEntry.apply>[1]): { captured: CapturedPromptContext[]; text: string } => {
+  const applyWith = (
+    config: Parameters<typeof runtimeEntry.apply>[1],
+  ): { captured: CapturedPromptContext[]; text: string } => {
     const captured: CapturedPromptContext[] = [];
     const ctx = new Context();
     ctx.provide('systemPrompt');
@@ -453,7 +512,7 @@ function collectJavaScript(dir: string, found: string[] = []): string[] {
 }
 
 test('all hand-written source is TypeScript (only built lib/ may contain JavaScript)', () => {
-  const offenders = ['src', 'test', 'scripts'].flatMap((dir) => collectJavaScript(join(packageDir, dir)));
+  const offenders = ['src', 'test'].flatMap((dir) => collectJavaScript(join(packageDir, dir)));
   assert.deepEqual(offenders, [], `hand-written JavaScript must be migrated to TypeScript: ${offenders.join(', ')}`);
 });
 
@@ -473,23 +532,25 @@ function collectTypeScript(dir: string, found: string[] = []): string[] {
 test('hand-written TypeScript has no tabs, trailing whitespace, or CRLF line endings', (t) => {
   const problems: string[] = [];
   const longLines: string[] = [];
-  for (const dir of ['src', 'test', 'scripts']) {
-    for (const file of collectTypeScript(join(packageDir, dir))) {
-      const relativePath = relative(packageDir, file);
-      const text = readFileSync(file, 'utf8');
-      if (text.includes('\r')) problems.push(`${relativePath}: CRLF line ending`);
-      text.split('\n').forEach((line, index) => {
-        const location = `${relativePath}:${index + 1}`;
-        if (line.includes('\t')) problems.push(`${location}: tab character`);
-        if (/[ \t]+$/.test(line)) problems.push(`${location}: trailing whitespace`);
-        if (line.length > 120) longLines.push(location);
-      });
-    }
+  const files = ['src', 'test'].flatMap((dir) => collectTypeScript(join(packageDir, dir)));
+  files.push(join(packageDir, 'vite.config.ts'));
+  for (const file of files) {
+    const relativePath = relative(packageDir, file);
+    const text = readFileSync(file, 'utf8');
+    if (text.includes('\r')) problems.push(`${relativePath}: CRLF line ending`);
+    text.split('\n').forEach((line, index) => {
+      const location = `${relativePath}:${index + 1}`;
+      if (line.includes('\t')) problems.push(`${location}: tab character`);
+      if (/[ \t]+$/.test(line)) problems.push(`${location}: trailing whitespace`);
+      if (line.length > 120) longLines.push(location);
+    });
   }
   assert.deepEqual(problems, [], `style problems: ${problems.join(', ')}`);
   if (longLines.length > 0) {
-    // The repository already has many long lines; report them without failing the build.
-    t.diagnostic(`${longLines.length} lines exceed 120 columns (warning only, not failing): ${longLines.slice(0, 5).join(', ')}`);
+    // Oxfmt wraps at 120 columns, so this is now a regression warning, not a style gate.
+    t.diagnostic(
+      `${longLines.length} lines exceed 120 columns (warning only, not failing): ${longLines.slice(0, 5).join(', ')}`,
+    );
   }
 });
 

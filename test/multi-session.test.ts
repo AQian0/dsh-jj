@@ -157,8 +157,16 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   assert.match(text, /jj_handoff/, 'the model is told to use the one-shot hand-off tool');
   assert.match(text, /source mode/, 'the hand-off moves the whole stack with source mode internally');
   assert.match(text, /repository without remotes is fine/, 'a repo without remotes is handled inside the tool');
-  assert.match(text, /(picks|resolves) the integration target itself/, 'the model must not ask the user to pick the target');
-  assert.match(text, /earlier session's (committed )?(change|commit)/, 'an inherited stack base keeps the chain together instead of deflecting to the user');
+  assert.match(
+    text,
+    /(picks|resolves) the integration target itself/,
+    'the model must not ask the user to pick the target',
+  );
+  assert.match(
+    text,
+    /earlier session's (committed )?(change|commit)/,
+    'an inherited stack base keeps the chain together instead of deflecting to the user',
+  );
   assert.match(text, /resolve conflicts yourself/i, 'conflicts are resolved by the model, not handed back');
   assert.match(text, /jj_workspace_cleanup/, 'a session-created workspace is cleaned up by the plugin');
   assert.match(text, /the user runs `jj workspace forget <name>`/, 'raw workspace forget is left to the user');
@@ -173,12 +181,18 @@ test('sibling workspaces are described as isolated copies with a shared reposito
   assert.match(text, /another DSH session is using a sibling workspace of this Jujutsu repository/);
   assert.match(text, /working copies are isolated; bookmarks and the operation log are shared/i);
   assert.match(text, /jj undo/);
-  assert.ok(!text.includes('isolate this session in its own jj workspace'), 'no need to create a workspace when the peer is already isolated');
+  assert.ok(
+    !text.includes('isolate this session in its own jj workspace'),
+    'no need to create a workspace when the peer is already isolated',
+  );
   assert.match(text, /standard rebase hand-off/, 'the finish checklist still applies');
 });
 
 test('detection counts deduplicate peers without leaking a misleading session count', () => {
-  const text = multiSessionPromptText({ mode: 'auto', detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] } });
+  const text = multiSessionPromptText({
+    mode: 'auto',
+    detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] },
+  });
   assert.ok(!/\b\d+ other live/.test(text), 'several peers in one workspace are named once, without a count');
 });
 
@@ -195,7 +209,10 @@ test('a configured rebase target replaces the default in the checklist', () => {
     rebaseTarget: 'main',
   });
   assert.match(text, /default main/, 'the configured target replaces the default destination');
-  assert.ok(!text.includes(`default ${DEFAULT_REBASE_TARGET}`), 'the configured target replaces the default destination');
+  assert.ok(
+    !text.includes(`default ${DEFAULT_REBASE_TARGET}`),
+    'the configured target replaces the default destination',
+  );
   assert.match(text, /jj_handoff/, 'the configured target feeds the hand-off tool');
 });
 
@@ -215,7 +232,10 @@ test('the exported mode list is the accepted configuration vocabulary', () => {
 test('the injected guidance stays within the prompt token budget', () => {
   // Rough English prompt ratio: ~3.5 chars/token. The shared variant (the largest
   // block: isolation guidance + finish checklist) must stay within ~700 tokens.
-  const shared = multiSessionPromptText({ mode: 'auto', detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] } });
+  const shared = multiSessionPromptText({
+    mode: 'auto',
+    detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] },
+  });
   const checklist = multiSessionFinishChecklistText();
   assert.ok(shared.length <= 2450, `shared guidance is ${shared.length} chars; target is ~700 tokens`);
   assert.ok(checklist.length <= 1450, `finish checklist is ${checklist.length} chars; target is ~400 tokens`);

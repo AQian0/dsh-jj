@@ -176,9 +176,16 @@ test('JjService: dispose aborts in-flight jj work instead of waiting for the tim
     delay(1_500),
   ]);
   assert.notEqual(outcome, 'timeout', 'dispose must abort the in-flight detection');
-  assert.equal(await Promise.race([disposal.then(() => 'disposed'), delay(1_500)]), 'disposed', 'dispose settles promptly');
+  assert.equal(
+    await Promise.race([disposal.then(() => 'disposed'), delay(1_500)]),
+    'disposed',
+    'dispose settles promptly',
+  );
   assert.ok(Date.now() - started < 1_500, 'dispose does not wait for the configured timeout');
-  assert.ok(subprocess.specs.every((spec) => spec.signal?.aborted === true), 'every spawn received the lifetime abort');
+  assert.ok(
+    subprocess.specs.every((spec) => spec.signal?.aborted === true),
+    'every spawn received the lifetime abort',
+  );
   assert.equal(service.peek(temp.dir), undefined);
 });
 
@@ -194,7 +201,19 @@ test('headOperationId reads the operation log with --ignore-working-copy and cre
   const readOperationIds = async (): Promise<string[]> => {
     const result = await mustRun(
       fx.run,
-      ['jj', '--no-pager', '--color=never', 'op', 'log', '-n', '50', '--no-graph', '--ignore-working-copy', '-T', 'self.id() ++ "\\n"'],
+      [
+        'jj',
+        '--no-pager',
+        '--color=never',
+        'op',
+        'log',
+        '-n',
+        '50',
+        '--no-graph',
+        '--ignore-working-copy',
+        '-T',
+        'self.id() ++ "\\n"',
+      ],
       repo,
     );
     return result.stdout
@@ -231,15 +250,33 @@ test('undo: an unreadable head operation gives an actionable hint, never `jj op 
     runJj: async (options: RunJjOptions) => {
       calls.push([...options.argv]);
       if (calls.length === 1) {
-        return { exitCode: 1, signal: null, stdout: '', stderr: 'op log is unavailable', truncated: false, killedByTimeout: false };
+        return {
+          exitCode: 1,
+          signal: null,
+          stdout: '',
+          stderr: 'op log is unavailable',
+          truncated: false,
+          killedByTimeout: false,
+        };
       }
-      return { exitCode: 0, signal: null, stdout: 'Undo successful', stderr: '', truncated: false, killedByTimeout: false };
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: 'Undo successful',
+        stderr: '',
+        truncated: false,
+        killedByTimeout: false,
+      };
     },
   });
   const result = await operations.undo('/repo', undefined);
   assert.equal(result.mode, 'undo');
   assert.equal(calls.length, 2, 'one head read plus the undo itself');
-  assert.equal(calls[0]?.includes('--ignore-working-copy'), false, 'undo snapshots first so the rollback target is the exact undone operation');
+  assert.equal(
+    calls[0]?.includes('--ignore-working-copy'),
+    false,
+    'undo snapshots first so the rollback target is the exact undone operation',
+  );
   assert.equal(result.headOperationId, 'unknown');
   assert.doesNotMatch(result.message, /op restore unknown/);
   assert.match(result.message, /jj_op_log/);
@@ -299,13 +336,12 @@ test('JjService: concurrent detect/warm calls for one cwd share a single probe',
   const subprocess = immediateSubprocess('jj 0.46.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { timeoutMs: 5_000, graceMs: 50 });
-  const descriptors = await Promise.all([
-    service.detect(temp.dir),
-    service.detect(temp.dir),
-    service.detect(temp.dir),
-  ]);
+  const descriptors = await Promise.all([service.detect(temp.dir), service.detect(temp.dir), service.detect(temp.dir)]);
   assert.equal(subprocess.specs.length, singleProbeSpawns, 'three concurrent detect calls run one probe batch');
-  assert.ok(descriptors.every((descriptor) => descriptor === descriptors[0]), 'all callers share the descriptor');
+  assert.ok(
+    descriptors.every((descriptor) => descriptor === descriptors[0]),
+    'all callers share the descriptor',
+  );
 
   const afterDetect = subprocess.specs.length;
   await Promise.all([service.warm(temp.dir), service.warm(temp.dir)]);

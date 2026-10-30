@@ -15,7 +15,13 @@
 
 import { realpathSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
-import { assertServiceableConfig, Config, resolveConfig, type JjPluginConfig, type ResolvedJjConfig } from './config.ts';
+import {
+  assertServiceableConfig,
+  Config,
+  resolveConfig,
+  type JjPluginConfig,
+  type ResolvedJjConfig,
+} from './config.ts';
 import { JjError, runJjChecked, type RunJj } from './jj-command.ts';
 import {
   asRecord,
@@ -354,7 +360,7 @@ export class JjOperations {
     const warningLines = commitResult.stderr
       .split('\n')
       .map((line) => line.trim())
-      .filter((line) => /^Warning:/.test(line));
+      .filter((line) => line.startsWith('Warning:'));
     if (warningLines.length > 0) warnings.push(bound(warningLines.join('\n'), 2 * 1024).text);
     const records = await this.readChangesAt(cwd, '@ | @-', TPL_STATUS, signal);
     const workingCopy = records.find((change) => change.currentWorkingCopy);
@@ -385,7 +391,12 @@ export class JjOperations {
    * @param limit - maximum number of records to read.
    * @param signal - cancellation signal.
    */
-  async descriptionSamples(cwd: string, revset: string, limit: number, signal?: AbortSignal): Promise<readonly string[]> {
+  async descriptionSamples(
+    cwd: string,
+    revset: string,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<readonly string[]> {
     const argv = ['log', '-r', revset, '--no-graph', '--limit', String(limit), '-T', TPL_DESCRIPTION];
     const result = await this.run(cwd, argv, signal);
     const descriptions: string[] = [];
@@ -404,12 +415,16 @@ export class JjOperations {
         // and stop after a partial tail, but never hide unexpected invalid output.
         if (result.truncated && index === 0) continue;
         if (result.truncated && index === lines.length - 1) break;
-        throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`, {
-          argv,
-          exitCode: 0,
-          stderr: error instanceof Error ? error.message : '',
-          stdout: bound(result.stdout, 512).text,
-        });
+        throw new JjError(
+          'JJ_OUTPUT_INVALID',
+          `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`,
+          {
+            argv,
+            exitCode: 0,
+            stderr: error instanceof Error ? error.message : '',
+            stdout: bound(result.stdout, 512).text,
+          },
+        );
       }
     }
     return descriptions;
@@ -429,7 +444,9 @@ export class JjOperations {
     }
     if (message === undefined && !useDestinationMessage) {
       // Contract §5.9/§7.3.6: never let jj open an editor for a headless tool call.
-      throw badInput('jj_squash needs a message path: pass -m <message> or useDestinationMessage: true (jj would otherwise open an editor).');
+      throw badInput(
+        'jj_squash needs a message path: pass -m <message> or useDestinationMessage: true (jj would otherwise open an editor).',
+      );
     }
     const argv = ['squash', '--from', from, '--into', into];
     if (message !== undefined) argv.push('-m', message);
@@ -453,7 +470,9 @@ export class JjOperations {
       headOperationId === undefined
         ? 'dsh-jj could not read the head operation id; if you need to roll back this undo, inspect the operation log (jj_op_log) and pass the target operation id to jj_undo.'
         : `head operation before this call: ${headOperationId} — to roll back, run \`jj op restore ${headOperationId}\` (a second \`jj undo\` would undo this undo, not redo it).`;
-    const message = [bound(result.stdout.trim(), 2 * 1024).text, rollbackHint].filter((line) => line.length > 0).join('\n');
+    const message = [bound(result.stdout.trim(), 2 * 1024).text, rollbackHint]
+      .filter((line) => line.length > 0)
+      .join('\n');
     return {
       mode: operationId === undefined ? 'undo' : 'restore',
       operationId: operationId ?? headOperationId ?? 'unknown',
@@ -479,7 +498,16 @@ export class JjOperations {
    */
   private async readHeadOperationId(cwd: string, signal?: AbortSignal, snapshot = false): Promise<string | undefined> {
     try {
-      const argv = ['op', 'log', '-n', '1', '--no-graph', ...(snapshot ? [] : ['--ignore-working-copy']), '-T', 'self.id()'];
+      const argv = [
+        'op',
+        'log',
+        '-n',
+        '1',
+        '--no-graph',
+        ...(snapshot ? [] : ['--ignore-working-copy']),
+        '-T',
+        'self.id()',
+      ];
       const result = await this.runJj(this.options(cwd, argv, signal));
       const id = result.stdout.trim().split('\n')[0]?.trim();
       return id !== undefined && id.length > 0 ? id : undefined;
@@ -504,12 +532,16 @@ export class JjOperations {
       try {
         record = asRecord(JSON.parse(line));
       } catch {
-        throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`, {
-          argv,
-          exitCode: 0,
-          stderr: '',
-          stdout: bound(result.stdout, 512).text,
-        });
+        throw new JjError(
+          'JJ_OUTPUT_INVALID',
+          `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`,
+          {
+            argv,
+            exitCode: 0,
+            stderr: '',
+            stdout: bound(result.stdout, 512).text,
+          },
+        );
       }
       if (record === undefined) continue;
       const id = String(record['id'] ?? '');
@@ -520,7 +552,10 @@ export class JjOperations {
         description: String(record['description'] ?? ''),
         time: String(record['time'] ?? ''),
         user: `${String(record['username'] ?? '')}@${String(record['hostname'] ?? '')}`,
-        workspaceName: record['workspace_name'] === null || record['workspace_name'] === undefined ? null : String(record['workspace_name']),
+        workspaceName:
+          record['workspace_name'] === null || record['workspace_name'] === undefined
+            ? null
+            : String(record['workspace_name']),
         isSnapshot: record['is_snapshot'] === true,
         tags: Object.keys(attributes),
       });
@@ -625,12 +660,16 @@ export class JjOperations {
       try {
         record = asRecord(JSON.parse(line));
       } catch {
-        throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`, {
-          argv,
-          exitCode: 0,
-          stderr: '',
-          stdout: bound(result.stdout, 512).text,
-        });
+        throw new JjError(
+          'JJ_OUTPUT_INVALID',
+          `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`,
+          {
+            argv,
+            exitCode: 0,
+            stderr: '',
+            stdout: bound(result.stdout, 512).text,
+          },
+        );
       }
       if (record === undefined) continue;
       const target = Array.isArray(record['target']) ? record['target'] : [];
@@ -732,13 +771,17 @@ export class JjOperations {
         [result.stdout.trim(), result.stderr.trim()].filter((line) => line.length > 0).join('\n'),
         1024,
       ).text;
-      return { status: 'fetched', message: text.length > 0 ? text : 'jj git fetch completed with nothing new to fetch.' };
+      return {
+        status: 'fetched',
+        message: text.length > 0 ? text : 'jj git fetch completed with nothing new to fetch.',
+      };
     } catch (error) {
       // Stale working copies are retried by the hand-off wrapper after recovery;
       // abort/timeout still win because the caller asked to stop.
       if (isStaleWorkingCopyFailure(error)) throw error;
       if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
-      const detail = error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : String(error);
+      const detail =
+        error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : String(error);
       if (/No git remotes to fetch from|No matching remotes/i.test(detail)) {
         return {
           status: 'no-remote',
@@ -780,7 +823,11 @@ export class JjOperations {
     } else {
       candidates.push({ revset: options.configured, source: 'configured' });
     }
-    candidates.push({ revset: 'trunk()', source: 'trunk' }, { revset: 'main', source: 'main' }, { revset: 'master', source: 'master' });
+    candidates.push(
+      { revset: 'trunk()', source: 'trunk' },
+      { revset: 'main', source: 'main' },
+      { revset: 'master', source: 'master' },
+    );
 
     const seen = new Set<string>();
     const rootOnly: string[] = [];
@@ -789,7 +836,9 @@ export class JjOperations {
     // not pay for an extra `jj bookmark list` on the happy path.
     let bookmarkHintPromise: Promise<string> | undefined;
     const bookmarkHint = async (): Promise<string> => {
-      bookmarkHintPromise ??= this.localBookmarkNames(cwd, signal).then((names) => (names.length > 0 ? names.join(', ') : 'none'));
+      bookmarkHintPromise ??= this.localBookmarkNames(cwd, signal).then((names) =>
+        names.length > 0 ? names.join(', ') : 'none',
+      );
       return await bookmarkHintPromise;
     };
     for (const candidate of candidates) {
@@ -886,7 +935,7 @@ export class JjOperations {
         conflicts: [],
         needsCommit: true,
         message:
-          'The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository\'s style), then call jj_handoff again.',
+          "The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository's style), then call jj_handoff again.",
       };
     }
 
@@ -1069,17 +1118,16 @@ export class JjOperations {
 
   /** The stack's top content change (newest first, skipping the empty working-copy change). */
   private bookmarkTip(stack: readonly JjChangeRecord[]): JjChangeRecord | undefined {
-    return (
-      stack.find((change) => !change.empty && !change.currentWorkingCopy) ??
-      stack.find((change) => !change.empty)
-    );
+    return stack.find((change) => !change.empty && !change.currentWorkingCopy) ?? stack.find((change) => !change.empty);
   }
 
   /** Local (non-remote-tracking) bookmark names, used in actionable errors. */
   private async localBookmarkNames(cwd: string, signal?: AbortSignal): Promise<readonly string[]> {
     try {
       const bookmarks = await this.bookmarkList(cwd, false, signal);
-      return bookmarks.filter((bookmark) => bookmark.remote === null && bookmark.name.length > 0).map((bookmark) => bookmark.name);
+      return bookmarks
+        .filter((bookmark) => bookmark.remote === null && bookmark.name.length > 0)
+        .map((bookmark) => bookmark.name);
     } catch {
       return [];
     }

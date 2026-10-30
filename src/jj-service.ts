@@ -86,7 +86,9 @@ export class JjService extends Service {
       // Every operation runs through the lifetime signal so disposal cancels in-flight
       // jj calls instead of blocking `Promise.allSettled(pending)` until their timeout.
       runJj: (options) =>
-        this.track(createRunJj(ctx, resolved)({ ...options, signal: mergeAbortSignals(this.lifetime.signal, options.signal) })),
+        this.track(
+          createRunJj(ctx, resolved)({ ...options, signal: mergeAbortSignals(this.lifetime.signal, options.signal) }),
+        ),
     });
     ctx.effect(() => async () => {
       this.lifetime.abort(new Error('dsh-jj service disposed'));

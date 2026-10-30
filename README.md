@@ -24,7 +24,7 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 也可以在插件管理页面（Plugin Manager）中安装，spec 填 `@aqian0/dsh-jj`。
 
-**从本地目录安装**：首次先按 [AGENTS.md](./AGENTS.md)「环境与准备」准备构建依赖（`npm run setup`，或一次性 `npm install` 公开 peer 依赖与 `tsc`）；然后在仓库根目录执行 `npm run build`（`lib/` 是构建产物，不入库），再把本仓库的绝对路径作为 spec 安装。Web GUI 在「设置 → 插件管理」中操作，Agent 侧用 `plugin_manager` 的 `install_bundle`。
+**从本地目录安装**：需要 Node.js 24.11+ 与 pnpm 12.16.1。先在仓库根目录执行 `pnpm install`（首次需要网络）安装构建工具链，再执行 `pnpm run build` 生成 `lib/`（构建产物，不入库），然后把本仓库的绝对路径作为 spec 安装。Web GUI 在「设置 → 插件管理」中操作，Agent 侧用 `plugin_manager` 的 `install_bundle`。
 
 安装后会自动启用 `jj-runtime`、`jj-tools`、`jj-guard` 三个入口，并给 `agent-instructions` 加上 `.jj` 项目根标记（headless / CLI profile 生效；Web profile 见「已知限制」）；可以在插件管理页面或 `list_plugins` 中确认。
 
@@ -32,15 +32,15 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 安装后自动生效，不需要手工写 profile。典型的 agent 用法：
 
-| 你说 | 模型调用 |
-|---|---|
-| “看下当前 jj 状态” | `jj_status` |
-| “列出最近 10 个提交” | `jj_log` |
-| “把当前改动并进上一个提交” | `jj_squash` |
-| “改一下当前 change 的描述” | `jj_describe` |
-| “把这步提交了，继续下一项” | `jj_commit` |
-| “这个仓库的提交信息是什么风格？” | `jj_commit_style` |
-| “撤销刚才那次 jj 操作” | `jj_undo` |
+| 你说                              | 模型调用           |
+| --------------------------------- | ------------------ |
+| “看下当前 jj 状态”                | `jj_status`        |
+| “列出最近 10 个提交”              | `jj_log`           |
+| “把当前改动并进上一个提交”        | `jj_squash`        |
+| “改一下当前 change 的描述”        | `jj_describe`      |
+| “把这步提交了，继续下一项”        | `jj_commit`        |
+| “这个仓库的提交信息是什么风格？”  | `jj_commit_style`  |
+| “撤销刚才那次 jj 操作”            | `jj_undo`          |
 | “新建一个 workspace 放到 /tmp/wt” | `jj_workspace_add` |
 
 在 jj 仓库里直接让 agent 跑 `git commit` 之类的命令时，工具结果里会追加「优先用 jj」的提示；把 `guardMutatingGit` 设为 `deny` 后会直接拒绝并给出等价命令（节选）：
@@ -61,7 +61,7 @@ Use the jj equivalent instead:
 - id: jj-runtime
   name: '@aqian0/dsh-jj'
   config:
-    commitStyle: angular            # auto | conventional | angular | gitmoji | plain | custom
+    commitStyle: angular # auto | conventional | angular | gitmoji | plain | custom
     # commitStyle: custom
     # commitStyleCustom: '中文小写祈使句,不加前缀,必要时空行写原因'
 ```
@@ -95,22 +95,22 @@ Use the jj equivalent instead:
 
 ### 工具一览
 
-| 工具 | 作用 |
-|---|---|
-| `jj_status` | 查看当前 change 的状态 |
-| `jj_log` | 按 revset 查看提交历史 |
-| `jj_diff` | 查看指定 revset 的 diff |
-| `jj_new` | 新建 change 并设为 `@` |
-| `jj_commit` | 描述当前 change 并新建 change；传 `paths` 可只提交部分文件 |
-| `jj_describe` | 修改当前 change 的描述（相当于 `git commit --amend`） |
-| `jj_commit_style` | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项 |
-| `jj_squash` | 把改动合并进另一个提交 |
-| `jj_undo` / `jj_op_log` | 撤销操作 / 查看 operation 历史 |
-| `jj_workspace_add` / `jj_workspace_list` | 新建 / 列出 jj workspace |
-| `jj_bookmark_list` / `jj_bookmark_set` | 列出 / 设置 bookmark |
-| `jj_rebase` | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动 |
-| `jj_handoff` | 收尾集成：fetch、选择目标、整栈 rebase、工作副本过期恢复与冲突上报一次完成 |
-| `jj_workspace_cleanup` | 注销本会话创建的临时 workspace |
+| 工具                                     | 作用                                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| `jj_status`                              | 查看当前 change 的状态                                                     |
+| `jj_log`                                 | 按 revset 查看提交历史                                                     |
+| `jj_diff`                                | 查看指定 revset 的 diff                                                    |
+| `jj_new`                                 | 新建 change 并设为 `@`                                                     |
+| `jj_commit`                              | 描述当前 change 并新建 change；传 `paths` 可只提交部分文件                 |
+| `jj_describe`                            | 修改当前 change 的描述（相当于 `git commit --amend`）                      |
+| `jj_commit_style`                        | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项                     |
+| `jj_squash`                              | 把改动合并进另一个提交                                                     |
+| `jj_undo` / `jj_op_log`                  | 撤销操作 / 查看 operation 历史                                             |
+| `jj_workspace_add` / `jj_workspace_list` | 新建 / 列出 jj workspace                                                   |
+| `jj_bookmark_list` / `jj_bookmark_set`   | 列出 / 设置 bookmark                                                       |
+| `jj_rebase`                              | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动               |
+| `jj_handoff`                             | 收尾集成：fetch、选择目标、整栈 rebase、工作副本过期恢复与冲突上报一次完成 |
+| `jj_workspace_cleanup`                   | 注销本会话创建的临时 workspace                                             |
 
 非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj，不会回退到 git。
 
@@ -118,28 +118,28 @@ Use the jj equivalent instead:
 
 所有配置键均可选，写在 profile 中对应 bundle 行的 `config` 里：
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `jjCommand` / `gitCommand` | `jj` / `git` | 可执行文件名；`gitCommand` 只用于探测和提示 |
-| `timeoutMs` / `graceMs` | `30000` / `3000` | 子进程超时，以及超时后强制结束前的宽限时间 |
-| `maxOutputBytes` | `262144` | 单个输出流（stdout / stderr）的上限 |
-| `detectCacheTtlMs` | `10000` | 仓库检测结果的缓存时长 |
-| `guardMutatingGit` | `warn` | jj 仓库内会改写状态的 git 命令：`warn`（放行并提示）/ `deny`（拒绝）/ `off` |
-| `guardGitInJjNative` | `warn` | jj-native 仓库内只读 git 的处置：`warn`（提示）/ `deny`（拒绝）/ `off`（不提示） |
-| `guardJjRepositoryWide` | `warn` | `jj undo` / `jj op restore` 等仓库级 jj 操作的处置 |
-| `guardTools` | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名 |
-| `guardCreateWorktree` | `true` | 在**归属 jj** 的仓库里拒绝 `create_worktree`，引导用 `jj workspace add`（嵌套的独立 Git 仓库按最近仓库归属放行） |
-| `readOnlyGitNotice` | `true` | colocated 仓库内只读 git 命令是否附「优先用 jj」提示 |
-| `preferJjContext` | `true` | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引 |
-| `multiSessionGuidance` | `auto` | 多会话并行指引：`auto` / `always` / `off` |
-| `rebaseTarget` | `trunk()` | 收尾集成的首选目标 revset，不能为空；解析不到真实提交时回退到本地 `main` / `master` |
-| `commitGuidance` | `true` | 是否注入提交描述风格与拆分提交指引（需 `preferJjContext` 开启） |
-| `commitStyle` | `auto` | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom` |
-| `commitStyleCustom` | `''` | `commitStyle: custom` 时的风格规则（该模式下必填） |
-| `preferSplitCommits` | `true` | 是否注入「按独立步骤拆成小提交」的指引 |
-| `commitStyleSampleLimit` | `30` | `jj_commit_style` 最多沿用的非空描述条数 |
-| `defaultLogLimit` / `maxLogLimit` | `30` / `200` | `jj_log` 的默认与最大返回条数 |
-| `defaultCwd` | `''` | 工具没有 `workdir` 时的回退目录（空 = 进程 cwd） |
+| 键                                | 默认                              | 说明                                                                                                             |
+| --------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `jjCommand` / `gitCommand`        | `jj` / `git`                      | 可执行文件名；`gitCommand` 只用于探测和提示                                                                      |
+| `timeoutMs` / `graceMs`           | `30000` / `3000`                  | 子进程超时，以及超时后强制结束前的宽限时间                                                                       |
+| `maxOutputBytes`                  | `262144`                          | 单个输出流（stdout / stderr）的上限                                                                              |
+| `detectCacheTtlMs`                | `10000`                           | 仓库检测结果的缓存时长                                                                                           |
+| `guardMutatingGit`                | `warn`                            | jj 仓库内会改写状态的 git 命令：`warn`（放行并提示）/ `deny`（拒绝）/ `off`                                      |
+| `guardGitInJjNative`              | `warn`                            | jj-native 仓库内只读 git 的处置：`warn`（提示）/ `deny`（拒绝）/ `off`（不提示）                                 |
+| `guardJjRepositoryWide`           | `warn`                            | `jj undo` / `jj op restore` 等仓库级 jj 操作的处置                                                               |
+| `guardTools`                      | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名                                                                                  |
+| `guardCreateWorktree`             | `true`                            | 在**归属 jj** 的仓库里拒绝 `create_worktree`，引导用 `jj workspace add`（嵌套的独立 Git 仓库按最近仓库归属放行） |
+| `readOnlyGitNotice`               | `true`                            | colocated 仓库内只读 git 命令是否附「优先用 jj」提示                                                             |
+| `preferJjContext`                 | `true`                            | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引                                  |
+| `multiSessionGuidance`            | `auto`                            | 多会话并行指引：`auto` / `always` / `off`                                                                        |
+| `rebaseTarget`                    | `trunk()`                         | 收尾集成的首选目标 revset，不能为空；解析不到真实提交时回退到本地 `main` / `master`                              |
+| `commitGuidance`                  | `true`                            | 是否注入提交描述风格与拆分提交指引（需 `preferJjContext` 开启）                                                  |
+| `commitStyle`                     | `auto`                            | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom`                        |
+| `commitStyleCustom`               | `''`                              | `commitStyle: custom` 时的风格规则（该模式下必填）                                                               |
+| `preferSplitCommits`              | `true`                            | 是否注入「按独立步骤拆成小提交」的指引                                                                           |
+| `commitStyleSampleLimit`          | `30`                              | `jj_commit_style` 最多沿用的非空描述条数                                                                         |
+| `defaultLogLimit` / `maxLogLimit` | `30` / `200`                      | `jj_log` 的默认与最大返回条数                                                                                    |
+| `defaultCwd`                      | `''`                              | 工具没有 `workdir` 时的回退目录（空 = 进程 cwd）                                                                 |
 
 > `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `commitStyleSampleLimit` /
 > `multiSessionGuidance` / `rebaseTarget` / `preferJjContext` / `jjCommand` / `gitCommand` / `timeoutMs` / `graceMs` /
@@ -163,6 +163,23 @@ Use the jj equivalent instead:
 - **`.jj` 项目根标记仅部分 profile 生效**：Web profile 在 bundle 层禁用了该行，headless / CLI profile 才会把 `.jj` 当作项目根。
 - **jj-native 下项目级 skill 定位可能不准**：项目级 skill 根按最近的 `.git` 祖先查找（上游硬编码）；jj-native 仓库没有 `.git` 时会退回当前会话目录，通常只有会话正好位于仓库根时才符合预期。
 - **不自动推送**：`jj_handoff` 只保证本地集成到目标，推送仍需你执行 `jj git push --bookmark <name>`。
+
+## 开发
+
+本仓库用 pnpm 管理开发依赖（`packageManager` 固定 `pnpm@12.16.1`），格式与 lint 由 Vite+ 的 Oxfmt / Oxlint 负责；`npm` 只用于发布（`npm publish` / `npm view`）。常用命令：
+
+```bash
+pnpm install           # 安装工具链与公开 peer 依赖（首次需要网络，之后离线）
+pnpm test              # 提交前门禁：vp check --deny-warnings → tsc 类型检查 → node --test
+pnpm run build         # tsc 构建 lib/（本地目录安装 / 发布前）
+pnpm run typecheck     # src/、test/ 与 vite.config.ts 的类型检查
+pnpm run check         # 只跑 Oxfmt + Oxlint（--deny-warnings）
+pnpm run lint          # 只跑 Oxlint
+pnpm run format        # 用 Oxfmt 格式化代码
+pnpm run format:check  # 只检查格式，不写文件
+```
+
+测试仍是 `node --test`、构建仍是 `tsc`（不使用 `vp test` / `vp build`）。环境、架构、代码约定与提交流程见 [AGENTS.md](./AGENTS.md)。
 
 ## License
 

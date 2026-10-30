@@ -199,8 +199,10 @@ export async function initJjSha256(run: RunCommand, dir: string): Promise<string
 export async function assertToolchain(run: RunCommand, cwd: string): Promise<void> {
   const jj = await run(['jj', '--version'], { cwd, timeoutMs: 10_000 });
   const git = await run(['git', '--version'], { cwd, timeoutMs: 10_000 });
-  if (jj.exitCode !== 0) throw new Error(`this suite requires a real jj binary on PATH: ${jj.stderr || jj.errorCode || jj.exitCode}`);
-  if (git.exitCode !== 0) throw new Error(`this suite requires a real git binary on PATH: ${git.stderr || git.errorCode || git.exitCode}`);
+  if (jj.exitCode !== 0)
+    throw new Error(`this suite requires a real jj binary on PATH: ${jj.stderr || jj.errorCode || jj.exitCode}`);
+  if (git.exitCode !== 0)
+    throw new Error(`this suite requires a real git binary on PATH: ${git.stderr || git.errorCode || git.exitCode}`);
 }
 
 /** realpath helper so assertions survive symlinked temp roots. */
@@ -244,10 +246,7 @@ export function createGuardContext(): GuardHarness {
   };
   // `on` is installed on the live object but kept out of the surface type (see
   // HarnessContext): the guard reads it through its own widened `on` member.
-  (ctx as HarnessContext & { on: (event: string, listener: HarnessListener) => () => void }).on = (
-    event,
-    listener,
-  ) => {
+  (ctx as HarnessContext & { on: (event: string, listener: HarnessListener) => () => void }).on = (event, listener) => {
     const list = listeners.get(event) ?? [];
     list.push(listener);
     listeners.set(event, list);

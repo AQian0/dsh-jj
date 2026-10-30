@@ -14,7 +14,17 @@ import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj } from '../src/jj-command.ts';
 import { JjOperations, TPL_CHANGE, TPL_STATUS } from '../src/service.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
-import { assertToolchain, initGit, initJjColocated, initJjNative, initJjSha256, makeFixture, mustRun, realpath, type Fixture } from './helpers/fixtures.ts';
+import {
+  assertToolchain,
+  initGit,
+  initJjColocated,
+  initJjNative,
+  initJjSha256,
+  makeFixture,
+  mustRun,
+  realpath,
+  type Fixture,
+} from './helpers/fixtures.ts';
 import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools';
 
 /** Canonical JSON value a tool output renderer accepts. */
@@ -40,7 +50,11 @@ function fakeExec(agent?: unknown): ExecContext {
 }
 
 /** A tool service backed by real operations plus real detection. */
-function toolService(fx: Fixture, operations: JjOperations, _extraEnv: Readonly<Record<string, string>> = {}): JjToolService {
+function toolService(
+  fx: Fixture,
+  operations: JjOperations,
+  _extraEnv: Readonly<Record<string, string>> = {},
+): JjToolService {
   return {
     operations,
     detect: (cwd, signal) => detectVcs(cwd, fx.run, signal),
@@ -51,7 +65,10 @@ function toolContext(
   fx: Fixture,
   service: JjToolService,
   config = resolveConfig({}),
-  workingDirectory?: { ensure(agent: unknown, signal?: AbortSignal): Promise<string>; set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string> },
+  workingDirectory?: {
+    ensure(agent: unknown, signal?: AbortSignal): Promise<string>;
+    set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string>;
+  },
 ) {
   return {
     service,
@@ -147,7 +164,10 @@ test('operation layer: status, new, describe, log, diff, op log, bookmarks, work
   for (const argv of calls) {
     assert.equal(argv[0], 'jj', `unexpected non-jj program: ${argv.join(' ')}`);
   }
-  assert.ok(calls.every((argv) => argv.includes('--no-pager') && argv.includes('--color=never')), 'non-interactive flags are always present');
+  assert.ok(
+    calls.every((argv) => argv.includes('--no-pager') && argv.includes('--color=never')),
+    'non-interactive flags are always present',
+  );
 });
 
 test('jj_rebase mode: source moves a whole stack onto the advanced trunk', async (t) => {
@@ -203,9 +223,18 @@ test('operation layer: bad input is rejected before spawning anything', async (t
 
   await assert.rejects(() => operations.undo(repo, 'NOT-HEX', undefined), /hexadecimal operation id/);
   await assert.rejects(() => operations.squash(repo, '@', '@-', 'msg', true, undefined), /mutually exclusive/);
-  await assert.rejects(() => operations.bookmarkSet(repo, 'bad name', '@', false, undefined), /must not contain whitespace/);
-  await assert.rejects(() => operations.bookmarkSet(repo, 'bad@name', '@', false, undefined), /must not contain whitespace or '@'/);
-  await assert.rejects(() => operations.workspaceAdd(repo, '--evil', undefined, [], undefined, undefined, undefined), /does not start with/);
+  await assert.rejects(
+    () => operations.bookmarkSet(repo, 'bad name', '@', false, undefined),
+    /must not contain whitespace/,
+  );
+  await assert.rejects(
+    () => operations.bookmarkSet(repo, 'bad@name', '@', false, undefined),
+    /must not contain whitespace or '@'/,
+  );
+  await assert.rejects(
+    () => operations.workspaceAdd(repo, '--evil', undefined, [], undefined, undefined, undefined),
+    /does not start with/,
+  );
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
@@ -246,7 +275,11 @@ test('all 17 jj_* tools are defined with contract names, descriptions, and schem
     assert.equal(definition.output.schema.type, 'object');
     assert.equal(definition.output.schema.additionalProperties, false);
   }
-  assert.equal(byName.get('jj_workspace_add')?.description.includes('outside the repository root'), true, 'placement advice is in the description');
+  assert.equal(
+    byName.get('jj_workspace_add')?.description.includes('outside the repository root'),
+    true,
+    'placement advice is in the description',
+  );
 });
 
 test('tool schemas validate their own arguments and outputs (real DSH validators)', async (t) => {
@@ -284,7 +317,11 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
     assert.deepEqual(violations, [], `${definition.name} rejects its own example args`);
     const value = await definition.execute(args, fakeExec());
     const outputViolations = validateJsonSchemaValue(definition.output.schema, value);
-    assert.deepEqual(outputViolations, [], `${definition.name} output must satisfy its own schema: ${JSON.stringify(value)}`);
+    assert.deepEqual(
+      outputViolations,
+      [],
+      `${definition.name} output must satisfy its own schema: ${JSON.stringify(value)}`,
+    );
     const rendered = definition.output.render(args, value as JsonValueLike);
     assert.equal(rendered[0]?.type, 'text');
     assert.ok(rendered[0].text.length > 0);
@@ -292,7 +329,10 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
 
   // invalid args are reported by the same validator path
   const logDefinition = definitionsByName(definitions).get('jj_log')!;
-  assert.ok(validateJsonSchemaValue(logDefinition.parameters as JsonSchemaNode, { revset: 42 }).length > 0, 'type violations are surfaced');
+  assert.ok(
+    validateJsonSchemaValue(logDefinition.parameters as JsonSchemaNode, { revset: 42 }).length > 0,
+    'type violations are surfaced',
+  );
 });
 
 test('T20: every tool path runs jj only, never git', async (t) => {
@@ -304,7 +344,15 @@ test('T20: every tool path runs jj only, never git', async (t) => {
   const operations = new JjOperations({ runJj, config: {} });
   const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
 
-  for (const name of ['jj_status', 'jj_log', 'jj_diff', 'jj_op_log', 'jj_workspace_list', 'jj_bookmark_list', 'jj_commit_style']) {
+  for (const name of [
+    'jj_status',
+    'jj_log',
+    'jj_diff',
+    'jj_op_log',
+    'jj_workspace_list',
+    'jj_bookmark_list',
+    'jj_commit_style',
+  ]) {
     const definition = definitions.get(name)!;
     await definition.execute(name === 'jj_log' ? { revset: '@', limit: 2 } : {}, fakeExec());
   }
@@ -316,9 +364,13 @@ test('T20: every tool path runs jj only, never git', async (t) => {
   assert.ok(calls.length >= 8, `expected many jj calls, saw ${calls.length}`);
   for (const argv of calls) {
     assert.equal(argv[0], 'jj', `tool path must not spawn ${argv[0]}: ${argv.join(' ')}`);
-    assert.ok(!argv.includes('git') || argv[1] === 'git' === false, `no git subcommand fallback: ${argv.join(' ')}`);
+    assert.ok(!argv.includes('git') || argv[1] !== 'git', `no git subcommand fallback: ${argv.join(' ')}`);
   }
-  assert.equal(calls.some((argv) => argv[0] === 'git'), false, 'no git process was ever spawned');
+  assert.equal(
+    calls.some((argv) => argv[0] === 'git'),
+    false,
+    'no git process was ever spawned',
+  );
 });
 
 test('refusal paths: git-only, no repository, and broken jj metadata are all diagnosable', async (t) => {
@@ -351,7 +403,10 @@ test('refusal paths: git-only, no repository, and broken jj metadata are all dia
   const definitions = definitionsByName(
     jjToolDefinitions({ ...toolContext(fx, toolService(fx, operations)), cwdFor: async () => gitRepo }),
   );
-  await assert.rejects(() => definitions.get('jj_status')!.execute({}, fakeExec()), /No Jujutsu \(jj\) workspace was found/);
+  await assert.rejects(
+    () => definitions.get('jj_status')!.execute({}, fakeExec()),
+    /No Jujutsu \(jj\) workspace was found/,
+  );
   assert.equal(calls.length, 0, 'refusal happens before any jj process starts');
 
   // In the jj-native workspace the same tool succeeds.
@@ -419,7 +474,11 @@ test('operation layer: jj commit describes the change, splits paths, and starts 
   assert.equal(missed.committed.empty, true, 'jj created an empty change for the non-matching path');
   assert.ok(missed.warnings.length > 0, 'the jj warning is surfaced');
   assert.match(missed.warnings.join('\n'), /do not match|No changes matched/);
-  assert.deepEqual([...missed.workingCopy.paths].sort(), ['leftover.txt', 'two.txt'], 'the real changes stay in the working copy');
+  assert.deepEqual(
+    [...missed.workingCopy.paths].sort(),
+    ['leftover.txt', 'two.txt'],
+    'the real changes stay in the working copy',
+  );
 
   // Full commit: the working copy becomes a fresh empty change.
   const full = await operations.commit(repo, 'chore: finish the change', []);
@@ -452,7 +511,9 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
   const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
   await fx.run(['bash', '-c', 'printf one > one.txt; printf two > two.txt'], { cwd: repo, timeoutMs: 5_000 });
 
-  const result = (await definitions.get('jj_commit')!.execute({ message: 'feat: tool commit', paths: ['one.txt'] }, fakeExec())) as {
+  const result = (await definitions
+    .get('jj_commit')!
+    .execute({ message: 'feat: tool commit', paths: ['one.txt'] }, fakeExec())) as {
     readonly committed: { readonly description: string; readonly empty: boolean; readonly currentWorkingCopy: boolean };
     readonly workingCopy: { readonly empty: boolean; readonly currentWorkingCopy: boolean };
     readonly committedPaths: readonly string[];
@@ -470,7 +531,9 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
   assert.deepEqual([...status.changedPaths], ['two.txt']);
 
   // Non-matching paths: the tool must expose the warning, not report a clean split.
-  const missed = (await definitions.get('jj_commit')!.execute({ message: 'feat: tool miss', paths: ['missing.txt'] }, fakeExec())) as {
+  const missed = (await definitions
+    .get('jj_commit')!
+    .execute({ message: 'feat: tool miss', paths: ['missing.txt'] }, fakeExec())) as {
     readonly committed: { readonly empty: boolean };
     readonly workingCopyPaths: readonly string[];
     readonly warnings: readonly string[];
@@ -509,7 +572,9 @@ test('jj_commit_style inherits Conventional history, asks when undecidable, and 
     // Commit policy is owned by the runtime entry (`ctx.jj`), i.e. `operations.config`;
     // the second config passed to toolContext is the tools row and must not fork it.
     const runtimeOperations = new JjOperations({ runJj, config: policy });
-    return definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, runtimeOperations)))).get('jj_commit_style')!;
+    return definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, runtimeOperations)))).get(
+      'jj_commit_style',
+    )!;
   };
 
   interface StyleResult {
@@ -547,7 +612,10 @@ test('jj_commit_style inherits Conventional history, asks when undecidable, and 
 
   // P3: the limit counts non-empty descriptions, not log entries (the empty @ and
   // the empty root commit must not consume the budget).
-  const limited = (await styleTool(resolveConfig({ commitStyleSampleLimit: 3 })).execute({}, fakeExec())) as StyleResult;
+  const limited = (await styleTool(resolveConfig({ commitStyleSampleLimit: 3 })).execute(
+    {},
+    fakeExec(),
+  )) as StyleResult;
   assert.equal(limited.style, 'conventional');
   assert.equal(limited.sampleCount, 3, 'three decent commits are enough even with the empty @ and root');
   assert.equal(limited.needsUserChoice, false);
@@ -555,12 +623,21 @@ test('jj_commit_style inherits Conventional history, asks when undecidable, and 
   // Body/footer habits are observable: examples carry full descriptions, not just subjects.
   await mustRun(
     fx.run,
-    ['jj', '--no-pager', '--color=never', 'commit', '-m', 'feat(api): add endpoint\n\nExplain the why in the body.\n\nRefs: #42'],
+    [
+      'jj',
+      '--no-pager',
+      '--color=never',
+      'commit',
+      '-m',
+      'feat(api): add endpoint\n\nExplain the why in the body.\n\nRefs: #42',
+    ],
     repo,
   );
   const withBody = (await styleTool().execute({}, fakeExec())) as StyleResult;
   assert.ok(
-    withBody.examples.some((example) => example.includes('Explain the why in the body.') && example.includes('Refs: #42')),
+    withBody.examples.some(
+      (example) => example.includes('Explain the why in the body.') && example.includes('Refs: #42'),
+    ),
     `full descriptions reach the model: ${JSON.stringify(withBody.examples)}`,
   );
 
@@ -569,7 +646,11 @@ test('jj_commit_style inherits Conventional history, asks when undecidable, and 
     jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({ commitStyle: 'angular' }))),
   ).get('jj_commit_style')!;
   const runtimeOwnsPolicy = (await toolsRowOnly.execute({}, fakeExec())) as StyleResult;
-  assert.equal(runtimeOwnsPolicy.style, 'conventional', 'runtime-row auto still detects history; tools-row config is ignored');
+  assert.equal(
+    runtimeOwnsPolicy.style,
+    'conventional',
+    'runtime-row auto still detects history; tools-row config is ignored',
+  );
   assert.equal(runtimeOwnsPolicy.source, 'history');
 
   // The sampling bound comes from the tools row (`config.maxLogLimit`), and a
@@ -589,7 +670,10 @@ test('jj_commit_style inherits Conventional history, asks when undecidable, and 
 
   // A configured custom style supplies the rules verbatim.
   const rules = 'lowercase Chinese subject, no prefix, body optional';
-  const custom = (await styleTool(resolveConfig({ commitStyle: 'custom', commitStyleCustom: rules })).execute({}, fakeExec())) as StyleResult;
+  const custom = (await styleTool(resolveConfig({ commitStyle: 'custom', commitStyleCustom: rules })).execute(
+    {},
+    fakeExec(),
+  )) as StyleResult;
   assert.equal(custom.style, 'custom');
   assert.equal(custom.source, 'config');
   assert.ok(custom.guidance.includes(rules));
@@ -630,7 +714,14 @@ test('descriptionSamples tolerates a partial JSON record on either side of a tru
 
   // Without truncation an unparseable stream stays a hard error (no silent loss).
   const invalid = new JjOperations({
-    runJj: async () => ({ exitCode: 0, signal: null, stdout: 'not json\n', stderr: '', truncated: false, killedByTimeout: false }),
+    runJj: async () => ({
+      exitCode: 0,
+      signal: null,
+      stdout: 'not json\n',
+      stderr: '',
+      truncated: false,
+      killedByTimeout: false,
+    }),
   });
   await assert.rejects(() => invalid.descriptionSamples('/anywhere', '::@', 5), /unparseable output/);
 });
@@ -638,7 +729,11 @@ test('descriptionSamples tolerates a partial JSON record on either side of a tru
 test('TPL_STATUS is the contract template and parses into a change', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-template');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
-  const result = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'log', '-r', '@', '--no-graph', '-T', TPL_STATUS], repo);
+  const result = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'log', '-r', '@', '--no-graph', '-T', TPL_STATUS],
+    repo,
+  );
   assert.match(result.stdout, /"change_id":/);
   assert.match(result.stdout, /"paths":/);
   assert.match(result.stdout, /\n$/, 'the template ends every record with a newline');
@@ -650,7 +745,11 @@ test('TPL_CHANGE is the lightweight change template without diff paths', async (
   // A dirty working copy must not leak paths into the lightweight template: the
   // whole point is to skip `self.diff()` on generic change reads.
   await fx.run(['bash', '-c', 'printf dirty > dirty.txt'], { cwd: repo, timeoutMs: 5_000 });
-  const result = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'log', '-r', '@', '--no-graph', '-T', TPL_CHANGE], repo);
+  const result = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'log', '-r', '@', '--no-graph', '-T', TPL_CHANGE],
+    repo,
+  );
   assert.match(result.stdout, /"change_id":/);
   assert.match(result.stdout, /"current_working_copy":/);
   assert.doesNotMatch(result.stdout, /"paths":/);
@@ -728,7 +827,10 @@ test('operation layer: jj_handoff resolves a local-only target, rebases the stac
     ['feat: two', 'feat: one', 'chore: advance'],
     'the whole stack moved onto the advanced main',
   );
-  assert.ok(calls.some((argv) => argv.includes('rebase') && argv.includes('-s')), 'a stack is moved with source mode');
+  assert.ok(
+    calls.some((argv) => argv.includes('rebase') && argv.includes('-s')),
+    'a stack is moved with source mode',
+  );
   for (const argv of calls) assert.equal(argv[0], 'jj', `the hand-off never spawns ${argv[0]}`);
 });
 
@@ -745,7 +847,10 @@ test('operation layer: jj_handoff reports an already-integrated stack without re
   assert.equal(result.conflicts.length, 0);
   assert.ok(result.firstChangeId.length > 0);
   assert.match(result.message, /already/);
-  assert.ok(!calls.some((argv) => argv.includes('rebase')), 'no rebase is spawned when the stack already sits on the target');
+  assert.ok(
+    !calls.some((argv) => argv.includes('rebase')),
+    'no rebase is spawned when the stack already sits on the target',
+  );
   assert.ok(calls.length <= 7, `the clean integrated hand-off budget is 7 spawns, saw ${calls.length}`);
   assert.ok(
     !calls.some((argv) => argv.includes('bookmark') && argv.includes('list')),
@@ -763,7 +868,10 @@ test('operation layer: jj_handoff asks for a commit instead of folding uncommitt
   assert.match(result.message, /Commit them first with jj_commit/);
   assert.equal(result.stack.length, 1, 'the working-copy change is reported back to the model');
   assert.ok(calls.length <= 1, `a dirty working copy only pays for the @ read, saw ${calls.length} spawns`);
-  assert.ok(!calls.some((argv) => argv.includes('fetch')), 'no git fetch is attempted when the working copy needs a commit');
+  assert.ok(
+    !calls.some((argv) => argv.includes('fetch')),
+    'no git fetch is attempted when the working copy needs a commit',
+  );
   assert.equal(result.fetch.status, 'skipped', 'the skipped fetch is reported to the model');
 });
 
@@ -771,7 +879,9 @@ test('operation layer: jj_handoff surfaces conflicts as data instead of stopping
   const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-conflict');
   await writeFixtureFile(fx, ws, 'f.txt', 'session edit');
   await commitWorkingCopy(fx, ws, 'feat: session edit');
-  const sessionChange = (await operations.log(ws, 'main..@', 5)).find((change) => change.description === 'feat: session edit');
+  const sessionChange = (await operations.log(ws, 'main..@', 5)).find(
+    (change) => change.description === 'feat: session edit',
+  );
   assert.ok(sessionChange !== undefined);
 
   await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: main edit'], repo);
@@ -835,7 +945,11 @@ test('root commit detection works in a SHA-256 repository (64-zero root id)', as
   await assertToolchain(fx.run, fx.root);
   const repo = await initJjSha256(fx.run, fx.path('repo'));
   if (repo === undefined) return t.skip('the local git/jj toolchain cannot create a SHA-256 repository');
-  const rootCommit = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'log', '-r', 'root()', '--no-graph', '-T', 'commit_id'], repo);
+  const rootCommit = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'log', '-r', 'root()', '--no-graph', '-T', 'commit_id'],
+    repo,
+  );
   if (rootCommit.stdout.trim().length !== 64) return t.skip('the fixture was not created with SHA-256 object ids');
 
   const { runJj } = recordingRunner(fx);
@@ -898,7 +1012,11 @@ test('jj_handoff tool: runs the whole hand-off and reports model next steps', as
   assert.equal(value['destinationSource'], 'main');
   assert.equal(value['rebased'], true);
   assert.match(String(value['nextSteps']), /Report the rebased change ids/);
-  assert.match(String(value['nextSteps']), /user action/, 'cleanup of a workspace not created through jj_workspace_add stays with the user');
+  assert.match(
+    String(value['nextSteps']),
+    /user action/,
+    'cleanup of a workspace not created through jj_workspace_add stays with the user',
+  );
 
   // The root workspace requires the explicit stack bottom: never rebase foreign history.
   fx.cwd = repo;
@@ -915,7 +1033,9 @@ test('jj_handoff tool: runs the whole hand-off and reports model next steps', as
   // The protection is layout-based: renaming the root workspace cannot bypass it.
   await mustRun(fx.run, ['jj', 'workspace', 'rename', 'root-renamed'], repo);
   assert.equal((await operations.status(repo)).change.currentWorkingCopy, true);
-  const renamedDefinitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get('jj_handoff')!;
+  const renamedDefinitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get(
+    'jj_handoff',
+  )!;
   fx.cwd = repo;
   await assert.rejects(() => renamedDefinitions.execute({}, fakeExec()), /needs `firstChange`/);
 });
@@ -932,7 +1052,7 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   const operations = new JjOperations({ runJj, config: {} });
   const moved: string[] = [];
   const workingDirectory = {
-    ensure: async () => (fx.cwd as string),
+    ensure: async () => fx.cwd as string,
     set: async (_agent: unknown, path: string) => {
       moved.push(path);
       return path;
@@ -948,7 +1068,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
 
   // A workspace this session created is moved out of and unregistered.
   const wsPath = join(fx.root, 'ws-clean');
-  const created = (await definitions.get('jj_workspace_add')!.execute({ path: wsPath, name: 'clean-me' }, fakeExec(agent))) as {
+  const created = (await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: wsPath, name: 'clean-me' }, fakeExec(agent))) as {
     readonly name: string;
   };
   assert.equal(created.name, 'clean-me');
@@ -1021,7 +1143,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   const plainDefinitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
   fx.cwd = repo;
   const unsettablePath = join(fx.root, 'ws-unsettable');
-  await plainDefinitions.get('jj_workspace_add')!.execute({ path: unsettablePath, name: 'unsettable' }, fakeExec(agent));
+  await plainDefinitions
+    .get('jj_workspace_add')!
+    .execute({ path: unsettablePath, name: 'unsettable' }, fakeExec(agent));
   fx.cwd = unsettablePath;
   await assert.rejects(
     () => plainDefinitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent)),
@@ -1083,7 +1207,11 @@ test('operation layer: jj_handoff falls back to master and ignores an unresolvab
 test('operation layer: jj_handoff recovers a stale working copy instead of handing recovery to the user', async (t) => {
   const { fx, repo, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-stale');
   // Operation that created this workspace's initial working copy (the last one now).
-  const opLog = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'op', 'log', '--no-graph', '-n', '1', '-T', 'id.short()'], ws);
+  const opLog = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'op', 'log', '--no-graph', '-n', '1', '-T', 'id.short()'],
+    ws,
+  );
   const op = opLog.stdout.trim();
   await writeFixtureFile(fx, ws, 'one.txt', 'one');
   await commitWorkingCopy(fx, ws, 'feat: one');

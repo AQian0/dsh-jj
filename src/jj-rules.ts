@@ -159,9 +159,28 @@ export const JJ_READ_ONLY_SUBCOMMANDS: readonly string[] = Object.freeze([
 ]);
 
 /** Subcommands whose second word belongs to the subcommand (`jj op restore`). */
-const JJ_TWO_WORD = new Set(['op', 'workspace add', 'workspace forget', 'file', 'bookmark', 'tag', 'git', 'util', 'sparse', 'debug']);
+const JJ_TWO_WORD = new Set([
+  'op',
+  'workspace add',
+  'workspace forget',
+  'file',
+  'bookmark',
+  'tag',
+  'git',
+  'util',
+  'sparse',
+  'debug',
+]);
 
-const JJ_VALUE_FLAGS = new Set(['-R', '--repository', '--at-op', '--at-operation', '--config', '--config-file', '--color']);
+const JJ_VALUE_FLAGS = new Set([
+  '-R',
+  '--repository',
+  '--at-op',
+  '--at-operation',
+  '--config',
+  '--config-file',
+  '--color',
+]);
 
 /**
  * jj subcommand options that take a value. Their values must never be counted
@@ -234,9 +253,7 @@ function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
     if (token.startsWith('-') && token !== '-') {
       const eq = token.indexOf('=');
       const flag = eq >= 0 ? token.slice(0, eq) : token;
-      const attachedShort = eq < 0 && token.length > 2 && !token.startsWith('--')
-        ? token.slice(0, 2)
-        : undefined;
+      const attachedShort = eq < 0 && token.length > 2 && !token.startsWith('--') ? token.slice(0, 2) : undefined;
       if (attachedShort !== undefined && JJ_SUBCOMMAND_VALUE_FLAGS.has(attachedShort)) {
         flags.push(attachedShort);
         if (JJ_REVISION_FLAGS.has(attachedShort)) revisionTargets.push(token.slice(2));
@@ -293,7 +310,12 @@ function jjSubcommandOf(words: readonly string[]): { subcommand: string; rest: s
   return { subcommand: first, rest: words.slice(1) };
 }
 
-function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, warnings: string[]): JjInvocation | undefined {
+function classifyJjWords(
+  words: readonly Token[],
+  raw: string,
+  parsed: boolean,
+  warnings: string[],
+): JjInvocation | undefined {
   if (!parsed || words.length === 0) return undefined;
   const index = skipPrelude(words, warnings);
   const program = words[index]?.value ?? '';
@@ -335,7 +357,8 @@ function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, 
   let tail = words.slice(cursor).map((token) => token.value);
   // Tolerate a repeated program token (`jj --at-op=<id> jj log`, as printed in some
   // jj hints) by dropping it before resolving the subcommand.
-  if (tail.length > 1 && (baseName(tail[0] ?? '') === 'jj' || baseName(tail[0] ?? '') === 'jj.exe')) tail = tail.slice(1);
+  if (tail.length > 1 && (baseName(tail[0] ?? '') === 'jj' || baseName(tail[0] ?? '') === 'jj.exe'))
+    tail = tail.slice(1);
   const parsedSub = jjSubcommandOf(tail);
   if (parsedSub === undefined) {
     return {
@@ -377,19 +400,22 @@ function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, 
     reason = '`jj abandon` (default `@`) discards the working-copy commit and its uncommitted files from disk';
   } else if (subcommand === 'undo' && allowCrossWorkspace) {
     scope = 'destructive';
-    reason = '`jj undo --allow-cross-workspace` disables jj\'s only built-in cross-workspace protection';
+    reason = "`jj undo --allow-cross-workspace` disables jj's only built-in cross-workspace protection";
   } else if (atOp !== undefined && JJ_READ_ONLY_SUBCOMMANDS.includes(subcommand)) {
     scope = 'read-only';
     reason = `\`jj --at-op=${atOp} ${subcommand}\` replays an old operation read-only`;
   } else if (subcommand === 'edit' && hasRevisionArgument) {
     scope = 'repo-wide';
-    reason = '`jj edit <rev>` switches the working copy to another revision, so files outside that tree disappear from disk';
+    reason =
+      '`jj edit <rev>` switches the working copy to another revision, so files outside that tree disappear from disk';
   } else if (subcommand === 'new' && hasRevisionArgument) {
     scope = 'repo-wide';
-    reason = '`jj new <revset>` moves the working copy onto another revision, so files outside that tree disappear from disk';
+    reason =
+      '`jj new <revset>` moves the working copy onto another revision, so files outside that tree disappear from disk';
   } else if (subcommand === 'op abandon') {
     scope = 'repo-wide';
-    reason = '`jj op abandon` discards operation history shared with other workspaces (their `jj undo`/`jj op restore` recoverability)';
+    reason =
+      '`jj op abandon` discards operation history shared with other workspaces (their `jj undo`/`jj op restore` recoverability)';
   } else if (subcommand === 'workspace rename') {
     scope = 'repo-wide';
     reason = '`jj workspace rename` changes shared repository metadata that other sessions address workspaces by';

@@ -46,7 +46,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     if (typeof agent !== 'object' || agent === null) return;
     const owned = sessionWorkspaces.get(agent) ?? [];
     const canonicalRoot = canonicalWorkspacePath(root);
-    if (!owned.some((entry) => entry.name === name && entry.root === canonicalRoot)) owned.push({ name, root: canonicalRoot });
+    if (!owned.some((entry) => entry.name === name && entry.root === canonicalRoot))
+      owned.push({ name, root: canonicalRoot });
     sessionWorkspaces.set(agent, owned);
   };
   const ownsWorkspace = (agent: unknown, name: string, root: string): boolean => {
@@ -111,7 +112,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         'Show Jujutsu (jj) revisions selected by a revset. This is jj, not git: revisions are selected with jj revsets such as @, @-, ::@, bookmarks(), or description("…"), not with git branch or range syntax. Anonymous changes without any bookmark are normal and are still returned.',
       parameters: {
         revset: { type: 'string', description: "jj revset selecting the revisions to show. Defaults to '@ | @-'." },
-        limit: { type: 'integer', description: `Maximum entries to return; 1…${config.maxLogLimit}, default ${config.defaultLogLimit}.` },
+        limit: {
+          type: 'integer',
+          description: `Maximum entries to return; 1…${config.maxLogLimit}, default ${config.defaultLogLimit}.`,
+        },
       },
       output: {
         schema: {
@@ -155,8 +159,16 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         'Show a Jujutsu (jj) diff. Diffs are computed between a revision and its parents; this is jj, not git — there is no index and no stash, so reviewing the working copy means diffing @ against @-.',
       parameters: {
         revset: { type: 'string', description: "jj revset to diff; defaults to '@'." },
-        format: { type: 'string', enum: ['stat', 'patch'], description: 'stat gives per-file counts; patch gives a unified diff.' },
-        paths: { type: 'array', items: { type: 'string' }, description: 'Optional repository-relative paths to restrict the diff; passed to jj as literal paths.' },
+        format: {
+          type: 'string',
+          enum: ['stat', 'patch'],
+          description: 'stat gives per-file counts; patch gives a unified diff.',
+        },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional repository-relative paths to restrict the diff; passed to jj as literal paths.',
+        },
       },
       output: {
         schema: {
@@ -194,8 +206,16 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       description:
         'Create a new Jujutsu (jj) change on top of the given parents and make it the working copy (@). This is jj, not git: the previous change keeps its identity and is not re-created, and no commit step is needed — the new change is already real. To finish the current change with a description and start the next one in a single step, use jj_commit. Prefer a series of small changes over one growing working copy.',
       parameters: {
-        message: { type: 'string', description: 'Description for the new change. Omit to leave it undescribed; jj allows an undescribed working-copy change.' },
-        parents: { type: 'array', items: { type: 'string' }, description: 'Revsets to use as parents. Omit to start on top of the current @ (jj moves the working copy).' },
+        message: {
+          type: 'string',
+          description:
+            'Description for the new change. Omit to leave it undescribed; jj allows an undescribed working-copy change.',
+        },
+        parents: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Revsets to use as parents. Omit to start on top of the current @ (jj moves the working copy).',
+        },
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
       async execute(args, exec) {
@@ -213,13 +233,15 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       parameters: {
         message: {
           type: 'string',
-          description: "Description for the change being committed; follow the repository's commit style (call jj_commit_style first when unsure).",
+          description:
+            "Description for the change being committed; follow the repository's commit style (call jj_commit_style first when unsure).",
           required: true,
         },
         paths: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional repository-relative paths to commit only those changes; the remaining changes stay in the new working-copy change.',
+          description:
+            'Optional repository-relative paths to commit only those changes; the remaining changes stay in the new working-copy change.',
         },
       },
       output: {
@@ -255,7 +277,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       description:
         'Set the description (message) of a Jujutsu (jj) revision. This is jj, not git: there is no separate commit step, so this edits the change in place instead of amending or committing; descendants are rebased automatically when metadata changes. Follow the repository description style — jj_commit_style reports it. To finish the current change and start a new one in a single step, prefer jj_commit.',
       parameters: {
-        message: { type: 'string', description: 'New description. An empty string clears the description.', required: true },
+        message: {
+          type: 'string',
+          description: 'New description. An empty string clears the description.',
+          required: true,
+        },
         revset: { type: 'string', description: "jj revset of the change to describe; defaults to '@'." },
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
@@ -278,10 +304,18 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           additionalProperties: false,
           properties: {
             style: { type: 'string', enum: [...COMMIT_STYLE_IDS], required: true },
-            source: { type: 'string', enum: ['config', 'history', 'needs-user-choice', 'pending-history'], required: true },
+            source: {
+              type: 'string',
+              enum: ['config', 'history', 'needs-user-choice', 'pending-history'],
+              required: true,
+            },
             needsUserChoice: { type: 'boolean', required: true },
             guidance: { type: 'string', required: true },
-            detectionStyle: { type: 'string', enum: ['conventional', 'gitmoji', 'plain', 'mixed', 'unknown'], required: true },
+            detectionStyle: {
+              type: 'string',
+              enum: ['conventional', 'gitmoji', 'plain', 'mixed', 'unknown'],
+              required: true,
+            },
             confidence: { type: 'string', enum: ['high', 'medium', 'low', 'none'], required: true },
             sampleCount: { type: 'integer', required: true },
             counts: {
@@ -346,9 +380,15 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             plain: detection.counts.plain,
           },
           reason: detection.reason,
-          choices: COMMIT_STYLE_CHOICES.map((choice) => ({ id: choice.id, label: choice.label, summary: choice.summary })),
+          choices: COMMIT_STYLE_CHOICES.map((choice) => ({
+            id: choice.id,
+            label: choice.label,
+            summary: choice.summary,
+          })),
           // Full examples (bounded) so the model can copy subject, body, and footer habits.
-          examples: descriptions.slice(0, 8).map((description) => (description.length > 600 ? `${description.slice(0, 600)}…` : description)),
+          examples: descriptions
+            .slice(0, 8)
+            .map((description) => (description.length > 600 ? `${description.slice(0, 600)}…` : description)),
         };
       },
     }),
@@ -360,7 +400,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       parameters: {
         from: { type: 'string', description: "jj revset to move changes out of; defaults to '@'." },
         into: { type: 'string', description: "jj revset to move changes into; defaults to '@-'." },
-        message: { type: 'string', description: 'New description for the destination change. Mutually exclusive with useDestinationMessage.' },
+        message: {
+          type: 'string',
+          description: 'New description for the destination change. Mutually exclusive with useDestinationMessage.',
+        },
         useDestinationMessage: { type: 'boolean', description: "Keep the destination change's existing description." },
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
@@ -384,7 +427,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       description:
         'Undo a Jujutsu (jj) operation, or restore the repository to any earlier operation. This is jj, not git: every repository mutation is recorded in the operation log, so undo is a graph-level restore that is itself undoable, not a git reset. Note that jj operations are repository-wide: undoing rewrites the whole working copy of this workspace.',
       parameters: {
-        operationId: { type: 'string', description: 'Operation id (or unique hexadecimal prefix) from jj_op_log. Omit to undo the most recent operation.' },
+        operationId: {
+          type: 'string',
+          description:
+            'Operation id (or unique hexadecimal prefix) from jj_op_log. Omit to undo the most recent operation.',
+        },
       },
       output: {
         schema: {
@@ -465,11 +512,27 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       description:
         'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, and start a new change in it. This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Without `parents` the new workspace starts from the parents of the current change; pass `parents: ["@"]` to carry the current change (and its checkout) into the new workspace when migrating mid-task.',
       parameters: {
-        path: { type: 'string', description: 'Directory for the new workspace; relative paths resolve against the current working directory, absolute paths are supported and are the way to place it outside the repository. jj creates it if missing.', required: true },
-        name: { type: 'string', description: 'Workspace name. Defaults to the basename of path; names must be unique.' },
-        parents: { type: 'array', items: { type: 'string' }, description: "Revsets the new workspace's change starts on; omit to share the current change's parents." },
+        path: {
+          type: 'string',
+          description:
+            'Directory for the new workspace; relative paths resolve against the current working directory, absolute paths are supported and are the way to place it outside the repository. jj creates it if missing.',
+          required: true,
+        },
+        name: {
+          type: 'string',
+          description: 'Workspace name. Defaults to the basename of path; names must be unique.',
+        },
+        parents: {
+          type: 'array',
+          items: { type: 'string' },
+          description: "Revsets the new workspace's change starts on; omit to share the current change's parents.",
+        },
         message: { type: 'string', description: 'Description for the new workspace working-copy change.' },
-        colocate: { type: 'boolean', description: "Also create a matching Git worktree for the new workspace. Defaults to the repository's own colocation setting." },
+        colocate: {
+          type: 'boolean',
+          description:
+            "Also create a matching Git worktree for the new workspace. Defaults to the repository's own colocation setting.",
+        },
       },
       output: {
         schema: {
@@ -487,9 +550,22 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       async execute(args, exec) {
         const cwd = await context.cwdFor(exec);
         await requireWorkspace(context, cwd, exec.signal);
-        const result = await operations.workspaceAdd(cwd, args.path, args.name, args.parents ?? [], args.message, args.colocate, exec.signal);
+        const result = await operations.workspaceAdd(
+          cwd,
+          args.path,
+          args.name,
+          args.parents ?? [],
+          args.message,
+          args.colocate,
+          exec.signal,
+        );
         rememberOwnedWorkspace(exec.agent, result.name, result.path);
-        return { path: result.path, name: result.name, changeId: result.change.changeId, commitId: result.change.commitId };
+        return {
+          path: result.path,
+          name: result.name,
+          changeId: result.change.changeId,
+          commitId: result.change.commitId,
+        };
       },
     }),
 
@@ -569,18 +645,27 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const cwd = await context.cwdFor(exec);
         await requireWorkspace(context, cwd, exec.signal);
         const bookmarks = await operations.bookmarkList(cwd, args.allRemotes ?? false, exec.signal);
-        return { bookmarks: bookmarks.map((bookmark) => ({ name: bookmark.name, target: bookmark.target, remote: bookmark.remote })) };
+        return {
+          bookmarks: bookmarks.map((bookmark) => ({
+            name: bookmark.name,
+            target: bookmark.target,
+            remote: bookmark.remote,
+          })),
+        };
       },
     }),
 
     defineTool({
       name: 'jj_bookmark_set',
       description:
-        'Create or move a Jujutsu (jj) bookmark to a revision. This is jj, not git: a bookmark is jj\'s named pointer with its own move rules, not a git branch. jj refuses backward or sideways moves unless explicitly allowed, because that usually means the wrong revision was selected.',
+        "Create or move a Jujutsu (jj) bookmark to a revision. This is jj, not git: a bookmark is jj's named pointer with its own move rules, not a git branch. jj refuses backward or sideways moves unless explicitly allowed, because that usually means the wrong revision was selected.",
       parameters: {
         name: { type: 'string', description: "Bookmark name; must not contain whitespace or '@'.", required: true },
         revset: { type: 'string', description: "jj revset the bookmark should point at; defaults to '@'." },
-        allowBackwards: { type: 'boolean', description: 'Permit moving the bookmark to an ancestor or unrelated revision.' },
+        allowBackwards: {
+          type: 'boolean',
+          description: 'Permit moving the bookmark to an ancestor or unrelated revision.',
+        },
       },
       output: {
         schema: {
@@ -597,7 +682,13 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       async execute(args, exec) {
         const cwd = await context.cwdFor(exec);
         await requireWorkspace(context, cwd, exec.signal);
-        const result = await operations.bookmarkSet(cwd, args.name, args.revset ?? '@', args.allowBackwards ?? false, exec.signal);
+        const result = await operations.bookmarkSet(
+          cwd,
+          args.name,
+          args.revset ?? '@',
+          args.allowBackwards ?? false,
+          exec.signal,
+        );
         return result;
       },
     }),
@@ -641,12 +732,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_handoff',
       description:
-        'Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace\'s whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.',
+        "Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace's whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.",
       parameters: {
         destination: {
           type: 'string',
           description:
-            "jj revset to integrate onto (only when the user named a revision/bookmark). Omit for automatic resolution: the configured rebaseTarget (default trunk()), then local main/master; a local-only repository without a remote is handled.",
+            'jj revset to integrate onto (only when the user named a revision/bookmark). Omit for automatic resolution: the configured rebaseTarget (default trunk()), then local main/master; a local-only repository without a remote is handled.',
         },
         firstChange: {
           type: 'string',
@@ -658,7 +749,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           description:
             "Local bookmark to move to the rebased tip. Pass it only when this session owns the bookmark; never move another session's bookmark.",
         },
-        fetch: { type: 'boolean', description: 'Run `jj git fetch` first (default true). Set false when the user explicitly asked to stay offline.' },
+        fetch: {
+          type: 'boolean',
+          description:
+            'Run `jj git fetch` first (default true). Set false when the user explicitly asked to stay offline.',
+        },
       },
       output: {
         schema: {
@@ -669,7 +764,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             workspaceRoot: { type: 'string', required: true },
             workspaceName: { type: 'string', required: true },
             destination: { type: 'string', required: true },
-            destinationSource: { type: 'string', enum: ['argument', 'configured', 'trunk', 'main', 'master'], required: true },
+            destinationSource: {
+              type: 'string',
+              enum: ['argument', 'configured', 'trunk', 'main', 'master'],
+              required: true,
+            },
             destinationChangeId: { type: 'string', required: true },
             destinationCommitId: { type: 'string', required: true },
             firstChangeId: { type: 'string', required: true },
@@ -750,7 +849,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           onTarget: result.onTarget,
           needsCommit: result.needsCommit,
           ambiguousRoots: [...result.ambiguousRoots],
-          conflicts: result.conflicts.map((conflict) => ({ changeId: conflict.changeId, description: conflict.description })),
+          conflicts: result.conflicts.map((conflict) => ({
+            changeId: conflict.changeId,
+            description: conflict.description,
+          })),
           fetch: result.fetch,
           message: result.message,
           ...(result.bookmark !== undefined ? { bookmark: result.bookmark } : {}),
@@ -763,7 +865,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_cleanup',
       description:
-        'Unregister this session\'s own temporary Jujutsu (jj) workspace after a verified hand-off. This is jj, not git: it unregisters a jj workspace (not a git worktree), moves the session back to the default workspace (working_directory set), and runs jj workspace forget only for a workspace this exact session created through jj_workspace_add; any other workspace is refused and must be cleaned by the user. The directory keeps its files on disk. Use it instead of leaving a registered workspace behind or asking the user to forget it.',
+        "Unregister this session's own temporary Jujutsu (jj) workspace after a verified hand-off. This is jj, not git: it unregisters a jj workspace (not a git worktree), moves the session back to the default workspace (working_directory set), and runs jj workspace forget only for a workspace this exact session created through jj_workspace_add; any other workspace is refused and must be cleaned by the user. The directory keeps its files on disk. Use it instead of leaving a registered workspace behind or asking the user to forget it.",
       parameters: {},
       output: {
         schema: {
@@ -786,7 +888,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const descriptor = await requireWorkspace(context, cwd, exec.signal);
         const workspaceName = descriptor.workspaceName ?? 'default';
         if (workspaceName === 'default') {
-          throw new Error('jj_workspace_cleanup is unnecessary here: this session already runs in the default workspace, which must never be forgotten.');
+          throw new Error(
+            'jj_workspace_cleanup is unnecessary here: this session already runs in the default workspace, which must never be forgotten.',
+          );
         }
         if (!ownsWorkspace(exec.agent, workspaceName, descriptor.root)) {
           throw new Error(
@@ -811,7 +915,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const workspaces = await operations.workspaceList(cwd, exec.signal);
         const fallback = workspaces.find((workspace) => workspace.name === 'default');
         if (fallback === undefined) {
-          throw new Error('jj_workspace_cleanup could not find the default workspace to move this session back to; report the cleanup commands to the user instead.');
+          throw new Error(
+            'jj_workspace_cleanup could not find the default workspace to move this session back to; report the cleanup commands to the user instead.',
+          );
         }
         const workingDirectory = context.host.workingDirectory;
         if (exec.agent === undefined || workingDirectory === undefined || typeof workingDirectory.set !== 'function') {
@@ -834,4 +940,3 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     }),
   ];
 }
-

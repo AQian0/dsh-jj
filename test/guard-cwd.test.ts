@@ -40,7 +40,11 @@ function realWorkingDirectory(defaultDirectory: string): WorkingDirectoryLike {
     context: () => {},
     getContextOrder: () => 0,
   });
-  ctx.provide('fs', { resolve: async (path: string) => path, stat: async () => undefined, processPath: (path: string) => path });
+  ctx.provide('fs', {
+    resolve: async (path: string) => path,
+    stat: async () => undefined,
+    processPath: (path: string) => path,
+  });
   new SessionProjectionService(ctx);
   return new WorkingDirectoryService(ctx, { defaultDirectory });
 }
@@ -99,7 +103,13 @@ test('V1(a): session in a plain Git repo is allowed even when the host started i
 
   const harness = createGuardContext();
   guardWithRealCwdResolver(harness, workingDirectory, {});
-  const execution = { name: 'bash', callId: 'v1a', arguments: { command: 'git commit -m x' }, agent, signal: new AbortController().signal };
+  const execution = {
+    name: 'bash',
+    callId: 'v1a',
+    arguments: { command: 'git commit -m x' },
+    agent,
+    signal: new AbortController().signal,
+  };
   assert.equal(harness.runGuard(execution), undefined, 'a Git commit inside a plain Git session must not be blocked');
 });
 
@@ -114,7 +124,13 @@ test('V1(b): session in a jj workspace is refused even when the host started els
 
   const harness = createGuardContext();
   guardWithRealCwdResolver(harness, workingDirectory, { guardMutatingGit: 'deny' });
-  const execution = { name: 'bash', callId: 'v1b', arguments: { command: 'git commit -m x' }, agent, signal: new AbortController().signal };
+  const execution = {
+    name: 'bash',
+    callId: 'v1b',
+    arguments: { command: 'git commit -m x' },
+    agent,
+    signal: new AbortController().signal,
+  };
   const reason = harness.runGuard(execution);
   assert.ok(typeof reason === 'string', 'a Git commit inside a jj session must be blocked');
   assert.match(reason, /^Blocked: `git commit`/);
@@ -143,22 +159,41 @@ test('V1(d) §5.10: a broken working-directory resolution degrades to fail-open 
     },
   };
   guardWithRealCwdResolver(harness, broken, { defaultCwd: jjRepo });
-  const execution = { name: 'bash', callId: 'v1d', arguments: { command: 'git commit -m x' }, agent: fakeAgent(fakeSession(jjRepo)), signal: new AbortController().signal };
+  const execution = {
+    name: 'bash',
+    callId: 'v1d',
+    arguments: { command: 'git commit -m x' },
+    agent: fakeAgent(fakeSession(jjRepo)),
+    signal: new AbortController().signal,
+  };
   assert.equal(harness.runGuard(execution), undefined, 'a degraded cwd resolution allows the call (fail-open)');
   const diagnostics = harness.events.filter((entry) => entry.event === 'jj/guard-degraded');
   assert.equal(diagnostics.length, 1, 'the failure is diagnosed once, not swallowed silently');
   assert.match(diagnostics[0]?.payload?.message ?? '', /could not resolve the session working directory/);
   assert.equal(harness.logged.length, 1, 'the logger also receives the warning');
   harness.runGuard(execution);
-  assert.equal(harness.events.filter((entry) => entry.event === 'jj/guard-degraded').length, 1, 'the diagnostic is one-time');
+  assert.equal(
+    harness.events.filter((entry) => entry.event === 'jj/guard-degraded').length,
+    1,
+    'the diagnostic is one-time',
+  );
 });
 
 test('V1(e) §5.10: a host without a workingDirectory service degrades the same way', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-v1e');
   const jjRepo = await initJjColocated(fx.run, fx.path('jj'));
   const harness = createGuardContext();
-  installGitConfusionGuard({ tools: harness.ctx.tools, emit: harness.ctx.emit, logger: harness.ctx.logger }, { config: {} });
-  const execution = { name: 'bash', callId: 'v1e', arguments: { command: 'git commit -m x' }, agent: fakeAgent(fakeSession(jjRepo)), signal: new AbortController().signal };
+  installGitConfusionGuard(
+    { tools: harness.ctx.tools, emit: harness.ctx.emit, logger: harness.ctx.logger },
+    { config: {} },
+  );
+  const execution = {
+    name: 'bash',
+    callId: 'v1e',
+    arguments: { command: 'git commit -m x' },
+    agent: fakeAgent(fakeSession(jjRepo)),
+    signal: new AbortController().signal,
+  };
   assert.equal(harness.runGuard(execution), undefined, 'no workingDirectory service ⇒ fail-open');
   assert.equal(harness.events.filter((entry) => entry.event === 'jj/guard-degraded').length, 1);
 });

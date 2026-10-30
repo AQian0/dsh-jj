@@ -5,11 +5,10 @@
 #       jj file untrack <paths>
 # ─────────────────────────────────────────────────────────────
 
-# 依赖（仓库根 node_modules 是指向全局安装的 symlink 农场，由
-# `node scripts/setup-links.ts` 生成；离线可用，不入库）
+# 依赖（pnpm 管理：`pnpm install` 生成，不入库）
 node_modules/
 
-# 构建产物（不入库，与官方上游一致）：`npm run build` 生成 lib/。
+# 构建产物（不入库，与官方上游一致）：`pnpm run build` 生成 lib/。
 # DSH 安装 bundle 时不执行构建，所以本地安装 / npm 发布之前都需要
 # 先构建一次（npm 发布由 prepack 自动构建）。
 lib/
@@ -30,10 +29,11 @@ editor-*.jjdescription
 # DSH 检出池（若在仓库内创建）
 .agents/worktrees/
 
-# npm 发包过程产物
-#   * tarball 由 `npm pack` / `bun publish` 生成，不入库
-#   * 本仓库刻意不提交 lockfile（本地构建离线，CI 临时安装测试依赖）
-#   * .npmrc 可能含 npm token，凭据只放 ~/.npmrc
+# 发包过程产物
+#   * tarball 由 `pnpm pack` / `npm publish` 生成，不入库
+#   * pnpm-lock.yaml 是工具链与 peer 依赖的唯一解析来源，必须提交
+#   * 其它包管理器的 lockfile 与可能含 token 的 .npmrc 不入库
 *.tgz
 package-lock.json
+yarn.lock
 .npmrc

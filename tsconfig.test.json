@@ -1,6 +1,7 @@
 {
   // Type-check project for everything that is not build output: the TypeScript
-  // implementation under src/ plus the TypeScript test suite and dev scripts.
+  // implementation under src/ plus the TypeScript test suite and the Vite+
+  // toolchain config (which type-checks against vite-plus's public types).
   //
   // `tsconfig.json` stays the emit project (src -> lib/) because lib/ is the
   // published artifact, exactly like the official DSH plugin packages. This
@@ -24,12 +25,12 @@
     "noEmit": true,
     "skipLibCheck": true,
     // The package self-reference in build.test.ts resolves to source here, so
-    // `npm run typecheck` works on a fresh clone before lib/ is built.
+    // `pnpm run typecheck` works on a fresh clone before lib/ is built.
     "paths": {
       "@aqian0/dsh-jj": ["./src/index.ts"],
       "@aqian0/dsh-jj/tools": ["./src/tools.ts"],
       "@aqian0/dsh-jj/guard": ["./src/guard.ts"]
     }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "vite.config.ts"]
 }
