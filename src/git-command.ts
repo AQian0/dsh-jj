@@ -117,7 +117,8 @@ export const JJ_EQUIVALENCE = Object.freeze({
   cherryPick: 'jj duplicate <rev>    (or: jj rebase -r <rev> -d <dest>)',
   worktreeAdd: 'jj workspace add <path>',
   worktreeList: 'jj workspace list',
-  worktreeRemove: 'jj workspace forget <name>',
+  worktreeRemove:
+    'jj_workspace_cleanup for a temporary workspace this session created with jj_workspace_add; otherwise the user runs `jj workspace forget <name>`',
   branchCreate: 'jj bookmark create <name> -r @',
   branchForce: 'jj bookmark set <name> -r <r> --allow-backwards',
   bookmark: 'jj bookmark create/set/delete <name> -r <revset>',
@@ -261,9 +262,36 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
         : { safety: 'read', subtype: 'read-only', reason: 'subcommand `hash-object` without `-w` only computes an object id', equivalence: '' },
   },
   'checkout-index': mutateRule('subcommand `checkout-index` writes files from Git\'s index', JJ_EQUIVALENCE.restore),
-  clean: mutateRule('subcommand `clean` deletes untracked files', JJ_EQUIVALENCE.historyEdit),
-  rm: mutateRule('subcommand `rm` removes files and updates Git\'s index', JJ_EQUIVALENCE.restore),
-  mv: mutateRule('subcommand `mv` moves files and updates Git\'s index', JJ_EQUIVALENCE.noEquivalent),
+  clean: {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `clean` deletes untracked files',
+    equivalence: JJ_EQUIVALENCE.historyEdit,
+    refine: ({ flags }) =>
+      anyFlag(flags, ['-n', '--dry-run'])
+        ? { safety: 'read', subtype: 'read-only', reason: 'subcommand `clean --dry-run` only reports what would be deleted', equivalence: '' }
+        : { safety: 'mutate', subtype: 'mutating', reason: 'subcommand `clean` deletes untracked files', equivalence: JJ_EQUIVALENCE.historyEdit },
+  },
+  rm: {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `rm` removes files and updates Git\'s index',
+    equivalence: JJ_EQUIVALENCE.restore,
+    refine: ({ flags }) =>
+      anyFlag(flags, ['-n', '--dry-run'])
+        ? { safety: 'read', subtype: 'read-only', reason: 'subcommand `rm --dry-run` only reports what would be removed', equivalence: '' }
+        : { safety: 'mutate', subtype: 'mutating', reason: 'subcommand `rm` removes files and updates Git\'s index', equivalence: JJ_EQUIVALENCE.restore },
+  },
+  mv: {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `mv` moves files and updates Git\'s index',
+    equivalence: JJ_EQUIVALENCE.noEquivalent,
+    refine: ({ flags }) =>
+      anyFlag(flags, ['-n', '--dry-run'])
+        ? { safety: 'read', subtype: 'read-only', reason: 'subcommand `mv --dry-run` only reports what would be moved', equivalence: '' }
+        : { safety: 'mutate', subtype: 'mutating', reason: 'subcommand `mv` moves files and updates Git\'s index', equivalence: JJ_EQUIVALENCE.noEquivalent },
+  },
   add: {
     safety: 'mutate',
     subtype: 'index',
@@ -609,7 +637,21 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   version: readRule(),
   'check-ignore': readRule(),
   'check-attr': readRule(),
-  fsck: readRule(),
+  fsck: {
+    safety: 'read',
+    subtype: 'read-only',
+    reason: 'subcommand `fsck` only verifies object connectivity',
+    equivalence: '',
+    refine: ({ flags }) =>
+      anyFlag(flags, ['--lost-found'])
+        ? {
+            safety: 'mutate',
+            subtype: 'mutating',
+            reason: 'subcommand `fsck --lost-found` writes dangling objects under `.git/lost-found`',
+            equivalence: JJ_EQUIVALENCE.noEquivalent,
+          }
+        : { safety: 'read', subtype: 'read-only', reason: 'subcommand `fsck` only verifies object connectivity', equivalence: '' },
+  },
   'verify-commit': readRule(),
   'verify-tag': readRule(),
   'show-branch': readRule(),
@@ -624,6 +666,40 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   diagnose: readRule(),
   'credential': readRule('subcommand `credential` only fills credential helper data'),
   'unpack-objects': mutateRule('subcommand `unpack-objects` writes objects into the shared store', JJ_EQUIVALENCE.noEquivalent),
+  'commit-graph': {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `commit-graph write` writes commit-graph files into the shared store',
+    equivalence: JJ_EQUIVALENCE.noEquivalent,
+    refine: ({ positionals }) =>
+      positionals[0] === 'verify'
+        ? { safety: 'read', subtype: 'read-only', reason: 'subcommand `commit-graph verify` only checks the graph file', equivalence: '' }
+        : {
+            safety: 'mutate',
+            subtype: 'mutating',
+            reason: 'subcommand `commit-graph write` writes commit-graph files into the shared store',
+            equivalence: JJ_EQUIVALENCE.noEquivalent,
+          },
+  },
+  'multi-pack-index': {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `multi-pack-index` writes or rewrites pack index files',
+    equivalence: JJ_EQUIVALENCE.noEquivalent,
+    refine: ({ positionals }) =>
+      positionals[0] === 'verify'
+        ? { safety: 'read', subtype: 'read-only', reason: 'subcommand `multi-pack-index verify` only checks the index files', equivalence: '' }
+        : {
+            safety: 'mutate',
+            subtype: 'mutating',
+            reason: 'subcommand `multi-pack-index` writes or rewrites pack index files',
+            equivalence: JJ_EQUIVALENCE.noEquivalent,
+          },
+  },
+  'pack-objects': mutateRule('subcommand `pack-objects` writes pack files and deltas into the object store', JJ_EQUIVALENCE.noEquivalent),
+  'index-pack': mutateRule('subcommand `index-pack` writes pack index files into the object store', JJ_EQUIVALENCE.noEquivalent),
+  'update-server-info': mutateRule('subcommand `update-server-info` rewrites the repository info files', JJ_EQUIVALENCE.noEquivalent),
+  'fast-import': mutateRule('subcommand `fast-import` writes commits, refs, and objects into the shared store', JJ_EQUIVALENCE.noEquivalent),
 });
 
 const GIT_PROGRAM_RE = /^git(\.exe|\.cmd|\.bat)?$/i;
@@ -645,7 +721,21 @@ const WRAPPERS = new Set([
   'timeout',
 ]);
 
-const SHELL_WRAPPERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash']);
+/** Shells (or shell-like hosts) whose `-c`/`/c` argument is a nested command line. */
+const SHELL_WRAPPERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'pwsh', 'powershell', 'cmd', 'fish', 'nu']);
+
+/** Shells whose `-c` may be combined with other single-letter flags (`bash -lc`). */
+const BASH_LIKE_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash']);
+
+/**
+ * Shell keywords that can precede a command in the same segment. They are not
+ * wrappers, but skipping them keeps `! git commit`, `{ git commit; }`, and
+ * `then git commit` classifiable.
+ */
+const SHELL_KEYWORDS = new Set(['!', '{', '}', 'then', 'do', 'else', 'elif', 'fi', 'done', 'while', 'until', 'for', 'case', 'esac', 'if']);
+
+/** Multi-call wrappers whose inner command cannot be resolved statically. */
+const DYNAMIC_WRAPPERS = new Set(['busybox', 'toybox', 'unbuffer', 'parallel']);
 
 const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   sudo: ['-u', '-g', '-p', '-C', '-h', '-r', '-t', '-U', '--user', '--group', '--prompt', '--chdir', '--host', '--role', '--type', '--other-user'],
@@ -655,8 +745,62 @@ const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = Object.
   ionice: ['-c', '-n', '-p'],
   stdbuf: ['-i', '-o', '-e'],
   xargs: ['-I', '-n', '-P', '-d', '-E', '-s', '-a', '-L', '--arg-file', '--max-args', '--max-procs', '--delimiter', '--eof', '--max-chars', '--replace'],
-  command: ['-p'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'],
+  command: [],
 });
+
+/**
+ * The nested command line a shell wrapper would execute (`bash -c …`,
+ * `pwsh -Command …`, `cmd /c …`, `fish -c …`).
+ */
+function shellWrapperInnerCommand(name: string, rest: readonly string[]): string | undefined {
+  if (BASH_LIKE_SHELLS.has(name)) {
+    const index = rest.findIndex((token) => token === '-c' || /^-[a-zA-Z]*c[a-zA-Z]*$/.test(token));
+    return index >= 0 ? rest[index + 1] : undefined;
+  }
+  const lower = name.toLowerCase();
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] ?? '';
+    if (lower === 'cmd' || lower === 'cmd.exe') {
+      if (/^\/[cC]$/.test(token)) return rest[index + 1];
+      continue;
+    }
+    if (token === '-c' || token === '-Command' || token === '-command') return rest[index + 1];
+  }
+  return undefined;
+}
+
+/** The command line carried by `env -S`/`--split-string`. */
+function envSplitString(rest: readonly string[]): string | undefined {
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] ?? '';
+    if (token === '-S' || token === '--split-string') return rest[index + 1];
+    const match = /^(?:-S|--split-string)=(.*)$/.exec(token);
+    if (match !== null) return match[1];
+  }
+  return undefined;
+}
+
+/**
+ * Nested command lines carried by one segment: shell wrapper `-c` arguments and
+ * `env -S` split strings. Their text is re-tokenized so the wrapped Git/jj
+ * command is classified.
+ */
+function nestedCommandStrings(segment: RawSegment): string[] {
+  const program = segment.words[0]?.value;
+  if (program === undefined) return [];
+  const name = baseName(program);
+  const nested: string[] = [];
+  if (SHELL_WRAPPERS.has(name)) {
+    const inner = shellWrapperInnerCommand(name, segment.words.slice(1).map((token) => token.value));
+    if (inner !== undefined && inner.length > 0) nested.push(inner);
+  }
+  if (name === 'env') {
+    const split = envSplitString(segment.words.slice(1).map((token) => token.value));
+    if (split !== undefined && split.length > 0) nested.push(split);
+  }
+  return nested;
+}
 
 const GIT_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix', '--attr-source']);
 
@@ -705,6 +849,88 @@ function isGitProgram(word: string): boolean {
   return GIT_PROGRAM_RE.test(baseName(word));
 }
 
+/** One pending heredoc on the current logical line. */
+interface HeredocSpec {
+  readonly delimiter: string;
+  readonly stripTabs: boolean;
+}
+
+/**
+ * Parse the delimiter word that follows a `<<`/`<<-` heredoc operator.
+ *
+ * @param commandLine - the whole command line.
+ * @param start - index of the first character after the operator (and `-`).
+ * @returns the delimiter after shell quote removal (`undefined` when the line
+ *   ends first) and the index of the last consumed character.
+ */
+function parseHeredocDelimiter(commandLine: string, start: number): { delimiter?: string; nextIndex: number } {
+  let index = start;
+  while (index < commandLine.length && (commandLine[index] === ' ' || commandLine[index] === '\t')) index += 1;
+  let delimiter = '';
+  let found = false;
+  while (index < commandLine.length) {
+    const char = commandLine[index] ?? '';
+    if (char === "'" || char === '"') {
+      const quote = char;
+      index += 1;
+      for (;;) {
+        if (index >= commandLine.length) return { nextIndex: commandLine.length - 1 };
+        const inner = commandLine[index] ?? '';
+        if (inner === '\\' && quote === '"') {
+          delimiter += commandLine[index + 1] ?? '';
+          index += 2;
+          continue;
+        }
+        if (inner === quote) {
+          index += 1;
+          break;
+        }
+        delimiter += inner;
+        index += 1;
+      }
+      found = true;
+      continue;
+    }
+    if (char === '\\') {
+      delimiter += commandLine[index + 1] ?? '';
+      index += 2;
+      found = true;
+      continue;
+    }
+    if (/[ \t\n;&|()<>]/.test(char)) break;
+    delimiter += char;
+    index += 1;
+    found = true;
+  }
+  return found ? { delimiter, nextIndex: index - 1 } : { nextIndex: index - 1 };
+}
+
+/**
+ * Skip the bodies of all heredocs queued on a command line, starting at `start`
+ * (the character right after the newline that opens the first body).
+ *
+ * @returns the index of the last consumed character, or `undefined` when a body
+ *   is unterminated (the shell would wait for more input).
+ */
+function consumeHeredocBodies(commandLine: string, start: number, heredocs: readonly HeredocSpec[]): number | undefined {
+  let index = start;
+  for (const heredoc of heredocs) {
+    let lineStart = index;
+    for (;;) {
+      const newline = commandLine.indexOf('\n', lineStart);
+      const line = newline === -1 ? commandLine.slice(lineStart) : commandLine.slice(lineStart, newline);
+      const candidate = heredoc.stripTabs ? line.replace(/^\t+/, '') : line;
+      if (candidate === heredoc.delimiter) {
+        index = newline === -1 ? commandLine.length : newline + 1;
+        break;
+      }
+      if (newline === -1) return undefined;
+      lineStart = newline + 1;
+    }
+  }
+  return index - 1;
+}
+
 /** Split a command line into words and operator-delimited segments. */
 function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting: number): { segments: RawSegment[]; warnings: string[] } {
   const segments: RawSegment[] = [];
@@ -716,10 +942,22 @@ function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting
   let escaped = false;
   let parsed = true;
   let raw = '';
+  /** True while the next word is a redirection target (dropped, never classified). */
+  let discardTarget = false;
+  /** Heredocs whose bodies start after the next newline. */
+  const heredocs: HeredocSpec[] = [];
+
+  const invalidateParsedSegments = (): void => {
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      if (segment !== undefined && segment.parsed) segments[index] = { ...segment, parsed: false };
+    }
+  };
 
   const flushWord = (): void => {
     if (currentText.length > 0 || current.length > 0) {
-      words.push({ value: current, text: currentText });
+      if (!discardTarget) words.push({ value: current, text: currentText });
+      discardTarget = false;
       current = '';
       currentText = '';
     }
@@ -730,6 +968,7 @@ function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting
     words = [];
     raw = '';
     parsed = true;
+    discardTarget = false;
   };
 
   for (let index = 0; index < commandLine.length; index += 1) {
@@ -758,10 +997,23 @@ function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting
       const start = index + (char === '`' ? 1 : 2);
       let depth = 1;
       let end = start;
+      let substitutionQuote: "'" | '"' | undefined;
       for (; end < commandLine.length; end += 1) {
         const inner = commandLine[end] ?? '';
         if (inner === '\\') {
           end += 1;
+          continue;
+        }
+        if (substitutionQuote === "'") {
+          if (inner === "'") substitutionQuote = undefined;
+          continue;
+        }
+        if (substitutionQuote === '"') {
+          if (inner === '"') substitutionQuote = undefined;
+          continue;
+        }
+        if (inner === "'" || inner === '"') {
+          substitutionQuote = inner;
           continue;
         }
         if (char === '$' && inner === '(') depth += 1;
@@ -797,12 +1049,107 @@ function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting
       currentText += char;
       continue;
     }
+    // Process substitution: keep scanning the inner command (legacy behaviour).
+    if ((char === '>' || char === '<') && commandLine[index + 1] === '(') {
+      current += char;
+      currentText += char;
+      raw += char;
+      continue;
+    }
+    // Redirection operators: their targets are data, never command words.
+    if (char === '>' || char === '<' || (char === '&' && commandLine[index + 1] === '>')) {
+      if (char === '&') {
+        raw += '&>';
+        index += 1;
+        if (commandLine[index + 1] === '>') {
+          raw += '>';
+          index += 1;
+        }
+        discardTarget = true;
+        continue;
+      }
+      const descriptorPrefix = currentText.length > 0 && current === currentText && /^[0-9]+$/.test(current);
+      if (descriptorPrefix) {
+        current = '';
+        currentText = '';
+      } else {
+        flushWord();
+      }
+      if (char === '>') {
+        const next = commandLine[index + 1] ?? '';
+        if (next === '>') {
+          raw += '>>';
+          index += 1;
+        } else if (next === '&') {
+          raw += '>&';
+          index += 1;
+        } else if (next === '|') {
+          raw += '>|';
+          index += 1;
+        } else {
+          raw += '>';
+        }
+        discardTarget = true;
+        continue;
+      }
+      const next = commandLine[index + 1] ?? '';
+      if (next === '<') {
+        if (commandLine[index + 2] === '<') {
+          raw += '<<<';
+          index += 2;
+          discardTarget = true;
+          continue;
+        }
+        const stripTabs = commandLine[index + 2] === '-';
+        const parsedDelimiter = parseHeredocDelimiter(commandLine, index + 2 + (stripTabs ? 1 : 0));
+        raw += commandLine.slice(index, Math.min(parsedDelimiter.nextIndex + 1, commandLine.length));
+        index = Math.max(parsedDelimiter.nextIndex, index + 1);
+        if (parsedDelimiter.delimiter === undefined) {
+          warnings.push('Command line contains a heredoc operator without a delimiter; the shell would reject it.');
+          parsed = false;
+          invalidateParsedSegments();
+          index = commandLine.length;
+          continue;
+        }
+        heredocs.push({ delimiter: parsedDelimiter.delimiter, stripTabs });
+        continue;
+      }
+      if (next === '&') {
+        raw += '<&';
+        index += 1;
+        discardTarget = true;
+        continue;
+      }
+      if (next === '>') {
+        raw += '<>';
+        index += 1;
+        discardTarget = true;
+        continue;
+      }
+      raw += '<';
+      discardTarget = true;
+      continue;
+    }
     if (char === ' ' || char === '\t') {
       flushWord();
       raw += char;
       continue;
     }
     if (OPERATORS.has(char)) {
+      if (char === '\n' && heredocs.length > 0) {
+        flushSegment();
+        const bodyEnd = consumeHeredocBodies(commandLine, index + 1, heredocs);
+        heredocs.length = 0;
+        if (bodyEnd === undefined) {
+          warnings.push('Command line contains an unterminated heredoc body; the shell would reject it.');
+          invalidateParsedSegments();
+          parsed = false;
+          index = commandLine.length;
+          continue;
+        }
+        index = bodyEnd;
+        continue;
+      }
       let operator = char;
       if ((char === '&' || char === '|') && commandLine[index + 1] === char) {
         operator = char + char;
@@ -827,6 +1174,11 @@ function tokenize(commandLine: string, kind: 'command' | 'substitution', nesting
       `Command line contains an unterminated ${quote === "'" ? 'single' : 'double'} quote; the shell would reject it before running anything.`,
     );
     parsed = false;
+  }
+  if (heredocs.length > 0) {
+    warnings.push('Command line contains a heredoc without a body; the shell would wait for more input.');
+    parsed = false;
+    invalidateParsedSegments();
   }
   flushSegment();
   return { segments, warnings };
@@ -854,7 +1206,7 @@ function scanArgs(args: readonly string[], valueFlags: readonly string[]): { fla
   return { flags, positionals };
 }
 
-/** Skip leading `VAR=value` assignments, wrapper commands, and shell wrappers; returns the program index. */
+/** Skip leading `VAR=value` assignments, shell keywords, wrapper commands, and shell wrappers; returns the program index. */
 
 function skipPrelude(words: readonly Token[], warnings: string[]): number {
   let index = 0;
@@ -863,16 +1215,31 @@ function skipPrelude(words: readonly Token[], warnings: string[]): number {
     const head = words[index]?.value;
     if (head === undefined) return index;
     const name = baseName(head);
+    if (SHELL_KEYWORDS.has(name)) {
+      index += 1;
+      continue;
+    }
     if (SHELL_WRAPPERS.has(name)) {
-      const rest = words.slice(index + 1).map((token) => token.value);
-      const cIndex = rest.findIndex((token) => token === '-c' || /^-[a-z]*c[a-z]*$/.test(token));
-      if (cIndex >= 0 && rest[cIndex + 1] !== undefined) {
-        const nested = tokenize(rest[cIndex + 1] ?? '', 'substitution', MAX_NESTING);
-        warnings.push(...nested.warnings);
+      const inner = shellWrapperInnerCommand(name, words.slice(index + 1).map((token) => token.value));
+      if (inner !== undefined && inner.length > 0) {
+        warnings.push(...tokenize(inner, 'substitution', MAX_NESTING).warnings);
       }
       return index;
     }
-    if (!WRAPPERS.has(name)) break;
+    if (!WRAPPERS.has(name)) {
+      if (name === 'eval') {
+        warnings.push('`eval` hides the command text from static classification; it was not inspected.');
+      } else if (head.includes('$') || head.includes('`')) {
+        warnings.push('the program name contains a shell expansion, so the command cannot be classified statically.');
+      } else if (DYNAMIC_WRAPPERS.has(name)) {
+        warnings.push(`\`${name}\` is a wrapper the parser does not understand; its inner command was not inspected.`);
+      } else if (name === 'find' && words.some((token) => token.value === '-exec' || token.value === '-execdir')) {
+        warnings.push('`find -exec` runs another command, but that inner command cannot be classified statically.');
+      } else if (name === 'ssh' && words.slice(1).some((token) => /(^|\s)(git|jj)(\s|$)/.test(token.value))) {
+        warnings.push('`ssh` runs the command on another host; the remote Git/jj command was not inspected.');
+      }
+      break;
+    }
     const valueFlags = WRAPPER_VALUE_FLAGS[name] ?? [];
     index += 1;
     while (index < words.length) {
@@ -933,6 +1300,12 @@ function classifyWords(words: readonly Token[], raw: string, parsed: boolean, wa
 
     if (GIT_TERMINAL_FLAGS.has(flag) && (flag !== '--exec-path' || inlineValue === undefined)) {
       terminalFlag = flag;
+      // `git --help commit` / `git -h commit`: the rest is the help topic, not a subcommand.
+      break;
+    }
+    // Attached short-option value: `git -C<path>` (Git accepts both spellings).
+    if (eq < 0 && token.value.startsWith('-C') && token.value.length > 2) {
+      changeDir = token.value.slice(2);
       continue;
     }
     if (GIT_VALUE_FLAGS.has(flag)) {
@@ -982,6 +1355,23 @@ function classifyWords(words: readonly Token[], raw: string, parsed: boolean, wa
   }
 
   const rest = words.slice(index).map((token) => token.value);
+  // `git <subcommand> --help` / `-h` only prints help, even for mutating subcommands.
+  if (rest.includes('--help') || rest.includes('-h')) {
+    return {
+      argv: ['git', ...globalOptions, subcommand, ...rest],
+      raw,
+      program,
+      globalOptions,
+      subcommand,
+      safety: 'read',
+      mutating: false,
+      confidence: 'high',
+      reason: `\`git ${subcommand} --help\` only prints help`,
+      equivalence: '',
+      subtype: 'read-only',
+      ...extras,
+    };
+  }
   const rule = GIT_SUBCOMMAND_RULES[subcommand];
   if (rule === undefined) {
     return {
@@ -1057,14 +1447,8 @@ export function classifyGitInvocation(commandLine: string): GitCommandClassifica
 
   for (const segment of outer.segments) {
     segments.push(record(segment));
-    const head = segment.words[0]?.value === undefined ? undefined : baseName(segment.words[0].value);
-    if (head !== undefined && SHELL_WRAPPERS.has(head)) {
-      const rest = segment.words.slice(1).map((token) => token.value);
-      const cIndex = rest.findIndex((token) => token === '-c' || /^-[a-z]*c[a-z]*$/.test(token));
-      const inner = cIndex >= 0 ? rest[cIndex + 1] : undefined;
-      if (inner !== undefined && inner.length > 0) {
-        for (const nestedSegment of tokenize(inner, 'substitution', 1).segments) segments.push(record(nestedSegment));
-      }
+    for (const inner of nestedCommandStrings(segment)) {
+      for (const nestedSegment of tokenize(inner, 'substitution', 1).segments) segments.push(record(nestedSegment));
     }
   }
 
@@ -1124,9 +1508,35 @@ export interface JjInvocation {
   readonly reason: string;
 }
 
+/**
+ * One shell segment of a jj command line.
+ *
+ * `changeDir` is set only when the segment starts with `cd <literal path>` whose
+ * target can be resolved statically (no `$VAR`, command substitution, backtick,
+ * or unexpanded `~`). The guard follows it in {@link JjCommandClassification.segments}
+ * order to compute the directory each invocation would actually run in; a missing
+ * field means "cannot be determined statically" (callers must fail open).
+ */
+export interface JjParsedSegment {
+  /** Raw shell segment text this segment was parsed from. */
+  readonly raw: string;
+  /** `substitution` marks the inner text of `$(…)` or `` `…` ``. */
+  readonly kind: 'command' | 'substitution';
+  /** Dequoted words of the segment (no redirection targets, no heredoc bodies). */
+  readonly words: readonly string[];
+  /** False when the segment contained an unterminated quote/heredoc or a trailing escape. */
+  readonly parsed: boolean;
+  /** Statically resolvable target of a leading `cd <path>` in this segment. */
+  readonly changeDir?: string;
+  /** Indexes into {@link JjCommandClassification.invocations}. */
+  readonly invocationIndexes: readonly number[];
+}
+
 /** Result of {@link classifyJjInvocation}. */
 export interface JjCommandClassification {
   readonly invocations: readonly JjInvocation[];
+  /** Segments in command-line order; the guard follows `changeDir` changes through them. */
+  readonly segments: readonly JjParsedSegment[];
   readonly warnings: readonly string[];
 }
 
@@ -1137,7 +1547,9 @@ export const JJ_REPO_WIDE_SUBCOMMANDS: readonly string[] = Object.freeze([
   'abandon',
   'op restore',
   'op revert',
+  'op abandon',
   'workspace forget',
+  'workspace rename',
 ]);
 
 /** jj subcommands that only touch the current workspace (never blocked). */
@@ -1209,6 +1621,94 @@ const JJ_TWO_WORD = new Set(['op', 'workspace add', 'workspace forget', 'file', 
 
 const JJ_VALUE_FLAGS = new Set(['-R', '--repository', '--at-op', '--at-operation', '--config', '--config-file', '--color']);
 
+/**
+ * jj subcommand options that take a value. Their values must never be counted
+ * as positionals: `jj new -m "msg"` has no revset argument, while
+ * `jj new -m "msg" @-` does, and `jj restore --from @-` has no filesets.
+ */
+const JJ_SUBCOMMAND_VALUE_FLAGS = new Set([
+  '-R',
+  '--repository',
+  '--at-op',
+  '--at-operation',
+  '-m',
+  '--message',
+  '-r',
+  '--revisions',
+  '--revision',
+  '-o',
+  '-A',
+  '--insert-after',
+  '-B',
+  '--insert-before',
+  '--after',
+  '--before',
+  '-f',
+  '--from',
+  '-t',
+  '--into',
+  '--to',
+  '-c',
+  '--changes-in',
+  '-d',
+  '--destination',
+  '-s',
+  '--source',
+  '-T',
+  '--template',
+  '--config',
+  '--config-file',
+  '--color',
+  '--tool',
+]);
+
+/** Revision-taking aliases whose value still names a revision (`-r @-`). */
+const JJ_REVISION_FLAGS = new Set(['-r', '--revisions', '--revision', '-o']);
+
+interface ScannedJjArgs {
+  readonly flags: string[];
+  readonly positionals: string[];
+  /** Values of `-r/--revisions/-o` (revsets, not filesets). */
+  readonly revisionTargets: string[];
+}
+
+/** Split jj subcommand arguments into flags, positionals, and revision targets. */
+function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
+  const flags: string[] = [];
+  const positionals: string[] = [];
+  const revisionTargets: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] ?? '';
+    if (token === '--') {
+      positionals.push(...rest.slice(index + 1));
+      break;
+    }
+    if (token.startsWith('-') && token !== '-') {
+      const eq = token.indexOf('=');
+      const flag = eq >= 0 ? token.slice(0, eq) : token;
+      const attachedShort = eq < 0 && token.length > 2 && !token.startsWith('--')
+        ? token.slice(0, 2)
+        : undefined;
+      if (attachedShort !== undefined && JJ_SUBCOMMAND_VALUE_FLAGS.has(attachedShort)) {
+        flags.push(attachedShort);
+        if (JJ_REVISION_FLAGS.has(attachedShort)) revisionTargets.push(token.slice(2));
+        continue;
+      }
+      flags.push(flag);
+      if (eq < 0 && JJ_SUBCOMMAND_VALUE_FLAGS.has(flag)) {
+        const value = rest[index + 1];
+        if (value !== undefined) {
+          index += 1;
+          if (JJ_REVISION_FLAGS.has(flag)) revisionTargets.push(value);
+        }
+      }
+      continue;
+    }
+    positionals.push(token);
+  }
+  return { flags, positionals, revisionTargets };
+}
+
 /** jj global boolean flags. */
 const JJ_BOOLEAN_FLAGS = new Set([
   '--ignore-working-copy',
@@ -1218,6 +1718,12 @@ const JJ_BOOLEAN_FLAGS = new Set([
   '--quiet',
   '--debug',
 ]);
+
+/** True when a `cd` argument can be resolved without shell expansion. */
+function isStaticChangeDir(target: string): boolean {
+  if (target.length === 0 || target === '-') return false;
+  return !target.includes('$') && !target.includes('`') && !target.startsWith('~');
+}
 
 function jjSubcommandOf(words: readonly string[]): { subcommand: string; rest: string[] } | undefined {
   const first = words[0];
@@ -1256,6 +1762,12 @@ function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, 
     const flag = eq >= 0 ? token.slice(0, eq) : token;
     const inline = eq >= 0 ? token.slice(eq + 1) : undefined;
     globalOptions.push(token);
+    // Attached short-option value: `jj -R<path>` (clap accepts both spellings).
+    if (inline === undefined && token.startsWith('-R') && token.length > 2) {
+      repository = token.slice(2);
+      cursor += 1;
+      continue;
+    }
     if (JJ_VALUE_FLAGS.has(flag)) {
       const value = inline ?? words[cursor + 1]?.value;
       if (inline === undefined) cursor += 1;
@@ -1288,30 +1800,40 @@ function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, 
   }
   const { subcommand, rest } = parsedSub;
 
-  const restFlags = rest.filter((token) => token.startsWith('-'));
-  const positionals = rest.filter((token) => !token.startsWith('-') && token !== '--');
+  const { flags: restFlags, positionals, revisionTargets } = scanJjArgs(rest);
   const allowCrossWorkspace = restFlags.includes('--allow-cross-workspace');
+  const hasRevisionArgument = positionals.length >= 1 || revisionTargets.length >= 1;
+  const abandonsWorkingCopy = positionals.includes('@') || revisionTargets.includes('@');
 
   let scope: JjScope;
   let reason: string;
-  if (subcommand === 'restore' && positionals.length === 0) {
+  if (restFlags.includes('--help') || restFlags.includes('-h')) {
+    scope = 'read-only';
+    reason = `\`jj ${subcommand} --help\` only prints help`;
+  } else if (subcommand === 'restore' && positionals.length === 0) {
     scope = 'destructive';
-    reason = '`jj restore` without a pathspec silently discards the entire working-copy change';
-  } else if (subcommand === 'abandon' && positionals[0] === '@') {
+    reason = '`jj restore` without a fileset silently discards the entire working-copy change';
+  } else if (subcommand === 'abandon' && (abandonsWorkingCopy || !hasRevisionArgument)) {
     scope = 'destructive';
-    reason = '`jj abandon @` discards the current working-copy commit and its uncommitted files from disk';
+    reason = '`jj abandon` (default `@`) discards the working-copy commit and its uncommitted files from disk';
   } else if (subcommand === 'undo' && allowCrossWorkspace) {
     scope = 'destructive';
     reason = '`jj undo --allow-cross-workspace` disables jj\'s only built-in cross-workspace protection';
   } else if (atOp !== undefined && JJ_READ_ONLY_SUBCOMMANDS.includes(subcommand)) {
     scope = 'read-only';
     reason = `\`jj --at-op=${atOp} ${subcommand}\` replays an old operation read-only`;
-  } else if (subcommand === 'edit' && positionals.length >= 1) {
+  } else if (subcommand === 'edit' && hasRevisionArgument) {
     scope = 'repo-wide';
     reason = '`jj edit <rev>` switches the working copy to another revision, so files outside that tree disappear from disk';
-  } else if (subcommand === 'new' && positionals.length >= 1) {
+  } else if (subcommand === 'new' && hasRevisionArgument) {
     scope = 'repo-wide';
     reason = '`jj new <revset>` moves the working copy onto another revision, so files outside that tree disappear from disk';
+  } else if (subcommand === 'op abandon') {
+    scope = 'repo-wide';
+    reason = '`jj op abandon` discards operation history shared with other workspaces (their `jj undo`/`jj op restore` recoverability)';
+  } else if (subcommand === 'workspace rename') {
+    scope = 'repo-wide';
+    reason = '`jj workspace rename` changes shared repository metadata that other sessions address workspaces by';
   } else if (JJ_REPO_WIDE_SUBCOMMANDS.includes(subcommand)) {
     scope = 'repo-wide';
     reason = `\`jj ${subcommand}\` is repository-wide: it rewinds the operation view and rewrites the whole working copy of the current workspace`;
@@ -1346,28 +1868,51 @@ function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, 
 /**
  * Recognize jj invocations in a shell command line (contract §8.3b).
  *
+ * The returned {@link JjCommandClassification.segments} mirror the Git-side
+ * `ParsedSegment` shape: each segment carries a statically resolvable
+ * `changeDir` (only for `cd <literal>`), and `invocationIndexes` point into
+ * `invocations`, so a synchronous guard can follow `cd` changes between
+ * invocations without spawning anything.
+ *
  * @param commandLine - raw shell command string.
- * @returns jj invocations with their scope, plus parse warnings.
+ * @returns jj invocations with their scope, the parsed segments, and warnings.
  */
 export function classifyJjInvocation(commandLine: string): JjCommandClassification {
   const outer = tokenize(commandLine, 'command', 0);
   const warnings = [...outer.warnings];
   const invocations: JjInvocation[] = [];
+  const segments: JjParsedSegment[] = [];
   const record = (segment: RawSegment): void => {
     const invocation = classifyJjWords(segment.words, segment.raw, segment.parsed, warnings);
-    if (invocation !== undefined) invocations.push(invocation);
+    const invocationIndexes: number[] = [];
+    if (invocation !== undefined) {
+      invocationIndexes.push(invocations.length);
+      invocations.push(invocation);
+    }
+    const head = segment.words[0]?.value;
+    const cdTarget = head === 'cd' && segment.parsed ? segment.words[1]?.value.trim() : undefined;
+    const changeDir = cdTarget !== undefined && isStaticChangeDir(cdTarget) ? cdTarget : undefined;
+    segments.push({
+      raw: segment.raw,
+      kind: segment.kind,
+      words: segment.words.map((token) => token.value),
+      parsed: segment.parsed,
+      ...(changeDir !== undefined ? { changeDir } : {}),
+      invocationIndexes,
+    });
+  };
+  const recordNested = (segment: RawSegment): void => {
+    for (const inner of nestedCommandStrings(segment)) {
+      for (const nestedSegment of tokenize(inner, 'substitution', 1).segments) record(nestedSegment);
+    }
   };
   for (const segment of outer.segments) {
     record(segment);
-    const head = segment.words[0]?.value === undefined ? undefined : baseName(segment.words[0].value);
-    if (head !== undefined && SHELL_WRAPPERS.has(head)) {
-      const rest = segment.words.slice(1).map((token) => token.value);
-      const cIndex = rest.findIndex((token) => token === '-c' || /^-[a-z]*c[a-z]*$/.test(token));
-      const inner = cIndex >= 0 ? rest[cIndex + 1] : undefined;
-      if (inner !== undefined && inner.length > 0) {
-        for (const nestedSegment of tokenize(inner, 'substitution', 1).segments) record(nestedSegment);
-      }
-    }
+    recordNested(segment);
   }
-  return { invocations: Object.freeze(invocations), warnings: Object.freeze(warnings) };
+  return {
+    invocations: Object.freeze(invocations),
+    segments: Object.freeze(segments),
+    warnings: Object.freeze(warnings),
+  };
 }
