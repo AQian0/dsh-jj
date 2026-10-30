@@ -174,6 +174,27 @@ export async function initGit(run: RunCommand, dir: string): Promise<string> {
   return dir;
 }
 
+/**
+ * SHA-256 Git repository with jj colocated on top: `git init --object-format=sha256`
+ * followed by `jj git init --colocate`.
+ *
+ * The empty root commit has 64 zeroes in such a repository (not the 40 of a SHA-1
+ * repository), which exercises jj's root-commit detection.
+ *
+ * Returns `undefined` instead of throwing when the local toolchain cannot create
+ * or use a SHA-256 repository (git < 2.29, or a jj build without the SHA-256 git
+ * backend), so callers can `t.skip` and keep the suite green on older setups.
+ */
+export async function initJjSha256(run: RunCommand, dir: string): Promise<string | undefined> {
+  const git = await run(['git', 'init', '--quiet', '--object-format=sha256'], { cwd: dir, timeoutMs: 30_000 });
+  if (git.exitCode !== 0 || git.errorCode !== undefined) return undefined;
+  await assertGitFixture(run, dir);
+  const jj = await run(['jj', 'git', 'init', '--colocate'], { cwd: dir, timeoutMs: 30_000 });
+  if (jj.exitCode !== 0 || jj.errorCode !== undefined) return undefined;
+  await assertJjFixture(run, dir);
+  return dir;
+}
+
 /** Fail with a clear message when the real toolchain is unavailable. */
 export async function assertToolchain(run: RunCommand, cwd: string): Promise<void> {
   const jj = await run(['jj', '--version'], { cwd, timeoutMs: 10_000 });
