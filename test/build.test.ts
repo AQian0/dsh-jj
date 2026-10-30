@@ -129,6 +129,7 @@ test('the bare package name resolves each documented export', async () => {
   assert.equal(typeof root.multiSessionPromptText, 'function', 'multi-session guidance is part of the public API');
   assert.equal(typeof root.multiSessionFinishChecklistText, 'function');
   assert.equal(typeof root.detectParallelSessions, 'function');
+  assert.equal(typeof root.parallelPeerCwds, 'function', 'the activity-aware peer selection is part of the public API');
 });
 
 test('the built guard entry installs a working guard against a real jj workspace', async (t) => {
@@ -207,10 +208,17 @@ test('the runtime entry forwards live top-level sessions into the multi-session 
     readonly text: (context: { readonly agent?: { readonly session?: unknown } } | undefined) => string;
   }
 
-  /** Apply the runtime entry with fake systemPrompt/workingDirectory/agents services. */
+  /**
+   * Apply the runtime entry with fake systemPrompt/workingDirectory/agents services.
+   *
+   * `turnState` fakes the host's `sessionProjections.stateOf(session, 'turnBoundary')`
+   * activity read: `{openTurnStartSeq: null}` is an idle session, a sequence number is an
+   * open turn; omitting the map fakes an older host without the projection (unknown).
+   */
   const applyWith = (
     config: Parameters<typeof runtimeEntry.apply>[1],
     roots: ReadonlyArray<{ readonly session: unknown }>,
+    turnState?: ReadonlyMap<unknown, unknown> | ((session: unknown) => unknown),
   ): string => {
     const captured: CapturedPromptContext[] = [];
     const ctx = new Context();
@@ -228,21 +236,56 @@ test('the runtime entry forwards live top-level sessions into the multi-session 
       ctx.provide('agents');
       ctx.set('agents', { roots: () => roots });
     }
+    if (turnState !== undefined) {
+      ctx.provide('sessionProjections');
+      ctx.set('sessionProjections', {
+        stateOf: (session: unknown, key: string) => {
+          assert.equal(key, 'turnBoundary', 'the activity read must use the agent-loop projection');
+          return typeof turnState === 'function' ? turnState(session) : turnState.get(session);
+        },
+      });
+    }
     runtimeEntry.apply(ctx, config);
     return captured[0]?.text({ agent: roots[0] !== undefined ? { session: roots[0].session } : undefined }) ?? '';
   };
 
   const current = { id: 'apply-current' };
   const peer = { id: 'apply-peer' };
-  const parallel = applyWith({}, [{ session: current }, { session: peer }]);
-  assert.match(parallel, /Parallel sessions: another live DSH session is using this Jujutsu working copy/);
+  const activeTurn = new Map<unknown, unknown>([
+    [current, { openTurnStartSeq: 1 }],
+    [peer, { openTurnStartSeq: 5 }],
+  ]);
+  const parallel = applyWith({}, [{ session: current }, { session: peer }], activeTurn);
+  assert.match(parallel, /Parallel sessions: another DSH session is running in this Jujutsu working copy/);
   assert.match(parallel, /jj_workspace_add/);
   assert.match(parallel, /standard rebase hand-off/);
 
-  const off = applyWith({ multiSessionGuidance: 'off' }, [{ session: current }, { session: peer }]);
+  const idleTurn = new Map<unknown, unknown>([
+    [current, { openTurnStartSeq: 1 }],
+    [peer, { openTurnStartSeq: null }],
+  ]);
+  const idle = applyWith({}, [{ session: current }, { session: peer }], idleTurn);
+  assert.ok(!idle.includes('Parallel sessions'), 'an idle live peer is not concurrent work');
+  assert.ok(!idle.includes('jj_workspace_add'), 'a single active session keeps its current working copy');
+  assert.match(idle, /Jujutsu \(jj\) workspace/, 'the base jj preference is unaffected');
+
+  const unknown = applyWith({}, [{ session: current }, { session: peer }], undefined);
+  assert.match(unknown, /Parallel sessions/, 'a host without activity reporting keeps the fail-open behavior');
+
+  const throwingRead = applyWith({}, [{ session: current }, { session: peer }], () => {
+    throw new Error('projection exploded');
+  });
+  assert.match(throwingRead, /Parallel sessions/, 'a throwing activity read stays fail-open and never breaks assembly');
+  assert.match(throwingRead, /Jujutsu \(jj\) workspace/, 'the base jj guidance survives a throwing projection');
+
+  const malformedRead = applyWith({}, [{ session: current }, { session: peer }], () => ({}));
+  assert.match(malformedRead, /Parallel sessions/, 'an unexpected projection shape stays fail-open');
+  assert.match(malformedRead, /Jujutsu \(jj\) workspace/, 'the base jj guidance survives a malformed projection');
+
+  const off = applyWith({ multiSessionGuidance: 'off' }, [{ session: current }, { session: peer }], activeTurn);
   assert.ok(!off.includes('Parallel sessions'), 'off disables the injected section');
 
-  const always = applyWith({ multiSessionGuidance: 'always' }, [{ session: current }]);
+  const always = applyWith({ multiSessionGuidance: 'always' }, [{ session: current }], idleTurn);
   assert.match(always, /separate dsh processes/, 'always covers cross-process parallel sessions');
 
   assert.throws(() => applyWith({ rebaseTarget: '   ' }, [{ session: current }]), /rebaseTarget/);

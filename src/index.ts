@@ -114,7 +114,7 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // provider reading `AssembleContext.agent` — the pattern DSH's own
   // `dsh-working-directory` uses — so one registration covers every agent and model.
   const get = (ctx as unknown as { get?: (name: string, strict?: boolean) => unknown }).get;
-  /** Non-strict service read: unavailable services must not break prompt assembly. */
+  /** Tolerant service read: an absent or mid-unload service must not break prompt assembly. */
   const readService = <T>(name: string): T | undefined => {
     try {
       return get?.call(ctx, name) as T | undefined;
@@ -123,13 +123,43 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
     }
   };
   /**
-   * Enumerate the live TOP-LEVEL DSH sessions with their effective working directories.
+   * Whether one live session's agent is inside an open turn right now.
+   *
+   * A live Agent outlives its turn: the host resumes GUI sessions for the lifetime of
+   * the app and does not dispose the Agent when the user switches away, so presence in
+   * `agents.roots()` alone cannot tell concurrent work from a chat the user opened
+   * earlier. `dsh-agent-loop` registers the `turnBoundary` session projection;
+   * `openTurnStartSeq` is null between turns and a sequence number while a turn is open
+   * (including one waiting for an approval or an answer). Reading it is synchronous and
+   * adds no peer dependency: the lookup is contained, and a host without the projection
+   * reports `undefined`, which keeps the guidance fail-open.
+   */
+  const sessionIsActive = (session: unknown): boolean | undefined => {
+    const projections = readService<{ stateOf?: (session: unknown, key: string) => unknown }>('sessionProjections');
+    if (typeof projections?.stateOf !== 'function') return undefined;
+    let state: unknown;
+    try {
+      state = projections.stateOf(session, 'turnBoundary');
+    } catch {
+      return undefined;
+    }
+    if (state === null || typeof state !== 'object') return undefined;
+    const openTurnStartSeq = (state as { openTurnStartSeq?: unknown }).openTurnStartSeq;
+    // A missing field is an unexpected projection shape: stay fail-open.
+    if (openTurnStartSeq === undefined) return undefined;
+    return openTurnStartSeq !== null;
+  };
+  /**
+   * Enumerate the live TOP-LEVEL DSH sessions with their effective working directories
+   * and whether each is inside an open turn.
    *
    * `ctx.agents.roots()` returns independent user sessions only (subagents are created
    * with an owning parent and therefore never appear here). This is what lets the prompt
    * context tell whether another session is working in the same jj project, without a
-   * subprocess: both the agent registry and `workingDirectory.get` are synchronous.
-   * Missing services (older hosts, headless assemblies) simply yield no detection.
+   * subprocess: the agent registry, `workingDirectory.get`, and the `turnBoundary`
+   * projection are all synchronous. Missing services (older hosts, headless assemblies)
+   * simply yield no detection; missing activity reporting stays fail-open in the prompt
+   * context (a peer of unknown state is still treated as possibly parallel).
    */
   const liveRootSessions = (): readonly JjLiveSession[] => {
     const agents = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents');
@@ -153,7 +183,8 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
         continue;
       }
       if (typeof cwd !== 'string' || cwd.length === 0) continue;
-      sessions.push({ session, cwd });
+      const active = sessionIsActive(session);
+      sessions.push({ session, cwd, ...(active !== undefined ? { active } : {}) });
     }
     return sessions;
   };
@@ -214,6 +245,7 @@ export {
   detectParallelSessions,
   multiSessionFinishChecklistText,
   multiSessionPromptText,
+  parallelPeerCwds,
 } from './multi-session.ts';
 export {
   COMMIT_STYLE_CHOICES,

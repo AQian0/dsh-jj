@@ -26,6 +26,11 @@
  * before writing and to rebase the finished stack onto the trunk. Detection is injected
  * (`liveRootSessions`) and fail-open; the wording lives in `./multi-session.ts`.
  *
+ * Policy refinement (2026-10-30, activity gate): "live" is not "working". The host keeps
+ * an Agent alive after its turn ends, so the peer list only counts sessions whose injected
+ * activity is not positively idle; sessions that were merely opened earlier no longer make
+ * a single session isolate itself in a new jj workspace.
+ *
  * @module dsh-jj/prompt-context
  */
 
@@ -36,6 +41,7 @@ import {
   detectParallelSessions,
   multiSessionFinishChecklistText,
   multiSessionPromptText,
+  parallelPeerCwds,
   type JjLiveSession,
   type JjWorkspaceIdentity,
   type JjWorkspaceProbe,
@@ -82,6 +88,10 @@ export interface JjPromptMultiSessionOptions {
    * Live top-level DSH sessions, INCLUDING the current one (the current session is
    * recognised by session identity). Omit it when the host cannot enumerate agents;
    * `auto` mode then contributes nothing and `always` stays generic.
+   *
+   * Set `active: false` for sessions whose agent is known to be idle (its turn ended):
+   * they are not concurrent work and never trigger the jj-workspace guidance. Leaving
+   * it `undefined` keeps the fail-open behavior and counts the session as a peer.
    */
   readonly liveRootSessions?: () => readonly JjLiveSession[];
 }
@@ -213,15 +223,19 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
    *
    * Only independent (top-level) sessions count: a subagent's parent and its siblings
    * are not concurrent peers of the shared working copy, so a subagent never receives
-   * this guidance (also in `always` mode). Without a session source, detection is
-   * unknown but `always` may still contribute its generic section (fail-open).
+   * this guidance (also in `always` mode). Among the top-level sessions, only peers
+   * that are not positively idle count as concurrent work ({@link parallelPeerCwds}):
+   * the host keeps an Agent alive after its turn ends, so a merely-open session must
+   * not make this session isolate in a new jj workspace. Without a session source,
+   * detection is unknown but `always` may still contribute its generic section
+   * (fail-open).
    */
   const multiSessionStateFor = (session: unknown, identity: JjWorkspaceIdentity): MultiSessionState => {
     const liveRootSessions = options.liveRootSessions;
     if (liveRootSessions === undefined) return { applicable: true };
     const roots = liveRootSessions();
     if (!roots.some((entry) => entry.session === session)) return { applicable: false };
-    const peers = roots.filter((entry) => entry.session !== session).map((entry) => entry.cwd);
+    const peers = parallelPeerCwds(session, roots);
     return { applicable: true, detection: detectParallelSessions(identity, peers, probeWorkspace) };
   };
 

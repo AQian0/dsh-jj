@@ -13,7 +13,9 @@ import {
   DEFAULT_REBASE_TARGET,
   detectParallelSessions,
   multiSessionPromptText,
+  parallelPeerCwds,
   MULTI_SESSION_GUIDANCE_MODES,
+  type JjLiveSession,
   type JjWorkspaceIdentity,
   type JjWorkspaceProbe,
 } from '../src/multi-session.ts';
@@ -77,6 +79,58 @@ test('a symlinked working directory and its real path count as the same workspac
   assert.equal(detection.siblingWorkspace.length, 0);
 });
 
+test('peer selection drops known-idle sessions but keeps active and unknown ones', () => {
+  const current = { id: 'current' };
+  const idle = { id: 'idle' };
+  const active = { id: 'active' };
+  const unknown = { id: 'unknown' };
+  const sessions: JjLiveSession[] = [
+    { session: current, cwd: '/repo', active: true },
+    { session: idle, cwd: '/repo', active: false },
+    { session: active, cwd: '/repo', active: true },
+    { session: unknown, cwd: '/repo-w2' },
+  ];
+  assert.deepEqual(
+    parallelPeerCwds(current, sessions),
+    ['/repo', '/repo-w2'],
+    'the current session and positively-idle peers are excluded; active and unknown-activity peers stay',
+  );
+});
+
+test('an idle live peer never triggers the workspace isolation guidance', () => {
+  const current = { id: 'current-idle' };
+  const peer = { id: 'peer-idle' };
+  const sessions: JjLiveSession[] = [
+    { session: current, cwd: '/repo', active: true },
+    { session: peer, cwd: '/repo', active: false },
+  ];
+  const probe = tableProbe({
+    '/repo': { workspaceRoot: '/repo', jjRepoPath: '/repo/.jj/repo' },
+  });
+  const detection = detectParallelSessions(CURRENT, parallelPeerCwds(current, sessions), probe);
+  assert.deepEqual(detection, { sharedWorkspace: [], siblingWorkspace: [] });
+  assert.equal(
+    multiSessionPromptText({ mode: 'auto', detection }),
+    '',
+    'a session that ended its turn is not concurrent work and must not push this session into a new jj workspace',
+  );
+});
+
+test('an active live peer still triggers detection through the same peer selection', () => {
+  const current = { id: 'current-active' };
+  const peer = { id: 'peer-active' };
+  const sessions: JjLiveSession[] = [
+    { session: current, cwd: '/repo', active: true },
+    { session: peer, cwd: '/repo', active: true },
+  ];
+  const probe = tableProbe({
+    '/repo': { workspaceRoot: '/repo', jjRepoPath: '/repo/.jj/repo' },
+  });
+  const detection = detectParallelSessions(CURRENT, parallelPeerCwds(current, sessions), probe);
+  assert.deepEqual(detection.sharedWorkspace, ['/repo']);
+  assert.match(multiSessionPromptText({ mode: 'auto', detection }), /jj_workspace_add/);
+});
+
 test('off mode contributes nothing, and auto mode stays quiet without peers', () => {
   assert.equal(multiSessionPromptText({ mode: 'off' }), '');
   assert.equal(multiSessionPromptText({ mode: 'auto' }), '');
@@ -92,7 +146,7 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
     mode: 'auto',
     detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] },
   });
-  assert.match(text, /Parallel sessions: another live DSH session is using this Jujutsu working copy/);
+  assert.match(text, /Parallel sessions: another DSH session is running in this Jujutsu working copy/);
   assert.match(text, /jj_workspace_add/);
   assert.match(text, /working_directory/);
   assert.match(text, /outside the repository/i);
@@ -113,7 +167,7 @@ test('sibling workspaces are described as isolated copies with a shared reposito
     mode: 'auto',
     detection: { sharedWorkspace: [], siblingWorkspace: ['/repo-w2', '/repo-w3'] },
   });
-  assert.match(text, /another live DSH session shares this Jujutsu repository but works in a separate workspace/);
+  assert.match(text, /another DSH session is running in a separate workspace of this Jujutsu repository/);
   assert.match(text, /working copies are isolated while bookmarks and the operation log are shared/);
   assert.match(text, /jj undo/);
   assert.ok(!text.includes('jj_workspace_add'), 'no need to create a workspace when the peer is already isolated');
@@ -148,7 +202,7 @@ test('the shared-working-copy warning wins over the sibling-workspace wording', 
     mode: 'auto',
     detection: { sharedWorkspace: ['/repo'], siblingWorkspace: ['/repo-w2'] },
   });
-  assert.match(text, /using this Jujutsu working copy/);
+  assert.match(text, /running in this Jujutsu working copy/);
   assert.ok(!text.includes('separate workspaces'), 'the dangerous case is the one described');
 });
 

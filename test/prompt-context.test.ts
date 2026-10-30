@@ -195,10 +195,31 @@ test('a parallel session sharing the working copy gets the isolate-now guidance'
     ],
   });
   const text = captured[0].text({ agent: { session } });
-  assert.match(text, /Parallel sessions: another live DSH session is using this Jujutsu working copy/);
+  assert.match(text, /Parallel sessions: another DSH session is running in this Jujutsu working copy/);
   assert.match(text, /jj_workspace_add/);
   assert.match(text, /standard rebase hand-off/);
   assert.match(text, /Inherit this repository|Commit descriptions/, 'commit guidance is still present');
+});
+
+test('a peer whose turn already ended does not trigger the isolate-now guidance', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-prompt-idle-peer');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const session = { id: 'idle-current' };
+  const peer = { id: 'idle-peer' };
+  const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
+  installJjPromptContext(host, {
+    sniff: colocatedSniff(repo),
+    // The host keeps the peer's Agent alive after its turn ended; presence is not parallel work.
+    liveRootSessions: () => [
+      { session, cwd: repo, active: true },
+      { session: peer, cwd: repo, active: false },
+    ],
+  });
+  const text = captured[0].text({ agent: { session } });
+  assert.match(text, /Jujutsu \(jj\) workspace/, 'the base preference still applies');
+  assert.ok(!text.includes('Parallel sessions'), 'an idle live peer is not a concurrent session');
+  assert.ok(!text.includes('jj_workspace_add'), 'a single active session keeps working in its current working copy');
+  assert.ok(!text.includes('standard rebase hand-off'), 'no hand-off is needed without real parallel work');
 });
 
 test('sibling workspaces of one repository get the coordination wording and the configured target', async (t) => {
@@ -220,7 +241,7 @@ test('sibling workspaces of one repository get the coordination wording and the 
     rebaseTarget: 'main',
   });
   const text = captured[0].text({ agent: { session } });
-  assert.match(text, /but works in a separate workspace/);
+  assert.match(text, /running in a separate workspace of this Jujutsu repository/);
   assert.match(text, /destination = main/);
   assert.ok(!text.includes('jj_workspace_add'), 'an isolated peer needs no new workspace');
 });
@@ -303,7 +324,7 @@ test('peeked peer descriptors avoid re-sniffing peer directories', async (t) => 
     ],
   });
   const text = captured[0].text({ agent: { session } });
-  assert.match(text, /works in a separate workspace/);
+  assert.match(text, /running in a separate workspace of this Jujutsu repository/);
   assert.deepEqual(sniffed, [], 'both descriptors came from the warm cache');
 });
 
@@ -312,27 +333,37 @@ test('a session that saw a parallel peer keeps the finish checklist after the pe
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   const session = { id: 'latch-current' };
   const peer = { id: 'latch-peer' };
-  const live = { running: true };
+  const live = { state: 'active' as 'active' | 'idle' | 'ended' };
   const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[session, repo], [peer, repo]]) });
   installJjPromptContext(host, {
     sniff: colocatedSniff(repo),
     liveRootSessions: () =>
-      live.running
+      live.state === 'active'
         ? [
-            { session, cwd: repo },
-            { session: peer, cwd: repo },
+            { session, cwd: repo, active: true },
+            { session: peer, cwd: repo, active: true },
           ]
-        : [{ session, cwd: repo }],
+        : live.state === 'idle'
+          ? [
+              { session, cwd: repo, active: true },
+              { session: peer, cwd: repo, active: false },
+            ]
+          : [{ session, cwd: repo, active: true }],
   });
 
-  const whilePeerAlive = captured[0].text({ agent: { session } });
-  assert.match(whilePeerAlive, /Parallel sessions: another live DSH session/);
-  assert.match(whilePeerAlive, /standard rebase hand-off/);
+  const whilePeerActive = captured[0].text({ agent: { session } });
+  assert.match(whilePeerActive, /Parallel sessions: another DSH session/);
+  assert.match(whilePeerActive, /standard rebase hand-off/);
 
-  live.running = false;
+  live.state = 'idle';
+  const afterPeerWentIdle = captured[0].text({ agent: { session } });
+  assert.ok(!afterPeerWentIdle.includes('Parallel sessions'), 'an idle peer no longer claims concurrent work');
+  assert.match(afterPeerWentIdle, /standard rebase hand-off/, 'the hand-off checklist is latched for the rest of the session');
+
+  live.state = 'ended';
   const afterPeerLeft = captured[0].text({ agent: { session } });
   assert.ok(!afterPeerLeft.includes('Parallel sessions'), 'the stale peer claim is gone');
-  assert.match(afterPeerLeft, /standard rebase hand-off/, 'the hand-off checklist is latched for the rest of the session');
+  assert.match(afterPeerLeft, /standard rebase hand-off/, 'the hand-off checklist survives the peer for the rest of the session');
 });
 
 test('subagents never receive multi-session guidance, even in always mode', async (t) => {

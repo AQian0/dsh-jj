@@ -16,6 +16,15 @@
  * is fail-open: no host services means no detection, and the prompt context then
  * emits nothing (`auto` mode).
  *
+ * Policy refinement (2026-10-30, activity gate): a live Agent is NOT a parallel
+ * session. The host keeps an Agent alive after its turn ends (Web GUI sessions
+ * stay resumed for the lifetime of the app), so a single session would otherwise
+ * see every session it opened earlier in the same working copy as a concurrent
+ * peer and isolate itself in a fresh jj workspace. Only a peer whose host-reported
+ * activity says it is inside an open turn counts as parallel; {@link
+ * JjLiveSession.active} carries that fact and `undefined` keeps the fail-open
+ * behavior when the host cannot report it.
+ *
  * This module is pure: no I/O except a `realpath` used to compare workspace
  * identities, no subprocess, and no `@deepseek-ai/*` imports. The host injects
  * the synchronous {@link JjWorkspaceProbe}.
@@ -46,6 +55,15 @@ export interface JjLiveSession {
   readonly session: unknown;
   /** Effective session working directory (`workingDirectory.get(session)`). */
   readonly cwd: string;
+  /**
+   * Whether this session's agent is inside an open turn right now.
+   *
+   * `false` means the host positively reports an idle session (its turn ended, or
+   * it never started one) and it must not be treated as a concurrent peer.
+   * `undefined` means the host cannot report activity; callers keep the fail-open
+   * behavior and count it as possibly parallel.
+   */
+  readonly active?: boolean;
 }
 
 /** Synchronously resolved jj workspace identity for one directory. */
@@ -98,6 +116,29 @@ function canonicalPath(path: string): string {
 }
 
 /**
+ * Working directories of sessions that may be running concurrently with `current`.
+ *
+ * Live-agent presence alone is not evidence of parallel work: the host keeps an
+ * Agent alive after its turn ends, so every session the user opened earlier in
+ * the same project would otherwise count. Only a peer the host positively reports
+ * as idle (`active: false`) is skipped; an unknown activity state keeps the
+ * fail-open behavior, and the current session itself is always excluded.
+ *
+ * @param current - the current session object (`AssembleContext.agent.session`).
+ * @param sessions - live top-level sessions, including the current one.
+ * @returns the working directories to probe for workspace overlap.
+ */
+export function parallelPeerCwds(current: unknown, sessions: readonly JjLiveSession[]): string[] {
+  const peers: string[] = [];
+  for (const entry of sessions) {
+    if (entry.session === current) continue;
+    if (entry.active === false) continue;
+    peers.push(entry.cwd);
+  }
+  return peers;
+}
+
+/**
  * Group live peer sessions by their relation to the current jj workspace.
  *
  * Peers that cannot be resolved to a usable jj workspace, that belong to another
@@ -105,7 +146,8 @@ function canonicalPath(path: string): string {
  * workspace is reported once even when several peers share it.
  *
  * @param current - the current session's jj workspace identity.
- * @param peerCwds - effective working directories of the other top-level sessions.
+ * @param peerCwds - effective working directories of the other top-level sessions
+ *   (use {@link parallelPeerCwds} to drop known-idle peers).
  * @param probe - synchronous workspace probe (failures are ignored per peer).
  * @returns distinct shared/sibling workspace roots.
  */
@@ -145,7 +187,7 @@ export function detectParallelSessions(
 /** One peer session's guidance: isolate before writing into the shared working copy. */
 function sharedWorkingCopyText(): string {
   return [
-    'Parallel sessions: another live DSH session is using this Jujutsu working copy. A working copy is not safe to share between concurrent sessions: every jj command (including `jj workspace add`) snapshots the whole directory, and a commit without paths can capture another session\'s uncommitted files.',
+    'Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not safe to share between concurrent sessions: every jj command (including `jj workspace add`) snapshots the whole directory, and a commit without paths can capture another session\'s uncommitted files.',
     'Before writing files, isolate this session in its own jj workspace (read-only inspection is safe):',
     "- Create it with jj_workspace_add (or `jj workspace add <path> --name <name>`): check jj_workspace_list first and never reuse another session's workspace; use an absolute path OUTSIDE the repository root (a sibling directory of the repository root is fine), a name unique to this session, and no parents so it starts from the current change's parents.",
     '- Move this session into it with the working_directory tool (`cd` to the new path, when installed), then confirm with jj_status that the new workspace has its own working-copy change.',
@@ -158,7 +200,7 @@ function sharedWorkingCopyText(): string {
 /** One peer session's guidance: isolated working copies, shared repository state. */
 function siblingWorkspaceText(): string {
   return [
-    'Parallel sessions: another live DSH session shares this Jujutsu repository but works in a separate workspace. Your working copies are isolated while bookmarks and the operation log are shared:',
+    'Parallel sessions: another DSH session is running in a separate workspace of this Jujutsu repository right now. Your working copies are isolated while bookmarks and the operation log are shared:',
     "- Rebase, describe, squash, edit and restore only this session's own changes; never rewrite another workspace's working-copy change or move its bookmark.",
     '- Keep this session\'s edits inside its own workspace, and prefer workspace-local commands: `jj undo` and `jj op restore` rewrite repository-wide state (the guard warns about them).',
     '- When the task is done, hand the change over with the standard rebase checklist below.',
