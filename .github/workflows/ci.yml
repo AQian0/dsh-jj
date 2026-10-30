@@ -1,0 +1,88 @@
+name: ci
+
+# Push/PR quality gate for the documented pre-commit command (`npm test`).
+#
+# The repository ships no devDependencies and no lockfile on purpose: every run
+# installs the public peer dependencies plus the exact compiler pair the release
+# workflow pins, then exercises the real jj/git toolchain (tests are not mocked).
+# `npm test` starts with the portable setup-links bootstrap, which no-ops once
+# the dependencies above are installed.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install Jujutsu (jj) for the test fixtures
+        env:
+          JJ_VERSION: "0.46.0"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          expected="jj ${JJ_VERSION}"
+          actual="$("$HOME/.local/bin/jj" --version)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "::error::expected ${expected}, got ${actual}"
+            exit 1
+          fi
+          echo "${actual}"
+
+      - name: Install public peer dependencies and the pinned compiler
+        # Same install recipe as release.yml: no lockfile, no new dependencies,
+        # lifecycle scripts disabled, and the exact tsc/@types pair.
+        run: |
+          npm install --no-package-lock --ignore-scripts --no-audit --no-fund
+          npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
+            typescript@6.0.3 @types/node@26.6.5
+
+      - name: Check the offline bootstrap
+        # After the install above, scripts/setup-links.ts must no-op; this also
+        # exercises the script that `npm test` runs first.
+        run: npm run setup:check
+
+      - name: Run the documented pre-commit gate
+        # `npm test` = setup-links (no-op here) + tsc type-check + node --test with
+        # the real jj/git binaries; build.test.ts builds lib/ as part of the run.
+        run: npm test
+
+      - name: Smoke-check the publishable tarball
+        # release.yml asserts the full manifest; this catches a broken `files`
+        # config without spending network time (lib/ was just built by the tests).
+        run: |
+          npm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
+          node -e "
+            const manifest = require(process.env.RUNNER_TEMP + '/pack.json')[0];
+            const packaged = new Set(manifest.files.map((entry) => entry.path));
+            for (const required of ['lib/index.js', 'lib/types/index.d.ts', 'cordis.patch.yml', 'icon.svg']) {
+              if (!packaged.has(required)) {
+                console.error('::error::publishable tarball is missing ' + required);
+                process.exit(1);
+              }
+            }
+            console.log('tarball smoke check passed (' + manifest.entryCount + ' entries)');
+          "

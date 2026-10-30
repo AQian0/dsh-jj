@@ -1,7 +1,10 @@
 name: release
 
-# 推 v<version> tag 触发：校验 tag 与 package.json 版本一致 → 跑测试 →
-# 用 npm 可信发布（GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成。
+# 推 v<version> tag 触发：校验 tag 与 package.json 版本一致、tag 提交在 main 上 →
+# 跑文档门禁 `npm test`（setup-links no-op + 类型检查 + node --test，build.test.ts
+# 负责构建 lib/）→ 显式 `npm run build` → 校验 npm pack 内容 → 用 npm 可信发布
+# （GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成 → 创建 GitHub Release
+# （已存在则跳过，可用 workflow_dispatch 传已有 tag 重跑）。
 # 首次发布由本机 Bun 手动完成（Bun 不支持 npm OIDC）。
 
 on:
@@ -26,6 +29,11 @@ concurrency:
 
 jobs:
   publish:
+    # `environment: npm-release` 只有在 GitHub 仓库 Settings → Environments 中配置了
+    # required reviewers（以及需要的分支/tag 规则）后才真正提供人工审批保护；未配置时
+    # 它等价于普通 job。审批发生在整个 job 开始之前，因此它保护的是“是否允许用该 tag
+    # 执行发布”，而不是发布步骤本身。
+    environment: npm-release
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -52,7 +60,13 @@ jobs:
           curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
             | tar -xz -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/jj" --version
+          expected="jj ${JJ_VERSION}"
+          actual="$("$HOME/.local/bin/jj" --version)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "::error::expected ${expected}, got ${actual}"
+            exit 1
+          fi
+          echo "${actual}"
 
       - name: Verify tag and package metadata
         run: |
@@ -63,25 +77,68 @@ jobs:
             if (p.private === true) throw new Error('package.json is private'); \
             if (!p.repository?.url) throw new Error('repository.url is required for trusted publishing')"
 
+      - name: Verify the tag commit is on main
+        # tag 必须落在 main 的祖先链上：workflow_dispatch 允许用旧 tag 重跑，但从未
+        # 合入 main 的提交通不过这一步（这是有意设计）。checkout 是 detached HEAD，
+        # 所以显式抓取 origin/main 再比较。
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::${RELEASE_TAG} points at a commit that is not on main"
+            exit 1
+          fi
+          echo "${RELEASE_TAG} is on main"
+
       - name: Install test-only dependencies
-        # 仓库本身保持零依赖、离线构建；CI 临时安装公开 peer 依赖和固定版本 tsc。
+        # 与 .github/workflows/ci.yml 保持同一套安装配方：仓库保持零依赖、不带
+        # lockfile，这里临时安装公开 peer 依赖和固定版本编译器。
         run: |
           npm install --no-package-lock --ignore-scripts --no-audit --no-fund
           npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
             typescript@6.0.3 @types/node@26.6.5
 
-      - name: Type-check implementation, tests, and scripts
-        run: npm run typecheck
+      - name: Run the documented test gate
+        # `npm test` = setup-links（依赖已安装则 no-op）+ tsc -p tsconfig.test.json +
+        # node --test；build.test.ts 会构建 lib/。原先分散的 typecheck/build/test
+        # 三步合并到这里，避免双构建，也避免“文档门禁没被 CI 验证”的漂移。
+        run: npm test
 
       - name: Build the published output
-        # lib/ is not committed: build it here so the published tarball and the
-        # bundle loadability tests both see the real artifacts.
+        # lib/ 不入库。npm publish 的 prepack 也会构建，但这里显式再构建一次，
+        # 让下面的 pack 校验与最终发布看到同一份确定的产物（tsc 构建 < 1s）。
         run: npm run build
 
-      - name: Run tests
-        run: npm run test:unit
+      - name: Validate the publishable tarball
+        # 用 --ignore-scripts 防止再次触发 prepack；缺失 lib/types 或 locale 的包
+        # 对该版本不可挽回，所以显式断言内容而不是只信 package.json.files。
+        run: |
+          npm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/pack.json`, 'utf8'))[0];
+          const packaged = new Set(manifest.files.map((entry) => entry.path));
+          const required = [
+            'lib/index.js',
+            'lib/types/index.d.ts',
+            'cordis.patch.yml',
+            'icon.svg',
+            'locale/en.json',
+            'locale/zh.json',
+            'tools/locale/en.json',
+            'tools/locale/zh.json',
+            'guard/locale/en.json',
+            'guard/locale/zh.json',
+          ];
+          const missing = required.filter((path) => !packaged.has(path));
+          if (missing.length > 0) {
+            console.error(`::error::publishable tarball is missing: ${missing.join(', ')}`);
+            process.exit(1);
+          }
+          console.log(`npm pack contains all ${required.length} required files (${manifest.entryCount} entries)`);
+          NODE
 
       - name: Publish to npm with OIDC
+        # 已发布则跳过（warning），使重跑可恢复；prerelease 走 next dist-tag。
         run: |
           version="${RELEASE_TAG#v}"
           if npm view "@aqian0/dsh-jj@${version}" version >/dev/null 2>&1; then
@@ -95,6 +152,7 @@ jobs:
           fi
 
       - name: Create GitHub release
+        # Release 已存在则跳过；prerelease tag 自动标记 --prerelease。
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
