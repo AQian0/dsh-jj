@@ -40,13 +40,15 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v6
+        # Actions are pinned to commit SHAs (verified against the `v6` tag via
+        # `git ls-remote`); keep the `# v6 (vX.Y.Z)` comment in sync when upgrading.
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 (v6.1.0)
         with:
           ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 (v6.5.0)
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -55,10 +57,20 @@ jobs:
       - name: Install Jujutsu (jj) for the test fixtures
         env:
           JJ_VERSION: "0.46.0"
+          # SHA-256 of jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz, as published by
+          # GitHub's release asset digest for
+          # https://github.com/jj-vcs/jj/releases/expanded_assets/v0.46.0 and
+          # re-verified locally by hashing the downloaded asset. jj 0.46.0 publishes
+          # no SHA256SUMS asset, so this GitHub-displayed digest is the authoritative
+          # checksum for the exact asset URL below. Bump it together with JJ_VERSION.
+          JJ_TARBALL_SHA256: "fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08"
         run: |
+          archive="${RUNNER_TEMP}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o "${archive}" \
+            "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${JJ_TARBALL_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           expected="jj ${JJ_VERSION}"
           actual="$("$HOME/.local/bin/jj" --version)"
@@ -92,10 +104,14 @@ jobs:
       - name: Install test-only dependencies
         # 与 .github/workflows/ci.yml 保持同一套安装配方：仓库保持零依赖、不带
         # lockfile，这里临时安装公开 peer 依赖和固定版本编译器。
+        # `@deepseek-ai/dsh-session-projection` 仅测试使用（test/guard-cwd.test.ts
+        # 用它构建真实的 WorkingDirectoryService 栈），不是本插件的 peer 依赖；显式按
+        # dsh-working-directory 声明的 exact peer 版本（0.2.1-rc.2）安装，避免上游
+        # 依赖树变化到发版才炸。
         run: |
           npm install --no-package-lock --ignore-scripts --no-audit --no-fund
           npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
-            typescript@6.0.3 @types/node@26.6.5
+            typescript@6.0.3 @types/node@26.6.5 @deepseek-ai/dsh-session-projection@0.2.1-rc.2
 
       - name: Run the documented test gate
         # `npm test` = setup-links（依赖已安装则 no-op）+ tsc -p tsconfig.test.json +
