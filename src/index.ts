@@ -229,7 +229,7 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   if (typeof effect === 'function') effect.call(ctx, () => () => promptContext(), 'dsh-jj: jj prompt context');
 }
 
-export { JjService, JjOperations, TPL_STATUS, TPL_LOG, TPL_DESCRIPTION, TPL_OP_LOG, TPL_BOOKMARK_LIST, TPL_WORKSPACE_LIST_TAB } from './service.ts';
+export { JjService, JjOperations, ROOT_COMMIT_ID, TPL_STATUS, TPL_LOG, TPL_DESCRIPTION, TPL_OP_LOG, TPL_BOOKMARK_LIST, TPL_WORKSPACE_LIST_TAB } from './service.ts';
 export { JjError, classifyJjFailure, createCommandRunGit, createCommandRunJj, createRunGit, createRunJj, jjErrorMessage, jjNonInteractiveEnv } from './jj-command.ts';
 export { jjRefusalText, jjToolDefinitions, registerJjTools } from './tools.ts';
 export { describeVcsKind } from './types.ts';
@@ -274,6 +274,7 @@ export {
 export { classifyGitInvocation, gitEquivalence, hasMutatingGitInvocation, GIT_SUBCOMMAND_RULES, JJ_EQUIVALENCE } from './git-command.ts';
 export {
   buildGitRefusalMessage,
+  buildJjWorkspaceForgetRefusal,
   buildWorktreeToolRefusalMessage,
   evaluateGitCommand,
   gitConfusionWhy,
@@ -341,5 +342,18 @@ export type {
 } from './multi-session.ts';
 export type { JjChange, JjOperation } from './types.ts';
 export type { JjErrorCode } from './jj-command.ts';
-export type { JjCommitResult, JjRebaseMode, JjStatusResult, JjUndoResult, JjWorkspaceAddResult } from './service.ts';
+export type {
+  JjCommitResult,
+  JjFetchResult,
+  JjHandoffBookmark,
+  JjHandoffConflict,
+  JjHandoffOptions,
+  JjHandoffResult,
+  JjHandoffTarget,
+  JjHandoffTargetSource,
+  JjRebaseMode,
+  JjStatusResult,
+  JjUndoResult,
+  JjWorkspaceAddResult,
+} from './service.ts';
 export type { JjToolService, JjToolsHost } from './tools.ts';

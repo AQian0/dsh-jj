@@ -14,7 +14,7 @@ import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj } from '../src/jj-command.ts';
 import { JjOperations, TPL_STATUS } from '../src/service.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
-import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, type Fixture } from './helpers/fixtures.ts';
+import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, realpath, type Fixture } from './helpers/fixtures.ts';
 import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools';
 
 /** Canonical JSON value a tool output renderer accepts. */
@@ -32,8 +32,11 @@ function recordingRunner(fx: Fixture) {
   return { runJj, calls, jjCalls: () => calls.filter((argv) => argv[0] === 'jj') };
 }
 
-function fakeExec(): ExecContext {
-  return { signal: new AbortController().signal } as unknown as ExecContext;
+function fakeExec(agent?: unknown): ExecContext {
+  return {
+    signal: new AbortController().signal,
+    ...(agent !== undefined ? { agent } : {}),
+  } as unknown as ExecContext;
 }
 
 /** A tool service backed by real operations plus real detection. */
@@ -45,11 +48,19 @@ function toolService(fx: Fixture, operations: JjOperations, _extraEnv: Readonly<
   };
 }
 
-function toolContext(fx: Fixture, service: JjToolService, config = resolveConfig({})) {
+function toolContext(
+  fx: Fixture,
+  service: JjToolService,
+  config = resolveConfig({}),
+  workingDirectory?: { ensure(agent: unknown, signal?: AbortSignal): Promise<string>; set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string> },
+) {
   return {
     service,
     config,
-    host: { tools: { register: () => () => {} } },
+    host: {
+      tools: { register: () => () => {} },
+      ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+    },
     // Every tool-calling test assigns `fx.cwd` first; the refusal test overrides this.
     cwdFor: async () => fx.cwd as string,
   };
@@ -199,7 +210,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
-test('all 15 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
+test('all 17 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-defs');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   fx.cwd = repo;
@@ -224,6 +235,8 @@ test('all 15 jj_* tools are defined with contract names, descriptions, and schem
     'jj_bookmark_list',
     'jj_bookmark_set',
     'jj_rebase',
+    'jj_handoff',
+    'jj_workspace_cleanup',
   ];
   assert.deepEqual([...byName.keys()], expected);
   const antiConfusion = new Set([
@@ -388,7 +401,7 @@ test('registerJjTools registers and disposes every tool', async (t) => {
     },
   };
   const dispose = registerJjTools(host, { service: toolService(fx, operations), config: {} });
-  assert.equal(registered.length, 15);
+  assert.equal(registered.length, 17);
   dispose();
   assert.equal(registered.length, 0);
   dispose();
@@ -608,4 +621,268 @@ test('TPL_STATUS is the contract template and parses into a change', async (t) =
   assert.match(result.stdout, /"change_id":/);
   assert.match(result.stdout, /"paths":/);
   assert.match(result.stdout, /\n$/, 'the template ends every record with a newline');
+});
+
+// ---------------------------------------------------------------------------
+// End-of-work hand-off (jj_handoff) and session-owned workspace cleanup.
+// ---------------------------------------------------------------------------
+
+/** Commit the current working copy, leaving a fresh empty @ on top. */
+async function commitWorkingCopy(fx: Fixture, cwd: string, message: string): Promise<void> {
+  await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'commit', '-m', message], cwd);
+}
+
+/** Write one small file with the same real shell the other tests use. */
+async function writeFixtureFile(fx: Fixture, cwd: string, name: string, content: string): Promise<void> {
+  const result = await fx.run(['bash', '-c', `printf '%s\\n' '${content}' > '${name}'`], { cwd, timeoutMs: 5_000 });
+  assert.equal(result.exitCode, 0, `could not write fixture file ${name}: ${result.stderr}`);
+}
+
+/**
+ * The multi-session shape: `main` is a base commit and a linked workspace works
+ * on a session stack starting from it. Operations and their recorded argv are
+ * returned so the tests can prove the hand-off is jj-only and uses source mode.
+ */
+async function makeHandoffFixture(t: Parameters<typeof makeFixture>[0], label: string) {
+  const fx = makeFixture(t, label);
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const ws = join(fx.root, 'ws-session');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', ws, '--name', 'session', '-r', 'main'], repo);
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  return { fx, repo, ws, operations, calls };
+}
+
+test('operation layer: jj_handoff resolves a local-only target, rebases the stack, and moves a bookmark', async (t) => {
+  const { fx, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-local');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await writeFixtureFile(fx, ws, 'two.txt', 'two');
+  await commitWorkingCopy(fx, ws, 'feat: two');
+  const sessionStack = (await operations.log(ws, 'main..@', 10)).filter((change) => change.description.length > 0);
+  const firstSessionChange = sessionStack.at(-1);
+  assert.ok(firstSessionChange !== undefined);
+
+  // Advance main while the session works (the shared trunk moves).
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], fx.path('repo'));
+  await writeFixtureFile(fx, fx.path('repo'), 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, fx.path('repo'), 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], fx.path('repo'));
+
+  const result = await operations.handoff(ws, { bookmark: 'feature' });
+  assert.equal(result.fetch.status, 'no-remote', 'a repository without remotes is not an error');
+  assert.equal(result.destination, 'main', 'trunk() resolves to root, so local main is the fallback');
+  assert.equal(result.destinationSource, 'main');
+  assert.equal(result.rebased, true);
+  assert.equal(result.onTarget, true);
+  assert.deepEqual([...result.conflicts], []);
+  assert.equal(result.firstChangeId, firstSessionChange.changeId);
+  assert.equal(result.bookmark?.name, 'feature');
+  assert.equal(result.bookmark?.moved, false, 'the bookmark did not exist yet: it is created, not moved');
+  const tip = result.stack.find((change) => change.description === 'feat: two');
+  assert.ok(tip !== undefined);
+  assert.equal(result.bookmark?.target, tip.commitId, 'the bookmark points at the rebased stack tip');
+
+  const ancestry = (await operations.log(ws, '::@-', 10)).filter((change) => change.description.length > 0);
+  assert.deepEqual(
+    ancestry.slice(0, 3).map((change) => change.description),
+    ['feat: two', 'feat: one', 'chore: advance'],
+    'the whole stack moved onto the advanced main',
+  );
+  assert.ok(calls.some((argv) => argv.includes('rebase') && argv.includes('-s')), 'a stack is moved with source mode');
+  for (const argv of calls) assert.equal(argv[0], 'jj', `the hand-off never spawns ${argv[0]}`);
+});
+
+test('operation layer: jj_handoff reports an already-integrated stack without rebasing', async (t) => {
+  const { fx, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-integrated');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+
+  const result = await operations.handoff(ws);
+  assert.equal(result.alreadyIntegrated, true);
+  assert.equal(result.rebased, false);
+  assert.equal(result.onTarget, true);
+  assert.equal(result.destinationSource, 'main');
+  assert.equal(result.conflicts.length, 0);
+  assert.ok(result.firstChangeId.length > 0);
+  assert.match(result.message, /already/);
+  assert.ok(!calls.some((argv) => argv.includes('rebase')), 'no rebase is spawned when the stack already sits on the target');
+});
+
+test('operation layer: jj_handoff asks for a commit instead of folding uncommitted changes into the rebase', async (t) => {
+  const { fx, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-dirty');
+  await writeFixtureFile(fx, ws, 'dirty.txt', 'dirty');
+
+  const result = await operations.handoff(ws);
+  assert.equal(result.needsCommit, true);
+  assert.equal(result.rebased, false);
+  assert.match(result.message, /Commit them first with jj_commit/);
+  assert.equal(result.stack.length, 1, 'the working-copy change is reported back to the model');
+});
+
+test('operation layer: jj_handoff surfaces conflicts as data instead of stopping the session', async (t) => {
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-conflict');
+  await writeFixtureFile(fx, ws, 'f.txt', 'session edit');
+  await commitWorkingCopy(fx, ws, 'feat: session edit');
+  const sessionChange = (await operations.log(ws, 'main..@', 5)).find((change) => change.description === 'feat: session edit');
+  assert.ok(sessionChange !== undefined);
+
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: main edit'], repo);
+  await writeFixtureFile(fx, repo, 'f.txt', 'main edit');
+  await commitWorkingCopy(fx, repo, 'chore: main edit');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+
+  const result = await operations.handoff(ws, { bookmark: 'feature' });
+  assert.equal(result.rebased, true);
+  assert.equal(result.onTarget, true);
+  assert.ok(result.conflicts.length > 0, 'the conflict is reported as data for the model to resolve');
+  assert.ok(
+    result.conflicts.some((conflict) => conflict.changeId === sessionChange.changeId),
+    'the conflicted session change is named',
+  );
+  assert.equal(result.bookmark, undefined);
+  assert.match(result.bookmarkSkipped ?? '', /conflicts/);
+});
+
+test('handoff target resolution: explicit, automatic fallback, and the ask-the-user-only case', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-handoff-target');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  // No remote, no bookmark: only then is asking the user for a target legitimate.
+  await assert.rejects(
+    () => operations.resolveHandoffTarget(repo, { configured: 'trunk()' }),
+    /Ask the user which revision/,
+  );
+  // An explicit destination that does not resolve is an actionable error.
+  await assert.rejects(
+    () => operations.resolveHandoffTarget(repo, { destination: 'no-such-rev', configured: 'trunk()' }),
+    /does not resolve in this repository/,
+  );
+  // Local main is the automatic fallback once it exists; an explicit one wins.
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const automatic = await operations.resolveHandoffTarget(repo, { configured: 'trunk()' });
+  assert.equal(automatic.revset, 'main');
+  assert.equal(automatic.source, 'main');
+  const explicit = await operations.resolveHandoffTarget(repo, { destination: 'main', configured: 'trunk()' });
+  assert.equal(explicit.source, 'argument');
+});
+
+test('jj_rebase rejects the empty-root trunk() destination with an actionable message', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-rebase-trunk');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await assert.rejects(() => operations.rebase(repo, '@', 'trunk()'), /empty root commit/);
+  await assert.rejects(() => operations.rebase(repo, '@', 'trunk()'), /jj_handoff/);
+});
+
+test('jj_handoff tool: runs the whole hand-off and reports model next steps', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-tool-handoff');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  // The shared main advances while the session works, so the hand-off really rebases.
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const handoff = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get('jj_handoff')!;
+
+  fx.cwd = ws;
+  const value = (await handoff.execute({ bookmark: 'feature' }, fakeExec())) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(handoff.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  assert.equal(value['workspaceName'], 'session');
+  assert.equal(value['destinationSource'], 'main');
+  assert.equal(value['rebased'], true);
+  assert.match(String(value['nextSteps']), /Report the rebased change ids/);
+  assert.match(String(value['nextSteps']), /user action/, 'cleanup of a workspace not created through jj_workspace_add stays with the user');
+
+  // The default workspace requires the explicit stack bottom: never rebase foreign history.
+  fx.cwd = repo;
+  await assert.rejects(() => handoff.execute({}, fakeExec()), /needs `firstChange`/);
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'feat: own change'], repo);
+  await writeFixtureFile(fx, repo, 'own.txt', 'own');
+  await commitWorkingCopy(fx, repo, 'feat: own change');
+  const own = (await operations.log(repo, 'main..@', 5)).find((change) => change.description === 'feat: own change');
+  assert.ok(own !== undefined);
+  const defaultValue = (await handoff.execute({ firstChange: own.changeId }, fakeExec())) as Record<string, unknown>;
+  assert.equal(defaultValue['alreadyIntegrated'], true);
+  assert.equal(defaultValue['workspaceName'], 'default');
+});
+
+test('jj_workspace_cleanup tool: unregisters only a session-created workspace and returns to the default workspace', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const fx = makeFixture(t, 'dsh-jj-tool-cleanup');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const moved: string[] = [];
+  const workingDirectory = {
+    ensure: async () => (fx.cwd as string),
+    set: async (_agent: unknown, path: string) => {
+      moved.push(path);
+      return path;
+    },
+  };
+  const definitions = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}), workingDirectory)),
+  );
+  const agent = { id: 'cleanup-agent' };
+  const otherAgent = { id: 'other-cleanup-agent' };
+  const cleanup = definitions.get('jj_workspace_cleanup')!;
+  fx.cwd = repo;
+
+  // A workspace this session created is moved out of and unregistered.
+  const wsPath = join(fx.root, 'ws-clean');
+  const created = (await definitions.get('jj_workspace_add')!.execute({ path: wsPath, name: 'clean-me' }, fakeExec(agent))) as {
+    readonly name: string;
+  };
+  assert.equal(created.name, 'clean-me');
+  fx.cwd = wsPath;
+  const value = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(cleanup.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  assert.equal(value['forgotten'], true);
+  assert.equal(value['currentWorkspace'], 'default');
+  assert.equal(value['currentWorkspaceRoot'], realpath(repo));
+  assert.deepEqual(moved, [realpath(repo)], 'the session is moved back to the default workspace before forgetting');
+  const remaining = await operations.workspaceList(repo);
+  assert.ok(!remaining.some((workspace) => workspace.name === 'clean-me'), 'the workspace is unregistered');
+
+  // The default workspace is never forgotten.
+  fx.cwd = repo;
+  await assert.rejects(() => cleanup.execute({}, fakeExec(agent)), /default workspace/);
+
+  // A workspace the user created (or another session created) is refused.
+  const foreign = join(fx.root, 'ws-foreign');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', foreign, '--name', 'foreign'], repo);
+  fx.cwd = foreign;
+  await assert.rejects(() => cleanup.execute({}, fakeExec(agent)), /not created through jj_workspace_add/);
+
+  // Uncommitted work blocks cleanup so nothing is silently unregistered.
+  fx.cwd = repo;
+  const dirtyPath = join(fx.root, 'ws-dirty');
+  await definitions.get('jj_workspace_add')!.execute({ path: dirtyPath, name: 'dirty-ws' }, fakeExec(agent));
+  fx.cwd = dirtyPath;
+  await writeFixtureFile(fx, dirtyPath, 'dirty.txt', 'dirty');
+  await assert.rejects(() => cleanup.execute({}, fakeExec(agent)), /uncommitted changes/);
+
+  // Ownership is per session: another agent cannot clean this session's workspace.
+  fx.cwd = repo;
+  const otherPath = join(fx.root, 'ws-othered');
+  await definitions.get('jj_workspace_add')!.execute({ path: otherPath, name: 'other-ws' }, fakeExec(agent));
+  fx.cwd = otherPath;
+  await assert.rejects(() => cleanup.execute({}, fakeExec(otherAgent)), /not created through jj_workspace_add/);
 });
