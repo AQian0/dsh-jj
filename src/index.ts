@@ -1,11 +1,13 @@
 /**
  * dsh-jj runtime entry (`dsh-jj` bundle row).
  *
- * The base layer owns repository detection, Git command classification, and the
- * git-confusion guard. The `ctx.jj` service (`name: 'jj'`) and the `jj_*` tools
- * land in the tools layer; this entry already assembles the guard so a profile
- * that installs only `dsh-jj` still gets protection, and it exports
- * {@link assembleBaseLayer} for tests that want the assembly without Cordis.
+ * The base layer owns repository detection and the `ctx.jj` service (`name: 'jj'`).
+ * The `jj_*` tools and the git-confusion guard are separate bundle rows
+ * (`dsh-jj/tools`, `dsh-jj/guard`) that consume the service. `apply` therefore does
+ * not install the guard: a profile that wants protection must load the
+ * `dsh-jj/guard` row (the shipped `cordis.patch.yml` always does).
+ * {@link assembleBaseLayer} is exported for tests/embedders that assemble the guard
+ * around a bare context without Cordis; production loads use the guard row.
  *
  * @module dsh-jj
  */
@@ -78,6 +80,9 @@ function warnMissingTools(ctx: Context): void {
 
 /**
  * Assemble the base layer (configuration validation plus the git-confusion guard).
+ *
+ * This is a test/embedding helper: the production profile installs the guard through
+ * the dedicated `dsh-jj/guard` row, and the runtime `apply` below does not call it.
  *
  * @param ctx - live Cordis context.
  * @param config - partial plugin configuration.
