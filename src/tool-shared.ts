@@ -13,13 +13,12 @@ import { join } from 'node:path';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { ResolvedJjConfig } from './config.ts';
 import type { JjHandoffResult, JjOperations } from './service.ts';
-import type { VcsDescriptor, VcsKind } from './types.ts';
+import type { VcsDescriptor } from './types.ts';
 
 /** Structural view of the service the tools need (a live `JjService` satisfies it). */
 export interface JjToolService {
   readonly operations: JjOperations;
   detect(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor>;
-  describe(target: VcsDescriptor | VcsKind): string;
 }
 
 /** Structural view of the host context used by the tools entry. */

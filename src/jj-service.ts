@@ -1,6 +1,5 @@
 /**
- * The Cordis `ctx.jj` service: TTL detection cache, disposal ladder, and the
- * process-lifetime version cache.
+ * The Cordis `ctx.jj` service: TTL detection cache and the disposal ladder.
  *
  * Extracted from `service.ts`; that barrel re-exports this module, and this file
  * imports `JjOperations` back from it. The intentional ESM cycle is safe: the
@@ -77,7 +76,6 @@ export class JjService extends Service {
   private readonly cache = new Map<string, { descriptor: VcsDescriptor; probedAt: number }>();
   /** In-flight detection per cache key; concurrent detect/warm calls share one probe. */
   private readonly inflight = new Map<string, Promise<VcsDescriptor>>();
-  private versionCache: { jj: string | undefined; git: string | undefined } | undefined;
 
   constructor(ctx: Context, config: JjPluginConfig = {}) {
     super(ctx, 'jj');
@@ -181,22 +179,6 @@ export class JjService extends Service {
     }
     const descriptor = target;
     return `${descriptor.kind} workspace "${descriptor.workspaceName ?? 'unknown'}" at ${descriptor.root} (${descriptor.jjVersion ?? 'jj version unknown'})`;
-  }
-
-  /**
-   * Process-lifetime version cache.
-   *
-   * Only a *successful* jj probe is cached: caching `undefined` would freeze a
-   * transient failure (or a probe that ran before jj was installed) for the whole
-   * process lifetime.
-   */
-  async version(cwd: string, signal?: AbortSignal): Promise<{ jj: string | undefined; git: string | undefined }> {
-    if (this.versionCache !== undefined) return this.versionCache;
-    const probe = await this.operations.version(cwd, signal);
-    const descriptor = this.peek(cwd);
-    const resolved = { jj: probe.jj ?? descriptor?.jjVersion, git: descriptor?.gitVersion };
-    if (resolved.jj !== undefined) this.versionCache = resolved;
-    return resolved;
   }
 
   private cacheKey(cwd: string): string {

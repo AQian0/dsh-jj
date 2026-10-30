@@ -79,7 +79,7 @@ export interface JjChangeRecord extends JjChange {
 }
 
 /** Detail a template parser attaches to a parse failure; `JjOperations` rethrows it as a `JjError`. */
-export interface TemplateParseFailure {
+interface TemplateParseFailure {
   readonly argv: readonly string[];
   readonly stderr: string;
   readonly stdout: string;

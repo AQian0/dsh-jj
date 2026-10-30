@@ -236,7 +236,7 @@ export class JjOperations {
   }
 
   /** Base jj options shared by every call. */
-  private options(cwd: string, argv: readonly string[], signal?: AbortSignal, env?: Readonly<Record<string, string>>) {
+  private options(cwd: string, argv: readonly string[], signal?: AbortSignal) {
     return {
       cwd,
       argv,
@@ -245,24 +245,11 @@ export class JjOperations {
       maxOutputBytes: this.config.maxOutputBytes,
       jjCommand: this.config.jjCommand,
       ...(signal !== undefined ? { signal } : {}),
-      ...(env !== undefined ? { env } : {}),
     };
   }
 
   private async run(cwd: string, argv: readonly string[], signal?: AbortSignal): Promise<JjRunResult> {
     return await runJjChecked(this.runJj, this.options(cwd, argv, signal), this.config);
-  }
-
-  /** `jj --version` / `git --version` (the only git call dsh-jj allows). */
-  async version(cwd: string, signal?: AbortSignal): Promise<{ jj: string | undefined; git: string | undefined }> {
-    let jj: string | undefined;
-    try {
-      const result = await this.runJj({ ...this.options(cwd, ['--version'], signal), jjCommand: this.config.jjCommand });
-      if (result.exitCode === 0) jj = result.stdout.trim();
-    } catch {
-      jj = undefined;
-    }
-    return { jj, git: undefined };
   }
 
   /** `jj log -r @ --no-graph -T <TPL_STATUS>` plus `jj status`. */

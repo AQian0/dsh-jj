@@ -44,7 +44,6 @@ function toolService(fx: Fixture, operations: JjOperations, _extraEnv: Readonly<
   return {
     operations,
     detect: (cwd, signal) => detectVcs(cwd, fx.run, signal),
-    describe: () => 'test descriptor',
   };
 }
 

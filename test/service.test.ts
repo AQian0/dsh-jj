@@ -97,30 +97,6 @@ function hangingSubprocess(): FakeSubprocess {
   };
 }
 
-/** Subprocess double whose first `jj --version` probe fails and later ones succeed. */
-function flakyVersionSubprocess(): FakeSubprocess {
-  const specs: SpawnSpec[] = [];
-  let jjVersionCalls = 0;
-  return {
-    specs,
-    spawn(spec) {
-      specs.push(spec);
-      const isJjVersion = spec.argv[0] === 'jj' && spec.argv.includes('--version');
-      if (isJjVersion) jjVersionCalls += 1;
-      const failFirst = isJjVersion && jjVersionCalls === 1;
-      return {
-        done: Promise.resolve(failFirst ? { exitCode: 1, signal: null } : { exitCode: 0, signal: null }),
-        collected: {
-          stdout: reader(failFirst ? '' : 'jj 0.46.0\n'),
-          stderr: reader(failFirst ? 'transient probe failure' : ''),
-        },
-        terminate: () => {},
-        waitForExit: async () => true,
-      };
-    },
-  };
-}
-
 /** Build a throwaway root context that provides the fake subprocess service. */
 function serviceContext(subprocess: FakeSubprocess): { ctx: Context; dispose(): Promise<void> } {
   const ctx = new Context();
@@ -355,22 +331,5 @@ test('JjService: the detect cache is pruned to a bounded size', async (t) => {
   assert.equal(evicted.length, 1, 'exactly the oldest entry beyond the cap is evicted');
   assert.equal(service.peek(dirs[0]), undefined, 'the oldest descriptor goes first');
   assert.notEqual(service.peek(dirs[cap]), undefined, 'the newest descriptor stays cached');
-  await dispose();
-});
-
-test('JjService: version caches only a successful probe', async (t) => {
-  const temp = makeTempRoot('dsh-jj-service-version');
-  t.after(() => temp.cleanup());
-  const subprocess = flakyVersionSubprocess();
-  const { ctx, dispose } = serviceContext(subprocess);
-  const service = new JjService(ctx, { timeoutMs: 5_000, graceMs: 50 });
-
-  assert.deepEqual(await service.version(temp.dir), { jj: undefined, git: undefined }, 'a failed probe is not cached');
-  const afterFailure = subprocess.specs.length;
-  assert.deepEqual(await service.version(temp.dir), { jj: 'jj 0.46.0', git: undefined }, 'the retry succeeds');
-  const afterSuccess = subprocess.specs.length;
-  assert.ok(afterSuccess > afterFailure, 'the failed probe was retried');
-  assert.deepEqual(await service.version(temp.dir), { jj: 'jj 0.46.0', git: undefined });
-  assert.equal(subprocess.specs.length, afterSuccess, 'the successful probe is cached for the process lifetime');
   await dispose();
 });
