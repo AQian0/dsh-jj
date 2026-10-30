@@ -90,7 +90,11 @@
     (预发布也参与),精确钉版会把本版适配版本之后的每个补丁版都判定为不兼容。`build.test.ts` 强制这一点。
 12. **多会话检测 fail-open**:多会话指引只比较 `ctx.agents.roots()` 里的顶层会话(子代理不算并行会话)与
     `workingDirectory` 给出的会话目录,再用同步的 `peek` / sniff 解析 jj workspace 身份,不新增 DSH peer 依赖;
-    agents / workingDirectory 缺失或抛错时按「没有其他会话」处理(`auto` 不注入),不得阻断 prompt 组装。
+    **存活不等于并发**:宿主在回合结束后仍保留 Agent,所以对端只有在 `sessionProjections.stateOf(session,
+    'turnBoundary').openTurnStartSeq !== null`(正在执行回合)时才可能算并行;已知空闲(`active: false`)的对端
+    必须被 `parallelPeerCwds` 过滤掉,否则单会话也会被误判而新建 jj workspace。活动状态服务 / 投影缺失或抛错时
+    该对端按「可能存在并行」的保守行为处理(fail-open),agents / workingDirectory 缺失或抛错时按「没有其他会话」
+    处理(`auto` 不注入),任何一条路径都不得阻断 prompt 组装。
 
 ## 代码约定
 
@@ -128,7 +132,7 @@
 
 **修改多会话并行 / 收尾 rebase 指引**
 
-1. `multi-session.ts`:检测(`ctx.agents.roots()` 顶层会话 + workingDirectory,纯模块、fail-open)与模型可见文案
+1. `multi-session.ts`:检测(`ctx.agents.roots()` 顶层会话 + `turnBoundary` 活动状态 + workingDirectory,纯模块、fail-open)与模型可见文案
    (共用工作副本先隔离到仓库外的独立 workspace、同仓库不同 workspace 不要改写别人的提交、收尾标准 rebase 清单);
    整栈 rebase 必须用 `jj_rebase` 的 `source` 模式(或 `jj rebase -s`):jj 0.46 的默认 `revisions`/`-r` 只移动指定提交,
    不会带走后代,`service.ts` 的 `rebase()` 因此带 `mode` 参数(默认仍是 `revisions`);
@@ -139,7 +143,8 @@
 2. `prompt-context.ts`:把这一段拼进 jj 会话上下文,受 `multiSessionGuidance` / `rebaseTarget` 控制;
 3. `config.ts` 五处同步:`multiSessionGuidance`(`auto` / `always` / `off`,默认 `auto`)与 `rebaseTarget`
    (默认 `trunk()`,不得为空);
-4. `index.ts`:在 `apply` 里把存活会话列表与 workingDirectory 接给指引;检测 fail-open,不可阻断启动;
+4. `index.ts`:在 `apply` 里把存活会话列表(含 `sessionProjections` 的 `turnBoundary` 活动状态)与 workingDirectory
+   接给指引;已知空闲的对端必须在 `parallelPeerCwds` 里被过滤,检测 fail-open,不可阻断启动;
 5. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案,同步 `test/prompt-context.test.ts` 与
    `test/build.test.ts` 的纯模块列表;
 6. 同步 README「使用 / 配置 / 已知限制」与 `locale/*.json` 的 meta.description;默认保持 `auto`

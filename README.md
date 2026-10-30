@@ -10,7 +10,7 @@
 - **提交描述风格**:默认继承仓库里最近 jj/Git 描述的写法;历史不足或混杂时先询问你选 Conventional Commits / Angular / Gitmoji / 纯文本或自定义风格,也支持在配置里固定风格。
 - **小步提交**:默认要求模型每完成一个内聚步骤就用 `jj commit` 收尾并开新 change,避免整份任务堆在 `@` 里难以审阅。
 - **模型上下文**:在 jj 仓库里自动向模型注入「优先用 jj」的上下文;非 jj 仓库不注入。
-- **多会话并行**:检测同一进程、同一 jj 仓库里的其他顶层会话;共用工作副本时引导先隔离到仓库外的独立 jj workspace,同仓库不同 workspace 时提醒不要改写别人的提交,并在任务收尾按标准 rebase 流程交付。
+- **多会话并行**:检测同一进程、同一 jj 仓库里**正在执行回合**的其他顶层会话(空闲/仅打开过的会话不算);共用工作副本时引导先隔离到仓库外的独立 jj workspace,同仓库不同 workspace 时提醒不要改写别人的提交,并在任务收尾按标准 rebase 流程交付。
 - **项目根发现**:让 `agent-instructions` 也能把 `.jj` 当作项目根标记(headless/CLI profile 生效)。
 - **不回退 git**:jj 不可用或目录不是 jj 仓库时明确报错,绝不静默改用 git。
 
@@ -88,31 +88,35 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 
 ### 多会话并行与 jj workspace
 
-默认部署里同一个 DSH 进程可能有多个顶层会话同时工作(Web GUI 的会话共用一个进程)。`jj-runtime` 会检测同一个
-jj 仓库里是否还有其他存活的顶层会话(只算顶层会话,子代理不算);检测到多会话时,注入的上下文会要求模型在
-动文件之前先隔离工作副本,并在任务收尾时做一次标准 rebase。
+默认部署里同一个 DSH 进程可能有多个顶层会话同时工作(Web GUI 的会话共用一个进程)。`jj-runtime` 只把
+**当前正在执行回合(open turn)** 的其它顶层会话算作并行:宿主在回合结束后仍保留 Agent(切换会话不会销毁它),
+所以「存活 / 打开过」不等于并发,单会话场景不会因为上午开过的会话而让模型去新建 jj workspace。检测到真正
+并发的会话时,注入的上下文才会要求模型在动文件之前先隔离工作副本,并在任务收尾时做一次标准 rebase。
 
 `multiSessionGuidance` 控制这段指引:
 
-- `auto`(默认):仅当同一进程里还有其它顶层会话在同一个 jj 仓库工作时注入;一旦检测到并行会话,收尾 rebase
-  清单会保留到本会话结束(即使另一个会话先退出),避免最后交付时缺少 rebase 提示。
-- `always`:始终注入——多个 `dsh` 进程并行操作同一仓库时用它。
+- `auto`(默认):仅当同一进程里还有其它顶层会话**正在执行回合**,且与本会话在同一个 jj 仓库工作时注入;
+  一旦检测到并行会话,收尾 rebase 清单会保留到本会话结束(即使另一个会话先结束/变回空闲),避免最后交付时
+  缺少 rebase 提示。
+- `always`:不依赖自动检测,始终注入(仅顶层会话生效)——多个 `dsh` 进程并行操作同一仓库时用它。
 - `off`:不注入多会话指引。
 
 自动检测只能看到同一 DSH 进程内的会话:Web GUI 的会话都在一个进程里,而多个 `dsh` CLI 进程互相不可见;
 跨进程并行请显式配置 `multiSessionGuidance: always`。检测是 fail-open 的:宿主没有提供 agent 注册表 /
-工作目录服务时按「没有其它会话」处理,不注入,也不会影响会话启动。
+工作目录服务时按「没有其它会话」处理,不注入,也不会影响会话启动;宿主没有活动状态投影
+(`sessionProjections` 的 `turnBoundary`)时无法判断对端是否空闲,则退回保守行为——存在即可能并行,
+宁可多提示一次也不漏掉真正并发的写操作。
 
 **共享工作副本 vs 同仓库其它 workspace**
 
-- 另一个存活会话与本会话**共用同一个 jj 工作副本**时:动文件前先隔离(只读检查不受影响)。用 `jj_workspace_add`
+- 另一个**正在执行回合**的会话与本会话**共用同一个 jj 工作副本**时:动文件前先隔离(只读检查不受影响)。用 `jj_workspace_add`
   在仓库外建一个 sibling workspace(绝对路径,例如 `<repo 的兄弟目录>/repo-session-a`,不要放进仓库根内),
   再用 `working_directory` 工具把本会话切过去;先 `jj_workspace_list` 看一下,不要复用别人的 workspace。共享副本
   不安全:每条 jj 命令(包括 `jj workspace add`)都会先快照整个目录,不带 `paths` 的 `jj commit` 可能把另一个会话
   未提交的文件一起提交。如果本会话已经在共享副本里改了东西,先只提交本会话自己的路径(`jj_commit` 传 `paths`),
   再用 `jj_workspace_add` 的 `parents: ["@"]`(`jj workspace add --revision @ <path>`)把这部分带入新 workspace。
   只有用户明确要求时才直接改共享副本,此时提交要传 `paths`。
-- 另一个会话在**同一个 jj 仓库的另一个 workspace**:工作副本彼此隔离,但 bookmark 与 operation log 共享。
+- 另一个**正在执行回合**的会话在**同一个 jj 仓库的另一个 workspace**:工作副本彼此隔离,但 bookmark 与 operation log 共享。
   只可以 rewrite 本会话自己的提交;不要去 rebase / undo / restore 另一个 workspace 的提交,也不要移动它的 bookmark。
 
 **任务收尾:标准 rebase**
@@ -175,7 +179,7 @@ jj 仓库里是否还有其他存活的顶层会话(只算顶层会话,子代理
 | `guardCreateWorktree` | `true` | 在 jj 仓库里拒绝 `create_worktree`,引导用 `jj workspace add` |
 | `readOnlyGitNotice` | `true` | colocated 仓库内只读 git 命令是否附「优先用 jj」提示 |
 | `preferJjContext` | `true` | 会话开始时注入「优先用 jj」的模型可见上下文;关闭会连提交描述与多会话指引一起关闭 |
-| `multiSessionGuidance` | `auto` | 多会话并行指引:`auto`(同进程的同一 jj 仓库检测到其他顶层会话时注入)/ `always` / `off` |
+| `multiSessionGuidance` | `auto` | 多会话并行指引:`auto`(同进程的同一 jj 仓库里有其他**正在执行回合**的顶层会话时注入)/ `always` / `off` |
 | `rebaseTarget` | `trunk()` | 任务收尾标准 rebase 的目标 revset,不能为空;`trunk()` 解析不到时回退到 `main` / `master` 或用户指定的 revision |
 | `commitGuidance` | `true` | 是否注入提交描述风格与拆分提交指引(需 `preferJjContext` 开启) |
 | `commitStyle` | `auto` | 描述风格:`auto`(继承历史)/ `conventional` / `angular` / `gitmoji` / `plain` / `custom` |
@@ -200,8 +204,10 @@ jj 仓库里是否还有其他存活的顶层会话(只算顶层会话,子代理
 - `agent-instructions` 的 `.jj` 根标记覆盖在 Web profile 不生效(Web 在 bundle 层禁用了顶层该行),headless/CLI profile 生效。
 - jj-native 工作区里项目级 skill 根仍按 `.git` 查找(上游硬编码),暂不可用。
 - 多会话自动检测只看同一 DSH 进程内的顶层会话(Web GUI 的会话都在一个进程;多个 `dsh` CLI 进程互相不可见),
-  跨进程并行请配置 `multiSessionGuidance: always`。检测是 fail-open 的:宿主没有 agents / workingDirectory 服务时
-  `auto` 不注入任何内容,也不会让会话启动失败。
+  且只把**正在执行回合**的会话算作并行:宿主任一回合结束后仍保留 Agent,打开过/空闲的会话不是并发工作,单会话
+  场景不会因此被推进新的 jj workspace。跨进程并行请配置 `multiSessionGuidance: always`。检测是 fail-open 的:
+  宿主没有 agents / workingDirectory 服务时 `auto` 不注入任何内容;没有 `sessionProjections` 活动状态时无法判断
+  对端是否空闲,退回「存在即可能并行」的保守行为,都不会让会话启动失败。
 - 子代理不注入多会话指引(包括 `always`):子代理与父会话共享工作副本,父会话继续运行时子代理同时写文件不受本功能
   覆盖;需要严格隔离时由父会话显式给子任务指定独立 workspace。
 
