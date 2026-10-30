@@ -831,7 +831,41 @@ export async function detectVcs(
 
   jjAvailable = true;
   verified = true;
-  workspaces = parseWorkspaceList(authority.result?.stdout ?? '');
+  const workspaceStdout = authority.result?.stdout ?? '';
+  workspaces = parseWorkspaceList(workspaceStdout);
+  // The workspace list is the CLI authority for workspace identity. A bounded or
+  // unparsable list must be diagnosed rather than silently falling back to the
+  // sniffed root with `confidence: 'high'` (audit M6).
+  let authorityConfidence: 'high' | 'medium' | 'low' = 'high';
+  if (authority.result?.truncated === true) {
+    notices.push(
+      notice(
+        'jj-metadata-incomplete',
+        'warning',
+        `\`${jjCommand} workspace list\` output was truncated by the output bound; the workspace list may be incomplete and the workspace identity falls back to the sniffed root.`,
+      ),
+    );
+    authorityConfidence = 'low';
+  } else if (workspaces.length === 0 && workspaceStdout.trim().length > 0) {
+    notices.push(
+      notice(
+        'jj-metadata-incomplete',
+        'warning',
+        `\`${jjCommand} workspace list\` output could not be parsed; the workspace identity falls back to the sniffed root.`,
+        outputTail(workspaceStdout),
+      ),
+    );
+    authorityConfidence = 'low';
+  } else if (workspaces.length === 0) {
+    notices.push(
+      notice(
+        'jj-metadata-incomplete',
+        'warning',
+        `\`${jjCommand} workspace list\` reported no workspaces; the workspace identity falls back to the sniffed root.`,
+      ),
+    );
+    authorityConfidence = 'medium';
+  }
   confirmedBy.push('jj-cli');
   if (gitRoot !== undefined) confirmedBy.push('git-cli');
 
@@ -913,7 +947,7 @@ export async function detectVcs(
     ...(gitVersion !== undefined ? { gitVersion } : {}),
     remotes,
     verified,
-    confidence: 'high',
+    confidence: authorityConfidence,
     confirmedBy,
     jjAvailable,
     gitAvailable,
