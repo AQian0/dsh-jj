@@ -9,7 +9,7 @@
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
 - 三个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
-  - `dsh-jj/tools`(`jj-tools`):15 个 `jj_*` 模型工具;
+  - `dsh-jj/tools`(`jj-tools`):17 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护。
 - 纯 TypeScript + ESM,**零运行时依赖**:DSH 包全部通过 `peerDependencies` 由宿主提供(版本见 `package.json`)。
 - 没有任何构建工具链依赖:构建只用 `tsc`,测试只用 `node --test`。
@@ -95,6 +95,18 @@
     必须被 `parallelPeerCwds` 过滤掉,否则单会话也会被误判而新建 jj workspace。活动状态服务 / 投影缺失或抛错时
     该对端按「可能存在并行」的保守行为处理(fail-open),agents / workingDirectory 缺失或抛错时按「没有其他会话」
     处理(`auto` 不注入),任何一条路径都不得阻断 prompt 组装。
+13. **收尾自动化(`jj_handoff` / `jj_workspace_cleanup`)**:
+    - `service.ts` 的 `handoff()` 是收尾的唯一入口:fetch(无远端不算错)→ 目标解析(显式 `destination` →
+      配置 `rebaseTarget` → `trunk()` → 本地 `main` → `master`,跳过 root commit;全失败才报「问用户」) →
+      `roots(::@ ~ ::target)` 探测整段栈 → `jj rebase -s` → stale 自动 `jj workspace update-stale` 重试一次 →
+      复核 base 并返回冲突数据。不要把这些步骤拆回 prompt;`needsCommit` 时先让模型 `jj_commit`,不要代为描述。
+    - 目标解析/失败信息必须自带下一步(本地 bookmark 列表、`firstChange` 候选),不要返回裸 jj revset 错误。
+    - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(按 `exec.agent` 记在
+      `WeakMap`)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的 workspace 才能注销;注销前必须先
+      `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。这是对旧「清理只能交给用户」规则的
+      **唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝(`buildJjWorkspaceForgetRefusal`)。
+    - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端)、`test/multi-session.test.ts`
+      (收尾清单文案)、`test/guard.test.ts`(forget 拒绝文案)与 README「任务收尾」。
 
 ## 代码约定
 
@@ -133,21 +145,25 @@
 **修改多会话并行 / 收尾 rebase 指引**
 
 1. `multi-session.ts`:检测(`ctx.agents.roots()` 顶层会话 + `turnBoundary` 活动状态 + workingDirectory,纯模块、fail-open)与模型可见文案
-   (共用工作副本先隔离到仓库外的独立 workspace、同仓库不同 workspace 不要改写别人的提交、收尾标准 rebase 清单);
-   整栈 rebase 必须用 `jj_rebase` 的 `source` 模式(或 `jj rebase -s`):jj 0.46 的默认 `revisions`/`-r` 只移动指定提交,
-   不会带走后代,`service.ts` 的 `rebase()` 因此带 `mode` 参数(默认仍是 `revisions`);
-   目标要带 preflight(`trunk()` 在没有远端时解析为 root,且本地 `main` 领先远端时不能 rebase 到 `trunk()`);
-   **指引绝不能要求模型执行 `jj workspace forget`**:forget 当前 workspace 会成功但该目录不再有 working copy,
-   forget 别的 workspace 被 guard hard-deny,清理只能交给用户(报告 `jj workspace list` 的名字/路径);
+   (共用工作副本先隔离到仓库外的独立 workspace、同仓库不同 workspace 不要改写别人的提交、收尾清单);
+   收尾清单现在要求模型**调用一次 `jj_handoff`**,而不是手工串 `jj git fetch` / 选目标 / `jj_rebase` / 复核;
+   目标解析、source 模式整栈 rebase、stale 恢复、冲突上报都在 `service.ts` 的 `handoff()` 里实现
+   (jj 0.46 的默认 `revisions`/`-r` 只移动指定提交,不会带走后代,所以整栈必须 `-s`);
+   **shell 里的 `jj workspace forget` 仍不可要求模型执行**:只有 `jj_workspace_cleanup` 工具可以注销
+   本会话通过 `jj_workspace_add` 创建的临时 workspace,其它情况清理交给用户(报告 `jj workspace list` 的名字/路径);
    并行会话一旦被检测到,收尾清单要在同一会话后续轮次继续注入(`parallelSeen` latch),子代理不注入;
 2. `prompt-context.ts`:把这一段拼进 jj 会话上下文,受 `multiSessionGuidance` / `rebaseTarget` 控制;
 3. `config.ts` 五处同步:`multiSessionGuidance`(`auto` / `always` / `off`,默认 `auto`)与 `rebaseTarget`
    (默认 `trunk()`,不得为空);
 4. `index.ts`:在 `apply` 里把存活会话列表(含 `sessionProjections` 的 `turnBoundary` 活动状态)与 workingDirectory
    接给指引;已知空闲的对端必须在 `parallelPeerCwds` 里被过滤,检测 fail-open,不可阻断启动;
-5. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案,同步 `test/prompt-context.test.ts` 与
+5. `service.ts` / `tools.ts`:收尾自动化(`handoff()`、`jj_handoff`、`jj_workspace_cleanup`)与
+   guard 的 `jj workspace forget <other>` 拒绝文案(`buildJjWorkspaceForgetRefusal`)要保持一致;
+6. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案,`test/service-tools.test.ts` 覆盖 handoff / cleanup
+   端到端(含 no-remote、already-integrated、needsCommit、conflicts、bookmark、默认 workspace 的 `firstChange`
+   约束、cleanup 所有权与回退),同步 `test/prompt-context.test.ts`、`test/guard.test.ts` 与
    `test/build.test.ts` 的纯模块列表;
-6. 同步 README「使用 / 配置 / 已知限制」与 `locale/*.json` 的 meta.description;默认保持 `auto`
+7. 同步 README「使用 / 配置 / 工具一览 / 已知限制」与 `locale/*.json` 的 meta.description;默认保持 `auto`
    (跨进程需用户显式配置 `always`),不要让多会话检测变成隐式依赖。
 
 **修改检测**:sniff 与 CLI 权威两条路径都要覆盖;夹具需包含 colocated / jj-native / 损坏元数据 /

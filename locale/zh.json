@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Jujutsu (jj) 支持",
-    "description": "为 DeepSeek Harness 提供一等 Jujutsu (jj) 支持：仓库判别、防 git 混淆 guard、提交描述风格指引、并行会话的 jj workspace 隔离与收尾标准 rebase 指引，以及 jj 原生工具。"
+    "description": "为 DeepSeek Harness 提供一等 Jujutsu (jj) 支持：仓库判别、防 git 混淆 guard、提交描述风格指引、并行会话的 jj workspace 隔离、一次完成收尾 rebase 的 handoff 工具，以及 jj 原生工具。"
   }
 }
