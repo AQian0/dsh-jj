@@ -153,13 +153,13 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   assert.match(text, /git worktree/, 'the guard-equivalent git worktree pitfall is named');
   assert.match(text, /standard rebase hand-off/);
   assert.match(text, /trunk\(\)/, 'the default rebase target is trunk()');
-  assert.match(text, /jj rebase -s <first change> -d 'trunk\(\)'/);
-  assert.match(text, /mode = source/, 'a stack rebase must use source mode, not the default revisions mode');
-  assert.match(text, /workspace add --revision @/, 'migrating mid-task carries the session change into the new workspace');
-  assert.match(text, /No git remotes to fetch from/, 'a repo without remotes is handled');
-  assert.match(text, /jj workspace update-stale/, 'a stale working copy has a recovery step');
-  assert.match(text, /Do not run `jj workspace forget` yourself/, 'cleanup is left to the user (self-forget destroys the working copy)');
-  assert.match(text, /never move another session's bookmark/);
+  assert.match(text, /jj_handoff/, 'the model is told to use the one-shot hand-off tool');
+  assert.match(text, /source mode/, 'the hand-off moves the whole stack with source mode internally');
+  assert.match(text, /repository without remotes is fine/, 'a repo without remotes is handled inside the tool');
+  assert.match(text, /resolves the integration target itself/, 'the model must not ask the user to pick the target');
+  assert.match(text, /resolve them yourself/, 'conflicts are resolved by the model, not handed back');
+  assert.match(text, /jj_workspace_cleanup/, 'a session-created workspace is cleaned up by the plugin');
+  assert.match(text, /do not run jj workspace forget yourself/i, 'raw workspace forget stays denied');
 });
 
 test('sibling workspaces are described as isolated copies with a shared repository', () => {
@@ -170,7 +170,7 @@ test('sibling workspaces are described as isolated copies with a shared reposito
   assert.match(text, /another DSH session is running in a separate workspace of this Jujutsu repository/);
   assert.match(text, /working copies are isolated while bookmarks and the operation log are shared/);
   assert.match(text, /jj undo/);
-  assert.ok(!text.includes('jj_workspace_add'), 'no need to create a workspace when the peer is already isolated');
+  assert.ok(!text.includes('isolate this session in its own jj workspace'), 'no need to create a workspace when the peer is already isolated');
   assert.match(text, /standard rebase hand-off/, 'the finish checklist still applies');
 });
 
@@ -183,7 +183,7 @@ test("'always' mode covers separate processes where detection cannot see peers",
   const text = multiSessionPromptText({ mode: 'always' });
   assert.match(text, /separate dsh processes/);
   assert.match(text, /standard rebase hand-off/);
-  assert.match(text, /working copy is stale/, 'the generic variant still explains stale recovery');
+  assert.match(text, /jj_handoff/, 'the generic variant points at the one-shot hand-off tool');
 });
 
 test('a configured rebase target replaces the default in the checklist', () => {
@@ -191,10 +191,9 @@ test('a configured rebase target replaces the default in the checklist', () => {
     mode: 'always',
     rebaseTarget: 'main',
   });
-  assert.match(text, /destination = main/);
-  assert.match(text, /jj rebase -s <first change> -d 'main'/);
-  assert.ok(!text.includes(`destination = ${DEFAULT_REBASE_TARGET}`), 'the configured target replaces the default destination');
-  assert.ok(!text.includes(`-d '${DEFAULT_REBASE_TARGET}'`));
+  assert.match(text, /default main/, 'the configured target replaces the default destination');
+  assert.ok(!text.includes(`default ${DEFAULT_REBASE_TARGET}`), 'the configured target replaces the default destination');
+  assert.match(text, /jj_handoff/, 'the configured target feeds the hand-off tool');
 });
 
 test('the shared-working-copy warning wins over the sibling-workspace wording', () => {

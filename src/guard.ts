@@ -277,6 +277,37 @@ export function buildJjHardDenyRefusal(invocation: JjInvocation, _descriptor: Gu
   ].join('\n');
 }
 
+/**
+ * Denial text for `jj workspace forget <other>`: unregistering someone else's
+ * working copy can break a live session that is editing in it.
+ *
+ * Unlike the other repository-wide refusals, this one has a safe plugin path: a
+ * temporary workspace this session created itself may be unregistered by
+ * `jj_workspace_cleanup` after the hand-off (ownership is tracked by the tools
+ * layer). Everything else stays a user action, so the model gets the exact
+ * command to report instead of retrying.
+ *
+ * @param invocation - the classified `workspace forget` invocation.
+ * @param descriptor - descriptor of the effective (current) directory.
+ * @param cwd - the directory the command runs in.
+ * @returns the refusal text.
+ */
+export function buildJjWorkspaceForgetRefusal(
+  invocation: JjInvocation,
+  descriptor: GuardDescriptorLike,
+  cwd: string,
+): string {
+  const target = invocation.targetWorkspace ?? '<name>';
+  const current = descriptor.workspaceName ?? 'default';
+  return [
+    `Blocked: \`jj workspace forget ${target}\` names a workspace other than this session's own workspace ("${current}"), so unregistering it could break a working copy another session or the user is using (${cwd} -> ${descriptor.root}).`,
+    '',
+    'Safer alternatives:',
+    `  - If this session created "${target}" with jj_workspace_add: hand the work off first (jj_handoff), then call the jj_workspace_cleanup tool; it moves the session back to the default workspace and unregisters only session-owned workspaces.`,
+    `  - Otherwise leave the cleanup to the user: \`jj workspace list\` shows names and paths; report them (for example "from the default workspace run jj workspace forget ${target}, then delete the directory") and do not run jj workspace forget yourself.`,
+  ].join('\n');
+}
+
 /** One-time warning text for a repository-wide jj command (contract §8.3b, verbatim). */
 export function buildJjRepoWideWarning(invocation: JjInvocation, descriptor: GuardDescriptorLike, headOperationId?: string): string {
   const head =
@@ -566,7 +597,7 @@ export function installGitConfusionGuard(
 
       // `jj workspace forget <other>` affects someone else's workspace: always deny.
       if (invocation.subcommand === 'workspace forget' && invocation.targetWorkspace !== undefined && invocation.targetWorkspace !== descriptor.workspaceName) {
-        return buildJjRepoWideRefusal(invocation, descriptor, baseCwd);
+        return buildJjWorkspaceForgetRefusal(invocation, descriptor, baseCwd);
       }
       const mode = resolved.guardJjRepositoryWide;
       if (mode === 'off') continue;

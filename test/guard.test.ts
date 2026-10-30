@@ -336,7 +336,9 @@ test('T19e: `jj workspace forget <other>` is denied regardless of mode', async (
   install(harness, { defaultCwd: native });
   const reason = harness.runGuard(bash('jj workspace forget other', native));
   assert.ok(typeof reason === 'string', 'forgetting another workspace is denied even in warn mode');
-  assert.match(reason, /^Blocked: `jj workspace forget`/);
+  assert.match(reason, /^Blocked: `jj workspace forget other`/);
+  assert.match(reason, /jj_workspace_cleanup/, 'the refusal points at the safe session-owned cleanup path');
+  assert.match(reason, /leave the cleanup to the user/, 'non-owned workspaces stay a user action with the exact command');
 });
 
 test('T20 (base layer): the decision path is synchronous and spawns nothing', async (t) => {
