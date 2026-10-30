@@ -187,31 +187,28 @@ export function detectParallelSessions(
 /** One peer session's guidance: isolate before writing into the shared working copy. */
 function sharedWorkingCopyText(): string {
   return [
-    'Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not safe to share between concurrent sessions: every jj command (including `jj workspace add`) snapshots the whole directory, and a commit without paths can capture another session\'s uncommitted files.',
-    'Before writing files, isolate this session in its own jj workspace (read-only inspection is safe):',
-    "- Create it with jj_workspace_add (or `jj workspace add <path> --name <name>`): check jj_workspace_list first and never reuse another session's workspace; use an absolute path OUTSIDE the repository root (a sibling directory of the repository root is fine), a name unique to this session, and no parents so it starts from the current change's parents.",
-    '- Move this session into it with the working_directory tool (`cd` to the new path, when installed), then confirm with jj_status that the new workspace has its own working-copy change.',
-    '- If this session already made changes in the shared working copy, commit only the paths this session owns first (jj_commit with paths) and pass parents: ["@"] to jj_workspace_add (`jj workspace add --revision @ <path>`) so the new workspace carries them over.',
-    '- Only edit the shared working copy when the user explicitly wants the change there; then commit explicit paths with jj_commit and remember that the other session\'s files are snapshotted here too.',
-    '- Never use `git worktree` (jj cannot see that checkout), and never move, reuse or delete another session\'s workspace (`jj workspace forget` on another workspace is refused by the guard).',
+    'Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not parallel-safe: every jj command snapshots the whole directory, so an unpathed commit can capture another session\'s uncommitted files. Read-only inspection is safe; before writing files:',
+    "- Isolate into a new jj workspace with jj_workspace_add: absolute path outside the repository, unique name, never reuse another session's workspace; switch with the working_directory tool, then confirm with jj_status.",
+    '- If you already edited this working copy, jj_commit only your own paths first, then pass parents ["@"] to jj_workspace_add to carry them over.',
+    "- Never use `git worktree` (jj cannot see that checkout); never move, reuse or delete another session's workspace (shell `jj workspace forget` on another workspace is refused).",
+    '- Edit the shared copy only when the user explicitly wants it there; commit explicit paths.',
   ].join('\n');
 }
 
 /** One peer session's guidance: isolated working copies, shared repository state. */
 function siblingWorkspaceText(): string {
   return [
-    'Parallel sessions: another DSH session is running in a separate workspace of this Jujutsu repository right now. Your working copies are isolated while bookmarks and the operation log are shared:',
-    "- Rebase, describe, squash, edit and restore only this session's own changes; never rewrite another workspace's working-copy change or move its bookmark.",
-    '- Keep this session\'s edits inside its own workspace, and prefer workspace-local commands: `jj undo` and `jj op restore` rewrite repository-wide state (the guard warns about them).',
-    '- When the task is done, hand the change over with the standard rebase checklist below.',
+    'Parallel sessions: another DSH session is using a sibling workspace of this Jujutsu repository. Working copies are isolated; bookmarks and the operation log are shared:',
+    "- Rebase, describe, squash, edit and restore only this session's changes; never rewrite another workspace's change or move its bookmark.",
+    '- `jj undo` and `jj op restore` rewrite repository-wide state (the guard warns); prefer workspace-local commands.',
   ].join('\n');
 }
 
 /** Guidance for `always` mode (or when detection cannot run): several processes may share the project. */
 function genericParallelText(): string {
   return [
-    'Parallel sessions: several DSH sessions (or separate dsh processes) may run against this project at the same time. If another session shares this working copy (the user says so, or the project is being worked on in parallel), isolate this session in a dedicated jj workspace before writing files:',
-    "- jj_workspace_add with an absolute path OUTSIDE the repository root (`jj workspace add <path> --name <name>` when the jj_* tools are unavailable), then move this session there with the working_directory tool.",
+    'Parallel sessions: several DSH sessions (or separate dsh processes) may run against this project at the same time. If another session shares this working copy, isolate in a dedicated jj workspace before writing files:',
+    '- jj_workspace_add with an absolute path outside the repository (unique name; never reuse another workspace), then switch there with the working_directory tool.',
     '- Do not edit, commit, or rewrite files that belong to another session; never use `git worktree` (jj cannot see that checkout).',
   ].join('\n');
 }
@@ -220,12 +217,12 @@ function genericParallelText(): string {
 function finishChecklistText(target: string): string {
   return [
     "Finishing this workspace's work (standard rebase hand-off):",
-    '1. Commit the last coherent step with jj_commit so the change is durable, and keep the change ids this session created. Do not leave uncommitted edits.',
-    `2. Call jj_handoff once. It runs \`jj git fetch\` (a repository without remotes is fine), resolves the integration target itself (the configured rebaseTarget, default ${target}, then local main/master), detects this workspace's change stack, rebases the whole stack with source mode, verifies the base, reports conflicts, and moves a bookmark this session owns when you pass bookmark: <name>. In the default workspace pass firstChange: <the bottom-most change id this session created> so it never rebases history it does not own; inside a dedicated session workspace omit it. If the stack's bottom is an earlier parallel session's committed change, keep the whole chain together (jj rewrites the descendants safely) and do not split the stack or ask the user about it. Do not ask the user to choose the target, run fetch/rebase, or verify: jj_handoff already does that, including stale-working-copy recovery.`,
-    '3. If jj_handoff reports conflicts, resolve them yourself: edit the files to their final content (remove the `<<<<<<<` / `%%%%%%%` / `>>>>>>>` marker blocks) and run jj_status so jj snapshots the resolution; for a conflict inside a middle commit, `jj edit <change>`, fix it, then `jj new <top change>` to return. Then call jj_handoff again to confirm no conflicts remain. Report only a conflict you genuinely cannot resolve safely, including the change ids.',
-    "4. The only legitimate question for the user is an integration target when jj_handoff reports that none exists (no trunk()/main/master and no destination was given). Never ask the user to run fetch, rebase, verification or bookmark moves — that is this session's job.",
-    '5. After a verified hand-off: if this session created its workspace with jj_workspace_add, call jj_workspace_cleanup to return to the default workspace and unregister the temporary workspace. If cleanup is refused (the workspace was not session-created), report its name/path and the exact `jj workspace forget` command to the user; do not run jj workspace forget yourself.',
-    '6. Report the rebased change ids, the resolved destination (including whether it came from an automatic fallback), any bookmark move, and the workspace cleanup outcome to the user.',
+    '1. jj_commit the last coherent step; keep the change ids you created.',
+    `2. Call jj_handoff once instead of manual fetch/rebase/verify: it fetches (a repository without remotes is fine), picks the integration target itself (configured rebaseTarget, default ${target}, then local main/master), rebases the whole stack with source mode, verifies the base, reports conflicts and moves a bookmark you pass. In the default workspace pass firstChange: <bottom-most change id you created>; in your own workspace omit it. If the stack bottoms on an earlier session's commit, keep the chain together.`,
+    "3. Resolve conflicts yourself: edit files to their final content, remove the marker blocks, jj_status to snapshot; for a conflict in a middle commit `jj edit <change>`, fix it, then `jj new <top change>`; call jj_handoff again. Report only a conflict you cannot resolve safely.",
+    '4. Only ask the user for an integration target when jj_handoff reports none exists; never ask them to fetch, rebase, verify or move bookmarks.',
+    '5. If you created this workspace with jj_workspace_add, call jj_workspace_cleanup; if refused (not session-created), report its name/path: the user runs `jj workspace forget <name>`, do not run it yourself.',
+    '6. Report the rebased change ids, the resolved destination, any bookmark move and the cleanup outcome.',
   ].join('\n');
 }
 
