@@ -14,7 +14,7 @@ import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj } from '../src/jj-command.ts';
 import { JjOperations, TPL_STATUS } from '../src/service.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
-import { assertToolchain, initGit, initJjColocated, initJjNative, makeFixture, mustRun, realpath, type Fixture } from './helpers/fixtures.ts';
+import { assertToolchain, initGit, initJjColocated, initJjNative, initJjSha256, makeFixture, mustRun, realpath, type Fixture } from './helpers/fixtures.ts';
 import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools';
 
 /** Canonical JSON value a tool output renderer accepts. */
@@ -597,10 +597,24 @@ test('jj_commit_style inherits Conventional history, asks when undecidable, and 
   for (const argv of calls) assert.equal(argv[0], 'jj', `unexpected non-jj program: ${argv.join(' ')}`);
 });
 
-test('descriptionSamples keeps complete records when the bounded output is truncated', async () => {
-  // A large full-description sample can trip maxOutputBytes; the partial tail must
-  // be dropped instead of failing the whole style probe.
-  const operations = new JjOperations({
+test('descriptionSamples tolerates a partial JSON record on either side of a truncated stream', async () => {
+  // A large full-description sample can trip maxOutputBytes. The DSH runner keeps the
+  // TAIL of a truncated stream, so the partial record is the FIRST line and complete
+  // records follow it; the style probe must keep them instead of failing.
+  const tailKept = new JjOperations({
+    runJj: async () => ({
+      exitCode: 0,
+      signal: null,
+      stdout: 'tail of a long first description"\n"feat: second description"\n',
+      stderr: '',
+      truncated: true,
+      killedByTimeout: false,
+    }),
+  });
+  assert.deepEqual([...(await tailKept.descriptionSamples('/anywhere', '::@', 5))], ['feat: second description']);
+
+  // Other runners may keep the head of the stream: tolerate a partial LAST line too.
+  const headKept = new JjOperations({
     runJj: async () => ({
       exitCode: 0,
       signal: null,
@@ -610,8 +624,13 @@ test('descriptionSamples keeps complete records when the bounded output is trunc
       killedByTimeout: false,
     }),
   });
-  const samples = await operations.descriptionSamples('/anywhere', '::@', 5);
-  assert.deepEqual([...samples], ['feat: first description']);
+  assert.deepEqual([...(await headKept.descriptionSamples('/anywhere', '::@', 5))], ['feat: first description']);
+
+  // Without truncation an unparseable stream stays a hard error (no silent loss).
+  const invalid = new JjOperations({
+    runJj: async () => ({ exitCode: 0, signal: null, stdout: 'not json\n', stderr: '', truncated: false, killedByTimeout: false }),
+  });
+  await assert.rejects(() => invalid.descriptionSamples('/anywhere', '::@', 5), /unparseable output/);
 });
 
 test('TPL_STATUS is the contract template and parses into a change', async (t) => {
@@ -783,6 +802,57 @@ test('jj_rebase rejects the empty-root trunk() destination with an actionable me
   const operations = new JjOperations({ runJj, config: {} });
   await assert.rejects(() => operations.rebase(repo, '@', 'trunk()'), /empty root commit/);
   await assert.rejects(() => operations.rebase(repo, '@', 'trunk()'), /jj_handoff/);
+});
+
+test('root commit detection works in a SHA-256 repository (64-zero root id)', async (t) => {
+  // SHA-256 Git repositories have a 64-zero root commit id, so a hard-coded 40-zero
+  // constant would treat `trunk()` as a real target and hand off onto the root.
+  const fx = makeFixture(t, 'dsh-jj-sha256');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjSha256(fx.run, fx.path('repo'));
+  if (repo === undefined) return t.skip('the local git/jj toolchain cannot create a SHA-256 repository');
+  const rootCommit = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'log', '-r', 'root()', '--no-graph', '-T', 'commit_id'], repo);
+  if (rootCommit.stdout.trim().length !== 64) return t.skip('the fixture was not created with SHA-256 object ids');
+
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'main', '-r', '@-'], repo);
+  // A feat commit on top of main, then advance main underneath it.
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'feat: one'], repo);
+  await writeFixtureFile(fx, repo, 'one.txt', 'one');
+  await commitWorkingCopy(fx, repo, 'feat: one');
+  const feat = (await operations.log(repo, 'main..@-', 5)).find((change) => change.description === 'feat: one');
+  assert.ok(feat !== undefined, 'the fixture has a feat commit above main');
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  // Return the working copy to the feat stack (an empty @ on top of it).
+  await mustRun(fx.run, ['jj', 'new', feat.changeId], repo);
+
+  // 1. Target resolution skips the 64-zero root and falls back to the local main.
+  const target = await operations.resolveHandoffTarget(repo, { configured: 'trunk()' });
+  assert.equal(target.revset, 'main');
+  assert.equal(target.source, 'main');
+
+  // 2. The jj_rebase trunk() preflight rejects the root instead of running the rebase.
+  await assert.rejects(() => operations.rebase(repo, '@', 'trunk()'), /empty root commit/);
+
+  // 3. The whole hand-off resolves main and rebases the stack onto it.
+  const result = await operations.handoff(repo, { firstChange: feat.changeId });
+  assert.equal(result.destinationSource, 'main');
+  assert.equal(result.destination, 'main');
+  assert.equal(result.rebased, true);
+  assert.equal(result.onTarget, true);
+  assert.deepEqual([...result.conflicts], []);
+  const ancestry = (await operations.log(repo, '::@-', 10)).filter((change) => change.description.length > 0);
+  assert.deepEqual(
+    ancestry.slice(0, 2).map((change) => change.description),
+    ['feat: one', 'chore: advance'],
+    'the stack moved onto the advanced main instead of the root commit',
+  );
 });
 
 test('jj_handoff tool: runs the whole hand-off and reports model next steps', async (t) => {
@@ -1021,4 +1091,49 @@ test('operation layer: jj_handoff reports disconnected stacks instead of rebasin
   assert.equal(result.rebased, false);
   assert.deepEqual([...result.ambiguousRoots].sort(), [left.changeId, right.changeId].sort());
   assert.match(result.message, /disconnected stacks/);
+});
+test('tools: a failed session-cwd resolution is fail-closed instead of guessing a repository', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-tools-cwd-fail');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const service = toolService(fx, operations);
+
+  const definitions: ToolDefinition[] = [];
+  const host = {
+    tools: {
+      register: (definition: ToolDefinition) => {
+        definitions.push(definition);
+        return () => {};
+      },
+    },
+    workingDirectory: {
+      ensure: async (): Promise<string> => {
+        throw new Error('session disappeared');
+      },
+    },
+  };
+  registerJjTools(host, { service, config: {} });
+  const status = definitions.find((definition) => definition.name === 'jj_status');
+  assert.ok(status !== undefined);
+  await assert.rejects(
+    () => status.execute({}, fakeExec({ id: 'agent-cwd' })),
+    /cannot resolve the session working directory/,
+    'a failed ensure must not fall back to process.cwd()',
+  );
+
+  const noWdDefinitions: ToolDefinition[] = [];
+  registerJjTools(
+    {
+      tools: {
+        register: (definition: ToolDefinition) => {
+          noWdDefinitions.push(definition);
+          return () => {};
+        },
+      },
+    },
+    { service, config: {} },
+  );
+  const status2 = noWdDefinitions.find((definition) => definition.name === 'jj_status');
+  assert.ok(status2 !== undefined);
+  await assert.rejects(() => status2.execute({}, fakeExec({ id: 'agent-no-wd' })), /no workingDirectory service/);
 });
