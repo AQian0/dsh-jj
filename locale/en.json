@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Jujutsu (jj) support",
-    "description": "First-class Jujutsu (jj) support for DeepSeek Harness: repository detection, a git-confusion guard, commit-description style guidance, parallel-session jj-workspace guidance with a standard rebase hand-off, and jj-native tools."
+    "description": "First-class Jujutsu (jj) support for DeepSeek Harness: repository detection, a git-confusion guard, commit-description style guidance, parallel-session jj-workspace guidance with a one-shot rebase hand-off tool, and jj-native tools."
   }
 }

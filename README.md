@@ -6,7 +6,7 @@
 
 - **仓库识别**:区分 `git` / `jj-colocated` / `jj-native` / 非仓库;jj 与 git 嵌套时给出明确归属,不会把 jj 工作区当成普通 git 仓库。
 - **防混淆 guard**:在 jj 仓库里执行 `git commit`、`git reset` 等会破坏 change graph 的命令时,默认放行并在结果里提示等价 jj 命令,也可配置为直接拒绝。
-- **jj 原生工具**:15 个 `jj_*` 工具(status / log / diff / new / commit / describe / commit style / squash / undo / op log / workspace / bookmark / rebase)。
+- **jj 原生工具**:17 个 `jj_*` 工具(status / log / diff / new / commit / describe / commit style / squash / undo / op log / workspace / bookmark / rebase / handoff / workspace cleanup)。
 - **提交描述风格**:默认继承仓库里最近 jj/Git 描述的写法;历史不足或混杂时先询问你选 Conventional Commits / Angular / Gitmoji / 纯文本或自定义风格,也支持在配置里固定风格。
 - **小步提交**:默认要求模型每完成一个内聚步骤就用 `jj commit` 收尾并开新 change,避免整份任务堆在 `@` 里难以审阅。
 - **模型上下文**:在 jj 仓库里自动向模型注入「优先用 jj」的上下文;非 jj 仓库不注入。
@@ -119,28 +119,34 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 - 另一个**正在执行回合**的会话在**同一个 jj 仓库的另一个 workspace**:工作副本彼此隔离,但 bookmark 与 operation log 共享。
   只可以 rewrite 本会话自己的提交;不要去 rebase / undo / restore 另一个 workspace 的提交,也不要移动它的 bookmark。
 
-**任务收尾:标准 rebase**
+**任务收尾:一次 `jj_handoff` 完成集成**
 
-多会话指引生效时,按下面的顺序结束任务:
+多会话指引生效时,收尾不再让模型手工串 fetch / rebase / 验证、失败就回来问用户,而是一次调用完成:
 
-1. 用 `jj_commit` 提交最后一个内聚步骤,让本会话的改动是一段连续的 change 栈。
-2. 选目标。先跑 `jj git fetch`(仓库没有远端时 jj 会以 1 退出并提示 "No git remotes to fetch from",忽略即可)。
-   再确认目标:`jj log -r '<target>'` 必须是一个真实提交(不是空的 root commit),且本会话提交栈的 base 已经在
-   它的祖先里 —— `jj log -r '(<first-change>-) & ~::<target>'` 必须无输出。任一检查失败(仓库没有远端 trunk,
-   或本地 `main` 领先于远端)时,改用本地 `main` / `master` bookmark 或用户在对话里指定的 revision。
-3. 一次 rebase 移动整段栈:`jj_rebase`(revision = 本会话创建的第一个 change,destination = 目标,
-   **mode = `source`**)或 `jj rebase -s <first-change> -d <target>`。栈 rebase 绝不能用默认的 `revisions`/`-r`:
-   它只移动指定提交,后代会被 re-parent 回旧父提交、留在原地。执行前确认这次移动的后代都属于本会话。
-   不要 cherry-pick,也不要用 git rebase/merge。
-4. 复核:`jj_status` 无冲突、`jj_log` 显示栈直接位于目标之上、`jj_diff` 只有预期文件。冲突时把文件编辑成最终内容
-   (删掉 `<<<<<<<` / `%%%%%%%` / `>>>>>>>` 标记块)再跑一次 `jj_status` 让 jj 完成快照与解决,`jj resolve --list`
-   可列出仍未解决的冲突;中间提交的冲突用 `jj edit <change>` 修完再回到顶层。若 jj 提示 working copy is stale
-   (另一个会话 rewrite 了共享祖先),运行 `jj workspace update-stale` 后重新复核 —— 不要用 `jj undo` / `jj op restore`。
-   解决不了就带着 change id 停下来向用户报告。
-5. 只有 bookmark 属于本会话时才用 `jj_bookmark_set` 移动它,然后向用户报告 rebase 后的 change id 与目标。
-6. 不要自己执行 `jj workspace forget` —— forget 当前 workspace 会成功,但该目录不再是 jj 的 working copy(文件保留,
-   之后的 jj 命令会报没有 working copy)。临时 workspace 交给用户:报告 `jj_workspace_list` 里的名字/路径,
-   由用户在默认 workspace 里 forget,再删除目录。
+1. 用 `jj_commit` 提交最后一个内聚步骤,让本会话的改动是一段连续的 change 栈(不要留下未提交改动)。
+2. 调用 `jj_handoff`(默认 workspace 里要传 `firstChange` = 本会话创建的最底层 change,避免 rebase 别人的历史;
+   独立 workspace 里自动探测)。它一次完成:
+   - `jj git fetch`;仓库没有远端不算错误(`no-remote`),继续用本地目标;
+   - 自动解析集成目标:显式 `destination` → 配置的 `rebaseTarget`(默认 `trunk()`)→ `trunk()` → 本地 `main` → `master`;
+     `trunk()` 在本地仓库解析为 root 时自动跳过,不需要用户选 revision;
+   - 用 `roots(::@ ~ ::<target>)` 探测本 workspace 在目标之上的整段栈,`jj rebase -s <first> -d <target>` 一次性移动;
+   - working copy 过期(stale)时自动 `jj workspace update-stale` 并重试一次;
+   - 复核栈是否已落在目标上,并按需移动显式传入的 bookmark(只应传本会话自己的 bookmark);
+   - 把冲突作为结构化结果返回,而不是让模型停下来问用户。
+3. 若 `jj_handoff` 报告冲突:模型自己解决 —— 把文件编辑成最终内容(删掉 `<<<<<<<` / `%%%%%%%` / `>>>>>>>` 标记块)
+   后跑 `jj_status` 让 jj 完成快照;中间提交的冲突用 `jj edit <change>` 修完再 `jj new <top change>` 回到顶层;
+   再调用一次 `jj_handoff` 确认无冲突。只有确实无法安全解决的冲突才带着 change id 停下来报告。
+4. 只有当 `jj_handoff` 报告「没有可用集成目标」(没有 `trunk()` / `main` / `master`,也没有显式 destination)时,
+   才需要问用户要目标 revision —— 这是唯一需要用户决策的收尾场景。
+5. 清理:本会话通过 `jj_workspace_add` 创建的临时 workspace,收尾验证后调用 `jj_workspace_cleanup` —— 它先把会话切回
+   默认 workspace,再注销该临时 workspace(只允许注销本会话创建的 workspace;目录文件保留,不会丢提交)。
+   不是本会话创建的 workspace 会被拒绝,此时报告 `jj_workspace_list` 里的名字/路径和精确的 `jj workspace forget <name>`
+   命令给用户;不要自己用 shell 执行 `jj workspace forget`(guard 会拒绝)。
+6. 向用户报告 rebase 后的 change id、解析出的目标(以及是否来自自动回退)、bookmark 移动结果和 workspace 清理结果。
+
+> 之前的流程把 fetch / 目标选择 / 栈 rebase / 验证 / 清理拆成多步,任一步失败(常见:本地仓库 `trunk()` 是 root、
+> 没有远端、workspace 已被别的会话移动过)模型就会停下来让用户手动处理。`jj_handoff` 把这些判断和失败恢复内聚到插件里,
+> 模型只需要在冲突或确实没有目标时继续处理。
 
 ### 工具一览
 
@@ -159,6 +165,8 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 | `jj_workspace_add` / `jj_workspace_list` | 新建/列出 jj workspace |
 | `jj_bookmark_list` / `jj_bookmark_set` | 列出/设置 bookmark |
 | `jj_rebase` | rebase revision 到目标;`mode` 可选 `source`(连同后代,整栈 rebase 用它)/ `branch` / `revisions`(默认,只移动指定提交) |
+| `jj_handoff` | 收尾一次完成:fetch → 解析集成目标(`destination`/`rebaseTarget`/`trunk()`/本地 `main`·`master`)→ 探测并 source-mode rebase 整段栈 → stale 自动恢复 → 复核 → 按需移动 bookmark;冲突作为结构化结果返回 |
+| `jj_workspace_cleanup` | 注销本会话通过 `jj_workspace_add` 创建的临时 workspace:先把会话切回默认 workspace,再 `jj workspace forget`;非本会话创建的 workspace 一律拒绝(仍由用户清理) |
 
 非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj;不会回退到 git。
 
@@ -180,7 +188,7 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 | `readOnlyGitNotice` | `true` | colocated 仓库内只读 git 命令是否附「优先用 jj」提示 |
 | `preferJjContext` | `true` | 会话开始时注入「优先用 jj」的模型可见上下文;关闭会连提交描述与多会话指引一起关闭 |
 | `multiSessionGuidance` | `auto` | 多会话并行指引:`auto`(同进程的同一 jj 仓库里有其他**正在执行回合**的顶层会话时注入)/ `always` / `off` |
-| `rebaseTarget` | `trunk()` | 任务收尾标准 rebase 的目标 revset,不能为空;`trunk()` 解析不到时回退到 `main` / `master` 或用户指定的 revision |
+| `rebaseTarget` | `trunk()` | 收尾集成的首选目标 revset,不能为空;`jj_handoff` 解析不到真实提交时自动回退到本地 `main` / `master`,都没有才让用户指定 |
 | `commitGuidance` | `true` | 是否注入提交描述风格与拆分提交指引(需 `preferJjContext` 开启) |
 | `commitStyle` | `auto` | 描述风格:`auto`(继承历史)/ `conventional` / `angular` / `gitmoji` / `plain` / `custom` |
 | `commitStyleCustom` | `''` | `commitStyle: custom` 时的风格规则(该模式下必填) |
@@ -210,6 +218,12 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
   对端是否空闲,退回「存在即可能并行」的保守行为,都不会让会话启动失败。
 - 子代理不注入多会话指引(包括 `always`):子代理与父会话共享工作副本,父会话继续运行时子代理同时写文件不受本功能
   覆盖;需要严格隔离时由父会话显式给子任务指定独立 workspace。
+- 临时 workspace 清理:只有本会话通过 `jj_workspace_add` 创建、且手写校验(无未提交改动、无未解决冲突)通过的
+  workspace 才能由 `jj_workspace_cleanup` 注销;通过 shell `jj workspace add` 创建的、用户创建的和其它会话的
+  workspace 都不会被插件注销(shell 里的 `jj workspace forget` 仍被 guard 拒绝),需要用户执行
+  `jj workspace forget <name>` 并删除目录。目录文件在任何情况下都不会被自动删除。
+- 集成交付不会自动 push:没有远端分支或凭据时,`jj_handoff` 只保证本地集成到目标;推送仍由用户执行
+  (`jj git push --bookmark <name>`),这是唯一有意保留给用户的操作。
 
 ## License
 
