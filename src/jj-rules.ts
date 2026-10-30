@@ -207,18 +207,24 @@ const JJ_SUBCOMMAND_VALUE_FLAGS = new Set([
 /** Revision-taking aliases whose value still names a revision (`-r @-`). */
 const JJ_REVISION_FLAGS = new Set(['-r', '--revisions', '--revision', '-o']);
 
+/** Flags whose value is the revision `jj restore` writes into (`--into`/`--to`/`-t`). */
+const JJ_INTO_FLAGS = new Set(['-t', '--into', '--to']);
+
 interface ScannedJjArgs {
   readonly flags: string[];
   readonly positionals: string[];
   /** Values of `-r/--revisions/-o` (revsets, not filesets). */
   readonly revisionTargets: string[];
+  /** Values of `-t/--into/--to` (the revision `jj restore` writes into). */
+  readonly intoTargets: string[];
 }
 
-/** Split jj subcommand arguments into flags, positionals, and revision targets. */
+/** Split jj subcommand arguments into flags, positionals, and revision/into targets. */
 function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
   const flags: string[] = [];
   const positionals: string[] = [];
   const revisionTargets: string[] = [];
+  const intoTargets: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] ?? '';
     if (token === '--') {
@@ -234,6 +240,7 @@ function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
       if (attachedShort !== undefined && JJ_SUBCOMMAND_VALUE_FLAGS.has(attachedShort)) {
         flags.push(attachedShort);
         if (JJ_REVISION_FLAGS.has(attachedShort)) revisionTargets.push(token.slice(2));
+        else if (JJ_INTO_FLAGS.has(attachedShort)) intoTargets.push(token.slice(2));
         continue;
       }
       flags.push(flag);
@@ -242,13 +249,16 @@ function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
         if (value !== undefined) {
           index += 1;
           if (JJ_REVISION_FLAGS.has(flag)) revisionTargets.push(value);
+          else if (JJ_INTO_FLAGS.has(flag)) intoTargets.push(value);
         }
+      } else if (eq >= 0 && JJ_INTO_FLAGS.has(flag)) {
+        intoTargets.push(token.slice(eq + 1));
       }
       continue;
     }
     positionals.push(token);
   }
-  return { flags, positionals, revisionTargets };
+  return { flags, positionals, revisionTargets, intoTargets };
 }
 
 /** jj global boolean flags. */
@@ -342,16 +352,23 @@ function classifyJjWords(words: readonly Token[], raw: string, parsed: boolean, 
   }
   const { subcommand, rest } = parsedSub;
 
-  const { flags: restFlags, positionals, revisionTargets } = scanJjArgs(rest);
+  const { flags: restFlags, positionals, revisionTargets, intoTargets } = scanJjArgs(rest);
   const allowCrossWorkspace = restFlags.includes('--allow-cross-workspace');
   const hasRevisionArgument = positionals.length >= 1 || revisionTargets.length >= 1;
   const abandonsWorkingCopy = positionals.includes('@') || revisionTargets.includes('@');
+  // `jj restore --into <revision other than @>` writes a revision outside the
+  // working copy (its descendants are rebased), so it is repository-wide rather
+  // than workspace-local. `--into @` keeps the default working-copy semantics.
+  const restoreIntoOther = subcommand === 'restore' ? intoTargets.find((target) => target.trim() !== '@') : undefined;
 
   let scope: JjScope;
   let reason: string;
   if (restFlags.includes('--help') || restFlags.includes('-h')) {
     scope = 'read-only';
     reason = `\`jj ${subcommand} --help\` only prints help`;
+  } else if (restoreIntoOther !== undefined) {
+    scope = 'repo-wide';
+    reason = `\`jj restore --into ${restoreIntoOther}\` rewrites a revision other than the working copy and rebases its descendants`;
   } else if (subcommand === 'restore' && positionals.length === 0) {
     scope = 'destructive';
     reason = '`jj restore` without a fileset silently discards the entire working-copy change';

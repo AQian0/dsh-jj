@@ -491,6 +491,29 @@ test('jj restore is destructive when no file set is given, in every spelling', a
   }
 });
 
+test('jj restore --into a revision other than @ is repository-wide', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  // Writing a revision outside the working copy rebases its descendants, so the
+  // guard reports these as repository-wide (warn class), never workspace-local.
+  const repoWide = [
+    'jj restore --into @-',
+    'jj restore --to other',
+    'jj restore -t other',
+    'jj restore --into=@-',
+    'jj restore -t@-',
+    'jj restore --into other file.txt',
+  ];
+  for (const command of repoWide) {
+    assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'repo-wide', command);
+  }
+  // `--into @` is the default working-copy target: keep the local semantics.
+  for (const command of ['jj restore --into @ file.txt', 'jj restore --to=@ file.txt', 'jj restore -t @ file.txt', 'jj restore file.txt']) {
+    assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'workspace-local', command);
+  }
+  // `--into @` without a fileset still discards the whole working-copy change.
+  assert.equal(classifyJjInvocation('jj restore --into @').invocations[0]?.scope, 'destructive');
+});
+
 test('bare `jj abandon` is destructive (defaults to @) but explicit other revsets stay repo-wide', async () => {
   const { classifyJjInvocation } = await import('../src/git-command.ts');
   for (const command of ['jj abandon', 'jj abandon @', 'jj abandon -r @', 'jj abandon other @']) {
