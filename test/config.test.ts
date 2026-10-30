@@ -7,7 +7,16 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Config, assertServiceableConfig, resolveConfig } from '../src/config.ts';
+import {
+  CONFIG_OWNER_ENTRY,
+  CONFIG_OWNERSHIP,
+  Config,
+  assertServiceableConfig,
+  misplacedConfigKeys,
+  resolveConfig,
+  warnMisplacedConfig,
+  type ConfigOwner,
+} from '../src/config.ts';
 
 test('resolveConfig applies the commit-description defaults', () => {
   const resolved = resolveConfig({});
@@ -124,5 +133,76 @@ test('resolveConfig derives defaults from the schema and isolates array defaults
     resolveConfig({ timeoutMs: 0 }).timeoutMs,
     0,
     'resolveConfig stays tolerant; assertServiceableConfig is the validation step',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cross-row config ownership (audit core M8)
+// ---------------------------------------------------------------------------
+
+test('CONFIG_OWNERSHIP maps every config key to exactly one bundle row', () => {
+  const keys = Object.keys(resolveConfig({})).sort();
+  assert.deepEqual(Object.keys(CONFIG_OWNERSHIP).sort(), keys, 'the ownership table must cover every config key');
+  const expected: Readonly<Record<ConfigOwner, readonly (keyof typeof CONFIG_OWNERSHIP)[]>> = {
+    runtime: [
+      'jjCommand',
+      'gitCommand',
+      'timeoutMs',
+      'graceMs',
+      'maxOutputBytes',
+      'detectCacheTtlMs',
+      'preferJjContext',
+      'multiSessionGuidance',
+      'rebaseTarget',
+      'commitGuidance',
+      'commitStyle',
+      'commitStyleCustom',
+      'preferSplitCommits',
+      'commitStyleSampleLimit',
+    ],
+    tools: ['defaultLogLimit', 'maxLogLimit', 'defaultCwd'],
+    guard: ['guardMutatingGit', 'guardGitInJjNative', 'guardJjRepositoryWide', 'guardTools', 'guardCreateWorktree', 'readOnlyGitNotice'],
+  };
+  for (const owner of ['runtime', 'tools', 'guard'] as const) {
+    const actual = (Object.keys(CONFIG_OWNERSHIP) as (keyof typeof CONFIG_OWNERSHIP)[])
+      .filter((key) => CONFIG_OWNERSHIP[key] === owner)
+      .sort();
+    assert.deepEqual(actual, [...expected[owner]].sort(), `unexpected ${owner} keys`);
+  }
+  assert.deepEqual(
+    { ...CONFIG_OWNER_ENTRY },
+    { runtime: 'jj-runtime', tools: 'jj-tools', guard: 'jj-guard' },
+    'warnings must name the row the model sees in its profile',
+  );
+});
+
+test('misplacedConfigKeys reports only explicitly configured keys owned by other rows', () => {
+  assert.deepEqual(misplacedConfigKeys({}, 'runtime'), [], 'nothing configured means nothing to report');
+  assert.deepEqual(misplacedConfigKeys({ commitStyle: 'angular' }, 'runtime'), [], 'a key on its own row is fine');
+  assert.deepEqual(misplacedConfigKeys({ guardMutatingGit: 'deny' }, 'runtime'), ['guardMutatingGit']);
+  assert.deepEqual(misplacedConfigKeys({ guardMutatingGit: undefined }, 'runtime'), [], 'undefined is not a configuration mistake');
+  assert.deepEqual(
+    misplacedConfigKeys({ defaultCwd: '/tmp', readOnlyGitNotice: false, guardTools: ['bash'], maxLogLimit: 5 }, 'runtime'),
+    ['defaultCwd', 'guardTools', 'maxLogLimit', 'readOnlyGitNotice'],
+    'results are sorted so warnings and tests are deterministic',
+  );
+  assert.deepEqual(misplacedConfigKeys({ defaultLogLimit: 5, defaultCwd: '/tmp' }, 'tools'), [], 'the tools row owns both');
+  assert.deepEqual(misplacedConfigKeys({ commitStyle: 'auto', defaultLogLimit: 5 }, 'guard'), ['commitStyle', 'defaultLogLimit']);
+});
+
+test('warnMisplacedConfig warns once per misplaced key and never throws', () => {
+  const messages: string[] = [];
+  const logger = { warn: (message: string) => messages.push(message) };
+  warnMisplacedConfig(logger, { guardMutatingGit: 'deny', readOnlyGitNotice: false, commitStyle: 'angular' }, 'runtime');
+  assert.equal(messages.length, 2, 'one warning per misplaced key, none for the local commitStyle');
+  assert.match(messages[0] ?? '', /`guardMutatingGit` belongs to the jj-guard row; this row \(jj-runtime\) ignores it/);
+  assert.match(messages[1] ?? '', /`readOnlyGitNotice` belongs to the jj-guard row/);
+
+  // A missing, malformed, or throwing logger must never break startup.
+  assert.doesNotThrow(() => warnMisplacedConfig(undefined, { guardTools: ['bash'] }, 'runtime'));
+  assert.doesNotThrow(() => warnMisplacedConfig({}, { guardTools: ['bash'] }, 'runtime'));
+  assert.doesNotThrow(() => warnMisplacedConfig({ warn: 'not-a-function' }, { guardTools: ['bash'] }, 'runtime'));
+  assert.doesNotThrow(() =>
+    warnMisplacedConfig({ warn: () => { throw new Error('logger down'); } }, { guardTools: ['bash'] }, 'runtime'),
   );
 });
