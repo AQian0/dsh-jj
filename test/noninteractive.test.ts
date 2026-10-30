@@ -130,7 +130,7 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
   const operations = new JjOperations({ runJj, config: {} });
   const definitions = new Map(
     jjToolDefinitions({
-      service: { operations, detect: async () => (await detectVcs(repo, fx.run)), describe: () => '' },
+      service: { operations, detect: async () => (await detectVcs(repo, fx.run)) },
       config: resolveConfig({}),
       host: { tools: { register: () => () => {} } },
       cwdFor: async () => repo,
