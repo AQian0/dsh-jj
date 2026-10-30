@@ -242,8 +242,8 @@ test('sibling workspaces of one repository get the coordination wording and the 
   });
   const text = captured[0].text({ agent: { session } });
   assert.match(text, /running in a separate workspace of this Jujutsu repository/);
-  assert.match(text, /destination = main/);
-  assert.ok(!text.includes('jj_workspace_add'), 'an isolated peer needs no new workspace');
+  assert.match(text, /default main/);
+  assert.ok(!text.includes('isolate this session in its own jj workspace'), 'an isolated peer needs no new workspace');
 });
 
 test('a subagent session (not a top-level root) never counts its parent as a parallel peer', async (t) => {
