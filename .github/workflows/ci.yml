@@ -28,10 +28,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v6
+        # Actions are pinned to commit SHAs (verified against the `v6` tag via
+        # `git ls-remote`); keep the `# v6 (vX.Y.Z)` comment in sync when upgrading.
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 (v6.1.0)
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 (v6.5.0)
         with:
           node-version: "24"
           package-manager-cache: false
@@ -39,10 +41,20 @@ jobs:
       - name: Install Jujutsu (jj) for the test fixtures
         env:
           JJ_VERSION: "0.46.0"
+          # SHA-256 of jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz, as published by
+          # GitHub's release asset digest for
+          # https://github.com/jj-vcs/jj/releases/expanded_assets/v0.46.0 and
+          # re-verified locally by hashing the downloaded asset. jj 0.46.0 publishes
+          # no SHA256SUMS asset, so this GitHub-displayed digest is the authoritative
+          # checksum for the exact asset URL below. Bump it together with JJ_VERSION.
+          JJ_TARBALL_SHA256: "fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08"
         run: |
+          archive="${RUNNER_TEMP}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o "${archive}" \
+            "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${JJ_TARBALL_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           expected="jj ${JJ_VERSION}"
           actual="$("$HOME/.local/bin/jj" --version)"
@@ -55,10 +67,16 @@ jobs:
       - name: Install public peer dependencies and the pinned compiler
         # Same install recipe as release.yml: no lockfile, no new dependencies,
         # lifecycle scripts disabled, and the exact tsc/@types pair.
+        # `@deepseek-ai/dsh-session-projection` is test-only: test/guard-cwd.test.ts
+        # imports it to build the real WorkingDirectoryService stack, but it is not a
+        # peer dependency of this plugin. Install it explicitly at the exact version
+        # dsh-working-directory declares as a peer dependency (0.2.1-rc.2), so an
+        # upstream dependency-tree change cannot break CI (or a release) at publish
+        # time.
         run: |
           npm install --no-package-lock --ignore-scripts --no-audit --no-fund
           npm install --no-package-lock --no-save --ignore-scripts --no-audit --no-fund \
-            typescript@6.0.3 @types/node@26.6.5
+            typescript@6.0.3 @types/node@26.6.5 @deepseek-ai/dsh-session-projection@0.2.1-rc.2
 
       - name: Check the offline bootstrap
         # After the install above, scripts/setup-links.ts must no-op; this also
