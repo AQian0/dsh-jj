@@ -57,6 +57,8 @@
 | `src/multi-session.ts` | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess) |
 | `test/**/*.test.ts` | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner |
 | `test/multi-session.test.ts` | 多会话检测模式与指引文案的单元测试 |
+| `test/service.test.ts` | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试 |
+| `test/jj-command.test.ts` | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试 |
 | `scripts/setup-links.ts` | 离线依赖软链脚本 |
 | `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`) |
 | `cordis.patch.yml` | bundle patch:三行 `insert` + `agent-instructions` 配置覆盖 |
