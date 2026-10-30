@@ -128,7 +128,7 @@ Use the jj equivalent instead:
 | `guardGitInJjNative` | `warn` | jj-native 仓库内只读 git 的处置：`warn`（提示）/ `deny`（拒绝）/ `off`（不提示） |
 | `guardJjRepositoryWide` | `warn` | `jj undo` / `jj op restore` 等仓库级 jj 操作的处置 |
 | `guardTools` | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名 |
-| `guardCreateWorktree` | `true` | 在 jj 仓库里拒绝 `create_worktree`，引导用 `jj workspace add` |
+| `guardCreateWorktree` | `true` | 在**归属 jj** 的仓库里拒绝 `create_worktree`，引导用 `jj workspace add`（嵌套的独立 Git 仓库按最近仓库归属放行） |
 | `readOnlyGitNotice` | `true` | colocated 仓库内只读 git 命令是否附「优先用 jj」提示 |
 | `preferJjContext` | `true` | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引 |
 | `multiSessionGuidance` | `auto` | 多会话并行指引：`auto` / `always` / `off` |
@@ -154,6 +154,7 @@ Use the jj equivalent instead:
 - **只支持 jj 仓库**：jj 未安装或目录不是 jj workspace 时，`jj_*` 工具会报错并给出处理建议，不会退回 git。
 - **平台支持**：当前仅在 macOS / Linux 验证；测试依赖 POSIX 工具链（`/bin/sh`、`bash -c`、`chmod` 等）。Windows 未验证也不支持，`guardTools` 默认包含 `pwsh` 只是工具名匹配，不代表 Windows 可用。
 - **guard 是启发式**：只做静态命令分类。无法静态求值的 shell 形式（git alias、shell function、wrapper script、`eval`、`$VAR`、`find -exec` 等）按 fail-open 放行，并可能附一次性提示；heredoc 正文按数据忽略，因此写在脚本/文档内容里的命令不会被分析。
+- **仓库归属按最近者判断**：jj workspace 内嵌套的独立 Git 仓库（最近的 `.git` 比 `.jj` 更深）按普通 Git 仓库处理——`git` 命令与 `create_worktree` 都不会被 jj guard 拦截；只有祖先 jj 的目录才受 guard 约束。
 - **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`。
 - **描述风格靠推断**：风格判定只看描述首行，历史太少或风格混杂时会请求你选择；Angular 与 Conventional Commits 语法相同，自动识别统一报 `conventional`，需要严格规则时可配置 `commitStyle: angular`。
 - **多会话检测限于本进程**：只能看到同一 DSH 进程内的顶层会话，多个 `dsh` CLI 进程之间互不可见；跨进程并行请配置 `multiSessionGuidance: always`。
