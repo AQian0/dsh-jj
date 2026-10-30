@@ -157,6 +157,7 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   assert.match(text, /source mode/, 'the hand-off moves the whole stack with source mode internally');
   assert.match(text, /repository without remotes is fine/, 'a repo without remotes is handled inside the tool');
   assert.match(text, /resolves the integration target itself/, 'the model must not ask the user to pick the target');
+  assert.match(text, /earlier parallel session's committed change/, 'an inherited stack base keeps the chain together instead of deflecting to the user');
   assert.match(text, /resolve them yourself/, 'conflicts are resolved by the model, not handed back');
   assert.match(text, /jj_workspace_cleanup/, 'a session-created workspace is cleaned up by the plugin');
   assert.match(text, /do not run jj workspace forget yourself/i, 'raw workspace forget stays denied');

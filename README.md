@@ -125,7 +125,7 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 
 1. 用 `jj_commit` 提交最后一个内聚步骤,让本会话的改动是一段连续的 change 栈(不要留下未提交改动)。
 2. 调用 `jj_handoff`(默认 workspace 里要传 `firstChange` = 本会话创建的最底层 change,避免 rebase 别人的历史;
-   独立 workspace 里自动探测)。它一次完成:
+   工具会拒绝栈底以外的值(例如 `@`),否则只移动一半却报「已复核」。独立 workspace 里自动探测)。它一次完成:
    - `jj git fetch`;仓库没有远端不算错误(`no-remote`),继续用本地目标;
    - 自动解析集成目标:显式 `destination` → 配置的 `rebaseTarget`(默认 `trunk()`)→ `trunk()` → 本地 `main` → `master`;
      `trunk()` 在本地仓库解析为 root 时自动跳过,不需要用户选 revision;
@@ -139,7 +139,8 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 4. 只有当 `jj_handoff` 报告「没有可用集成目标」(没有 `trunk()` / `main` / `master`,也没有显式 destination)时,
    才需要问用户要目标 revision —— 这是唯一需要用户决策的收尾场景。
 5. 清理:本会话通过 `jj_workspace_add` 创建的临时 workspace,收尾验证后调用 `jj_workspace_cleanup` —— 它先把会话切回
-   默认 workspace,再注销该临时 workspace(只允许注销本会话创建的 workspace;目录文件保留,不会丢提交)。
+   默认 workspace,再注销该临时 workspace(只允许注销本会话创建、且**名字与路径都匹配**的 workspace;同名重建的
+   用户 workspace 不会被误删;目录文件保留,不会丢提交)。
    不是本会话创建的 workspace 会被拒绝,此时报告 `jj_workspace_list` 里的名字/路径和精确的 `jj workspace forget <name>`
    命令给用户;不要自己用 shell 执行 `jj workspace forget`(guard 会拒绝)。
 6. 向用户报告 rebase 后的 change id、解析出的目标(以及是否来自自动回退)、bookmark 移动结果和 workspace 清理结果。
@@ -218,10 +219,11 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
   对端是否空闲,退回「存在即可能并行」的保守行为,都不会让会话启动失败。
 - 子代理不注入多会话指引(包括 `always`):子代理与父会话共享工作副本,父会话继续运行时子代理同时写文件不受本功能
   覆盖;需要严格隔离时由父会话显式给子任务指定独立 workspace。
-- 临时 workspace 清理:只有本会话通过 `jj_workspace_add` 创建、且手写校验(无未提交改动、无未解决冲突)通过的
-  workspace 才能由 `jj_workspace_cleanup` 注销;通过 shell `jj workspace add` 创建的、用户创建的和其它会话的
-  workspace 都不会被插件注销(shell 里的 `jj workspace forget` 仍被 guard 拒绝),需要用户执行
-  `jj workspace forget <name>` 并删除目录。目录文件在任何情况下都不会被自动删除。
+- 临时 workspace 清理:只有本会话通过 `jj_workspace_add` 创建(按会话记录的 workspace 名字+路径校验)、且手写校验
+  (无未提交改动、无未解决冲突)通过的 workspace 才能由 `jj_workspace_cleanup` 注销;通过 shell `jj workspace add`
+  创建的、用户创建的和其它会话的 workspace 都不会被插件注销(shell 里的 `jj workspace forget` 仍被 guard 拒绝),
+  需要用户执行 `jj workspace forget <name>` 并删除目录。工具只校验工作副本干净,不校验 handoff 是否已完成;
+  目录文件在任何情况下都不会被自动删除。
 - 集成交付不会自动 push:没有远端分支或凭据时,`jj_handoff` 只保证本地集成到目标;推送仍由用户执行
   (`jj git push --bookmark <name>`),这是唯一有意保留给用户的操作。
 

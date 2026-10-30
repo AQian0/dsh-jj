@@ -9,6 +9,7 @@
  * @module dsh-jj/tools
  */
 
+import { realpathSync } from 'node:fs';
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
@@ -86,6 +87,15 @@ export function jjRefusalText(descriptor: VcsDescriptor, cwd: string, jjCommand 
 
 function textRender(value: unknown): { type: 'text'; text: string }[] {
   return [{ type: 'text', text: JSON.stringify(value) }];
+}
+
+/** Canonical workspace root for ownership checks (realpath when it exists, else the path as given). */
+function canonicalWorkspacePath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 const CHANGE_PROPERTIES = {
@@ -188,15 +198,19 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
    * workspace this exact session registered may be unregistered by the plugin, so a
    * session can never forget another session's (or the user's) working copy.
    */
-  const sessionWorkspaces = new WeakMap<object, Set<string>>();
-  const rememberOwnedWorkspace = (agent: unknown, name: string): void => {
+  const sessionWorkspaces = new WeakMap<object, { name: string; root: string }[]>();
+  const rememberOwnedWorkspace = (agent: unknown, name: string, root: string): void => {
     if (typeof agent !== 'object' || agent === null) return;
-    const owned = sessionWorkspaces.get(agent) ?? new Set<string>();
-    owned.add(name);
+    const owned = sessionWorkspaces.get(agent) ?? [];
+    const canonicalRoot = canonicalWorkspacePath(root);
+    if (!owned.some((entry) => entry.name === name && entry.root === canonicalRoot)) owned.push({ name, root: canonicalRoot });
     sessionWorkspaces.set(agent, owned);
   };
-  const ownsWorkspace = (agent: unknown, name: string): boolean =>
-    typeof agent === 'object' && agent !== null && (sessionWorkspaces.get(agent)?.has(name) ?? false);
+  const ownsWorkspace = (agent: unknown, name: string, root: string): boolean => {
+    if (typeof agent !== 'object' || agent === null) return false;
+    const canonicalRoot = canonicalWorkspacePath(root);
+    return (sessionWorkspaces.get(agent) ?? []).some((entry) => entry.name === name && entry.root === canonicalRoot);
+  };
   // Commit-description policy is owned by the runtime entry (`ctx.jj`) so the
   // session prompt and jj_commit_style cannot disagree; the tools row only carries
   // tool-specific tuning (limits, default cwd, …).
@@ -631,7 +645,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const cwd = await context.cwdFor(exec);
         await requireWorkspace(context, cwd, exec.signal);
         const result = await operations.workspaceAdd(cwd, args.path, args.name, args.parents ?? [], args.message, args.colocate, exec.signal);
-        rememberOwnedWorkspace(exec.agent, result.name);
+        rememberOwnedWorkspace(exec.agent, result.name, result.path);
         return { path: result.path, name: result.name, changeId: result.change.changeId, commitId: result.change.commitId };
       },
     }),
@@ -793,7 +807,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         firstChange: {
           type: 'string',
           description:
-            "Bottom-most change id of this workspace's stack. Omit inside a dedicated session workspace (the stack above the destination is detected automatically). Required in the default workspace, whose history may contain changes this session does not own.",
+            "Bottom-most change id of this workspace's stack above the resolved target. Omit inside a dedicated session workspace (the stack above the destination is detected automatically). Required in the default workspace, whose history may contain changes this session does not own; the tool rejects a change that is not the stack bottom (for example '@') because moving only part of the stack would falsely report success.",
         },
         bookmark: {
           type: 'string',
@@ -878,7 +892,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           },
           exec.signal,
         );
-        const cleanupOwned = workspaceName !== 'default' && ownsWorkspace(exec.agent, workspaceName);
+        const cleanupOwned = workspaceName !== 'default' && ownsWorkspace(exec.agent, workspaceName, descriptor.root);
         return {
           ...workspaceFields(descriptor),
           destination: result.destination,
@@ -930,7 +944,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         if (workspaceName === 'default') {
           throw new Error('jj_workspace_cleanup is unnecessary here: this session already runs in the default workspace, which must never be forgotten.');
         }
-        if (!ownsWorkspace(exec.agent, workspaceName)) {
+        if (!ownsWorkspace(exec.agent, workspaceName, descriptor.root)) {
           throw new Error(
             [
               `jj_workspace_cleanup refused: workspace "${workspaceName}" was not created through jj_workspace_add in this session, so the plugin will not unregister it.`,

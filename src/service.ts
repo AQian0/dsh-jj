@@ -12,6 +12,8 @@
  * @module dsh-jj/service
  */
 
+import { realpathSync } from 'node:fs';
+import { basename, isAbsolute, resolve } from 'node:path';
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { assertServiceableConfig, Config, resolveConfig, type JjPluginConfig, type ResolvedJjConfig } from './config.ts';
 import { detectVcs } from './detect.ts';
@@ -181,6 +183,16 @@ export interface JjHandoffResult {
 function isStaleWorkingCopyFailure(error: unknown): boolean {
   const stderr = error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : '';
   return /stale/i.test(stderr) && /workspace update-stale/i.test(stderr);
+}
+
+/** Canonical filesystem spelling of one path (realpath when it exists, else the resolved absolute path). */
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -542,28 +554,34 @@ export class JjOperations {
     if (path.trim().length === 0 || path.startsWith('-')) {
       throw badInput('path must be a non-empty path that does not start with "-".');
     }
+    // Always pass an explicit name: the created workspace is then resolved by exact
+    // name instead of jj's list order, so callers (the tools layer records session
+    // ownership) can never register a different workspace by mistake.
+    const requestedName = name !== undefined && name.length > 0 ? name : basename(path.trim());
     const argv = ['workspace', 'add', path];
-    if (name !== undefined && name.length > 0) argv.push('--name', name);
+    if (requestedName.length > 0) argv.push('--name', requestedName);
     for (const parent of parents) argv.push('-r', parent);
     if (message !== undefined && message.length > 0) argv.push('-m', message);
     if (colocate === true) argv.push('--colocate');
     await this.run(cwd, argv, signal);
 
     const workspaces = await this.workspaceList(cwd, signal);
-    const created = workspaces.find((workspace) => workspace.name === name) ?? workspaces.find((workspace) => workspace.root === path) ?? workspaces[workspaces.length - 1];
+    const requestedRoot = canonicalPath(resolve(cwd, path.trim()));
+    const created =
+      workspaces.find((workspace) => workspace.name === requestedName) ??
+      workspaces.find((workspace) => canonicalPath(workspace.root) === requestedRoot);
     if (created === undefined) {
-      throw new JjError('JJ_OUTPUT_INVALID', `\`jj workspace add\` did not report a new workspace for ${path}.`, {
-        argv,
-        exitCode: 0,
-        stderr: '',
-        stdout: '',
-      });
+      throw new JjError(
+        'JJ_OUTPUT_INVALID',
+        `\`jj workspace add\` did not report a workspace named ${JSON.stringify(requestedName)} for ${path}.`,
+        { argv, exitCode: 0, stderr: '', stdout: '' },
+      );
     }
     const change = await this.readAt(created.root, signal);
     return { path: created.root, name: created.name, change };
   }
 
-  /** `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`. */
+  /** `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`; roots are absolute. */
   async workspaceList(cwd: string, signal?: AbortSignal): Promise<readonly { name: string; root: string }[]> {
     const argv = ['workspace', 'list', '--ignore-working-copy', '-T', TPL_WORKSPACE_LIST_TAB];
     const result = await this.run(cwd, argv, signal);
@@ -572,7 +590,10 @@ export class JjOperations {
       if (line.trim().length === 0) continue;
       const [name, root] = line.split('\t');
       if (name === undefined || root === undefined) continue;
-      workspaces.push({ name: name.trim(), root: root.trim() });
+      // jj lists non-current workspaces relative to the current directory; every
+      // caller needs a usable absolute path (the cleanup tool moves the session there).
+      const absoluteRoot = isAbsolute(root.trim()) ? root.trim() : resolve(cwd, root.trim());
+      workspaces.push({ name: name.trim(), root: absoluteRoot });
     }
     return workspaces;
   }
@@ -715,6 +736,9 @@ export class JjOperations {
       ).text;
       return { status: 'fetched', message: text.length > 0 ? text : 'jj git fetch completed with nothing new to fetch.' };
     } catch (error) {
+      // Stale working copies are retried by the hand-off wrapper after recovery;
+      // abort/timeout still win because the caller asked to stop.
+      if (isStaleWorkingCopyFailure(error)) throw error;
       if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
       const detail = error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : String(error);
       if (/No git remotes to fetch from|No matching remotes/i.test(detail)) {
@@ -763,6 +787,8 @@ export class JjOperations {
     const bookmarks = await this.localBookmarkNames(cwd, signal);
     const bookmarkHint = bookmarks.length > 0 ? bookmarks.join(', ') : 'none';
     const seen = new Set<string>();
+    const rootOnly: string[] = [];
+    const unresolved: string[] = [];
     for (const candidate of candidates) {
       if (seen.has(candidate.revset)) continue;
       seen.add(candidate.revset);
@@ -770,18 +796,30 @@ export class JjOperations {
       if (change === undefined) {
         if (candidate.source === 'argument') {
           throw badInput(
-            `jj_handoff cannot use destination ${JSON.stringify(candidate.revset)}: the revset does not resolve in this repository. Pass a real revision (local bookmarks: ${bookmarkHint}), or omit destination to let jj_handoff resolve the target.`,
+            `jj_handoff cannot use destination ${JSON.stringify(candidate.revset)}: the revset does not resolve in this repository. Pass a real revision (local bookmarks: ${bookmarkHint}), or omit destination to let jj_handoff resolve the target with fallbacks.`,
           );
         }
+        unresolved.push(`${candidate.revset} (${candidate.source})`);
         continue;
       }
-      // `trunk()` in a local-only repository resolves to the empty root commit; the
-      // local main/master fallbacks below are the usable targets there.
-      if (change.commitId === ROOT_COMMIT_ID) continue;
+      if (change.commitId === ROOT_COMMIT_ID) {
+        // An explicitly named root commit is a model mistake, not a signal to
+        // silently integrate somewhere else; the fallbacks only rescue defaults.
+        if (candidate.source === 'argument') {
+          throw badInput(
+            `jj_handoff destination ${JSON.stringify(candidate.revset)} resolves to jj's empty root commit (there is no remote trunk here). Pass a real revision such as a local bookmark (${bookmarkHint}), or omit destination to let jj_handoff pick the target automatically.`,
+          );
+        }
+        rootOnly.push(`${candidate.revset} (${candidate.source})`);
+        continue;
+      }
       return { ...candidate, change };
     }
+    const details: string[] = [];
+    if (rootOnly.length > 0) details.push(`resolved to jj's empty root commit: ${rootOnly.join(', ')}`);
+    if (unresolved.length > 0) details.push(`did not resolve: ${unresolved.join(', ')}`);
     throw badInput(
-      `jj_handoff found no usable integration target: the configured target ${JSON.stringify(options.configured)} and the trunk()/main/master fallbacks all resolve to jj's empty root commit. Local bookmarks: ${bookmarkHint}. Ask the user which revision to integrate onto, pass it as destination, and call jj_handoff again.`,
+      `jj_handoff found no usable integration target — ${details.length > 0 ? details.join('; ') : 'no candidate was tried'}. Local bookmarks: ${bookmarkHint}. Ask the user which revision to integrate onto, pass it as destination, and call jj_handoff again.`,
     );
   }
 
@@ -806,6 +844,20 @@ export class JjOperations {
    * @returns the full hand-off report.
    */
   async handoff(cwd: string, options: JjHandoffOptions = {}, signal?: AbortSignal): Promise<JjHandoffResult> {
+    try {
+      return await this.handoffFlow(cwd, options, signal);
+    } catch (error) {
+      if (!isStaleWorkingCopyFailure(error)) throw error;
+      // A stale working copy fails *every* content read, including the target and
+      // stack detection above, so recovery must wrap the whole flow and retry it
+      // once instead of leaving the user to run workspace update-stale.
+      await this.updateStale(cwd, signal);
+      return await this.handoffFlow(cwd, options, signal);
+    }
+  }
+
+  /** One hand-off attempt; {@link handoff} retries it once after stale recovery. */
+  private async handoffFlow(cwd: string, options: JjHandoffOptions, signal?: AbortSignal): Promise<JjHandoffResult> {
     const fetchResult: JjFetchResult =
       options.fetch === false
         ? { status: 'skipped', message: 'jj git fetch was disabled for this call.' }
@@ -846,8 +898,20 @@ export class JjOperations {
       };
     }
 
-    let first: JjChangeRecord;
+    const roots = await this.stackRoots(cwd, target.revset, signal);
     const explicitFirst = options.firstChange?.trim();
+    if (roots.length === 0) {
+      const bookmarkOutcome = await this.moveRequestedBookmark(cwd, options.bookmark, [], [], signal);
+      return {
+        ...base,
+        alreadyIntegrated: true,
+        onTarget: true,
+        message: `This workspace has no changes above ${target.revset}: the stack is already integrated, nothing to rebase.`,
+        ...bookmarkOutcome,
+      };
+    }
+
+    let first: JjChangeRecord;
     if (explicitFirst !== undefined && explicitFirst.length > 0) {
       const ancestor = await this.tryReadAt(cwd, `(${explicitFirst}) & ::@`, signal);
       if (ancestor === undefined) {
@@ -855,72 +919,48 @@ export class JjOperations {
           `jj_handoff firstChange ${JSON.stringify(explicitFirst)} is not a change in this workspace's working-copy ancestry. Pass the bottom-most change id this session created (inspect jj_log if needed).`,
         );
       }
+      // The explicit value must name the bottom of this workspace's stack: a middle
+      // change or `@` would move only part of the work (or the empty working copy)
+      // and report a false "verified" success while the session's commits stay behind.
+      if (!roots.some((root) => root.changeId === ancestor.changeId)) {
+        throw badInput(
+          `jj_handoff firstChange ${JSON.stringify(explicitFirst)} is not the bottom of this workspace's stack above ${target.revset}. Pass one of: ${roots.map((change) => `${change.changeId} (${change.description || 'no description'})`).join(', ')}, or omit firstChange to let jj_handoff pick the single stack automatically.`,
+        );
+      }
       first = ancestor;
+    } else if (roots.length > 1) {
+      return {
+        ...base,
+        ambiguousRoots: roots.map((change) => change.changeId),
+        message: `This workspace has ${roots.length} disconnected stacks above ${target.revset}. Pass firstChange with the bottom-most change of one stack (candidates: ${roots.map((change) => change.changeId).join(', ')}).`,
+      };
     } else {
-      const roots = await this.stackRoots(cwd, target.revset, signal);
-      if (roots.length === 0) {
-        return {
-          ...base,
-          alreadyIntegrated: true,
-          onTarget: true,
-          message: `This workspace has no changes above ${target.revset}: the stack is already integrated, nothing to rebase.`,
-        };
-      }
-      if (roots.length > 1) {
-        return {
-          ...base,
-          ambiguousRoots: roots.map((change) => change.changeId),
-          message: `This workspace has ${roots.length} disconnected stacks above ${target.revset}. Pass firstChange with the bottom-most change of the stack to rebase (candidates: ${roots.map((change) => change.changeId).join(', ')}).`,
-        };
-      }
       first = roots[0] as JjChangeRecord;
     }
 
     const parentCommitId = await this.parentCommitId(cwd, first.changeId, signal);
     if (parentCommitId !== undefined && parentCommitId === target.change.commitId) {
       const stack = await this.stackFrom(cwd, first.changeId, signal);
+      const conflicts = this.conflictsIn(stack);
+      const bookmarkOutcome = await this.moveRequestedBookmark(cwd, options.bookmark, stack, conflicts, signal);
       return {
         ...base,
         firstChangeId: first.changeId,
         stack,
         alreadyIntegrated: true,
         onTarget: true,
-        conflicts: this.conflictsIn(stack),
+        conflicts,
         message: `The stack is already based directly on ${target.revset}; no rebase was needed.`,
+        ...bookmarkOutcome,
       };
     }
 
-    let message: string;
-    try {
-      message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
-    } catch (error) {
-      if (!isStaleWorkingCopyFailure(error)) throw error;
-      // Another workspace rewrote a shared ancestor: refresh this working copy and
-      // retry once instead of leaving recovery to the user.
-      await this.updateStale(cwd, signal);
-      message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
-    }
-
+    const message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
     const stack = await this.stackFrom(cwd, first.changeId, signal);
     const conflicts = this.conflictsIn(stack);
     const rebasedParentCommitId = await this.parentCommitId(cwd, first.changeId, signal);
     const onTarget = rebasedParentCommitId !== undefined && rebasedParentCommitId === target.change.commitId;
-
-    let bookmark: JjHandoffBookmark | undefined;
-    let bookmarkSkipped: string | undefined;
-    const requestedBookmark = options.bookmark?.trim();
-    if (requestedBookmark !== undefined && requestedBookmark.length > 0) {
-      if (conflicts.length > 0) {
-        bookmarkSkipped = `Bookmark ${requestedBookmark} was left in place because the rebased stack has conflicts; resolve them and call jj_handoff again with the same bookmark.`;
-      } else {
-        const tip = this.bookmarkTip(stack);
-        if (tip === undefined) {
-          bookmarkSkipped = 'The rebased stack has no content change to point a bookmark at.';
-        } else {
-          bookmark = await this.bookmarkSet(cwd, requestedBookmark, tip.changeId, false, signal);
-        }
-      }
-    }
+    const bookmarkOutcome = await this.moveRequestedBookmark(cwd, options.bookmark, stack, conflicts, signal);
 
     return {
       ...base,
@@ -930,9 +970,35 @@ export class JjOperations {
       onTarget,
       conflicts,
       message,
-      ...(bookmark !== undefined ? { bookmark } : {}),
-      ...(bookmarkSkipped !== undefined ? { bookmarkSkipped } : {}),
+      ...bookmarkOutcome,
     };
+  }
+
+  /**
+   * Apply the optional bookmark move shared by every hand-off exit path.
+   *
+   * Keeping this in one place means the already-integrated paths report the same
+   * bookmark outcome as a fresh rebase instead of silently dropping the request.
+   */
+  private async moveRequestedBookmark(
+    cwd: string,
+    requested: string | undefined,
+    stack: readonly JjChangeRecord[],
+    conflicts: readonly JjHandoffConflict[],
+    signal?: AbortSignal,
+  ): Promise<{ bookmark?: JjHandoffBookmark; bookmarkSkipped?: string }> {
+    const name = requested?.trim();
+    if (name === undefined || name.length === 0) return {};
+    if (conflicts.length > 0) {
+      return {
+        bookmarkSkipped: `Bookmark ${name} was left in place because the stack has conflicts; resolve them and call jj_handoff again with the same bookmark.`,
+      };
+    }
+    const tip = this.bookmarkTip(stack);
+    if (tip === undefined) {
+      return { bookmarkSkipped: 'The stack has no content change to point a bookmark at.' };
+    }
+    return { bookmark: await this.bookmarkSet(cwd, name, tip.changeId, false, signal) };
   }
 
   /** Bottom-most change(s) of this workspace's stack above `target` (`roots(::@ ~ ::target)`). */
@@ -981,6 +1047,9 @@ export class JjOperations {
     try {
       return await this.readAt(cwd, signal, revset);
     } catch (error) {
+      // A stale working copy makes every content read fail; the hand-off wrapper
+      // recovers it once, so this must not look like a nonexistent revision.
+      if (isStaleWorkingCopyFailure(error)) throw error;
       if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
       return undefined;
     }

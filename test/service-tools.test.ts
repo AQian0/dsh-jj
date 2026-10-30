@@ -885,4 +885,131 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   await definitions.get('jj_workspace_add')!.execute({ path: otherPath, name: 'other-ws' }, fakeExec(agent));
   fx.cwd = otherPath;
   await assert.rejects(() => cleanup.execute({}, fakeExec(otherAgent)), /not created through jj_workspace_add/);
+
+  // Ownership is name+root: a user workspace recreated under a name this session
+  // once used is never forgotten by the stale ownership record.
+  fx.cwd = repo;
+  const reusedOld = join(fx.root, 'ws-reused-old');
+  await definitions.get('jj_workspace_add')!.execute({ path: reusedOld, name: 'reused' }, fakeExec(agent));
+  await mustRun(fx.run, ['jj', 'workspace', 'forget', 'reused'], repo);
+  const reusedNew = join(fx.root, 'ws-reused-new');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', reusedNew, '--name', 'reused'], repo);
+  fx.cwd = reusedNew;
+  await assert.rejects(
+    () => cleanup.execute({}, fakeExec(agent)),
+    /not created through jj_workspace_add/,
+    'a recreated workspace with the same name at another root is not session-owned',
+  );
+
+  // A workspace created without an explicit name is still attributed correctly.
+  fx.cwd = repo;
+  const unnamedPath = join(fx.root, 'ws-unnamed');
+  const unnamed = (await definitions.get('jj_workspace_add')!.execute({ path: unnamedPath }, fakeExec(agent))) as {
+    readonly name: string;
+    readonly path: string;
+  };
+  assert.equal(unnamed.name, 'ws-unnamed', 'jj derives the name from the path basename');
+  fx.cwd = unnamed.path;
+  const unnamedValue = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
+  assert.equal(unnamedValue['forgotten'], true);
+
+  // Without workingDirectory.set the plugin cannot move the session back; it must
+  // refuse instead of unregistering the working copy underneath the session.
+  const plainDefinitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  fx.cwd = repo;
+  const unsettablePath = join(fx.root, 'ws-unsettable');
+  await plainDefinitions.get('jj_workspace_add')!.execute({ path: unsettablePath, name: 'unsettable' }, fakeExec(agent));
+  fx.cwd = unsettablePath;
+  await assert.rejects(
+    () => plainDefinitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent)),
+    /cannot move this session back to the default workspace/,
+  );
+});
+
+test('operation layer: jj_handoff rejects a stack that is not the whole stack, and root destinations', async (t) => {
+  const { fx, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-validation');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  const workingCopy = await operations.status(ws);
+  await assert.rejects(
+    () => operations.handoff(ws, { firstChange: workingCopy.change.changeId }),
+    /is not the bottom of this workspace's stack/,
+    'the empty working copy is not the stack bottom',
+  );
+  await assert.rejects(
+    () => operations.handoff(ws, { destination: 'trunk()' }),
+    /resolves to jj's empty root commit/,
+    'an explicit root destination is a model mistake, not a silent fallback',
+  );
+});
+
+test('operation layer: jj_handoff moves a bookmark on an already-integrated stack and honours fetch:false', async (t) => {
+  const { fx, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-integrated-bookmark');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+
+  const result = await operations.handoff(ws, { bookmark: 'feature', fetch: false });
+  assert.equal(result.fetch.status, 'skipped');
+  assert.equal(result.alreadyIntegrated, true);
+  assert.equal(result.bookmark?.name, 'feature', 'the bookmark request is not silently dropped on the integrated path');
+  const tip = result.stack.find((change) => change.description === 'feat: one');
+  assert.ok(tip !== undefined);
+  assert.equal(result.bookmark?.target, tip.commitId);
+  assert.ok(!calls.some((argv) => argv.includes('fetch')), 'fetch:false spawns no git fetch');
+});
+
+test('operation layer: jj_handoff falls back to master and ignores an unresolvable configured target', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-handoff-master');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'master', '-r', '@-'], repo);
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  const fallback = await operations.resolveHandoffTarget(repo, { configured: 'no-such-target' });
+  assert.equal(fallback.revset, 'master');
+  assert.equal(fallback.source, 'master');
+  const configured = await operations.resolveHandoffTarget(repo, { configured: 'master' });
+  assert.equal(configured.source, 'configured');
+});
+
+test('operation layer: jj_handoff recovers a stale working copy instead of handing recovery to the user', async (t) => {
+  const { fx, repo, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-stale');
+  // Operation that created this workspace's initial working copy (the last one now).
+  const opLog = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'op', 'log', '--no-graph', '-n', '1', '-T', 'id.short()'], ws);
+  const op = opLog.stdout.trim();
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  // Another workspace rewinds the shared operation view: every content read in ws
+  // then fails with "The working copy is stale".
+  await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'op', 'restore', op], repo);
+
+  const result = await operations.handoff(ws);
+  assert.equal(result.fetch.status, 'no-remote');
+  assert.ok(
+    calls.some((argv) => argv.includes('workspace') && argv.includes('update-stale')),
+    'the hand-off recovers the stale working copy itself and retries',
+  );
+});
+
+test('operation layer: jj_handoff reports disconnected stacks instead of rebasing one of them', async (t) => {
+  const { fx, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-ambiguous');
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'feat: left'], ws);
+  await writeFixtureFile(fx, ws, 'left.txt', 'left');
+  await commitWorkingCopy(fx, ws, 'feat: left');
+  const left = (await operations.log(ws, '@-', 1))[0];
+  assert.ok(left !== undefined);
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'feat: right'], ws);
+  await writeFixtureFile(fx, ws, 'right.txt', 'right');
+  await commitWorkingCopy(fx, ws, 'feat: right');
+  const right = (await operations.log(ws, '@-', 1))[0];
+  assert.ok(right !== undefined);
+  // A merge of two sibling stacks: two roots above main.
+  await mustRun(fx.run, ['jj', 'new', left.changeId, right.changeId], ws);
+
+  const result = await operations.handoff(ws);
+  assert.equal(result.rebased, false);
+  assert.deepEqual([...result.ambiguousRoots].sort(), [left.changeId, right.changeId].sort());
+  assert.match(result.message, /disconnected stacks/);
 });

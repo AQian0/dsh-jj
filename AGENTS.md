@@ -97,16 +97,27 @@
     处理(`auto` 不注入),任何一条路径都不得阻断 prompt 组装。
 13. **收尾自动化(`jj_handoff` / `jj_workspace_cleanup`)**:
     - `service.ts` 的 `handoff()` 是收尾的唯一入口:fetch(无远端不算错)→ 目标解析(显式 `destination` →
-      配置 `rebaseTarget` → `trunk()` → 本地 `main` → `master`,跳过 root commit;全失败才报「问用户」) →
-      `roots(::@ ~ ::target)` 探测整段栈 → `jj rebase -s` → stale 自动 `jj workspace update-stale` 重试一次 →
-      复核 base 并返回冲突数据。不要把这些步骤拆回 prompt;`needsCommit` 时先让模型 `jj_commit`,不要代为描述。
-    - 目标解析/失败信息必须自带下一步(本地 bookmark 列表、`firstChange` 候选),不要返回裸 jj revset 错误。
-    - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(按 `exec.agent` 记在
-      `WeakMap`)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的 workspace 才能注销;注销前必须先
-      `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。这是对旧「清理只能交给用户」规则的
-      **唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝(`buildJjWorkspaceForgetRefusal`)。
-    - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端)、`test/multi-session.test.ts`
-      (收尾清单文案)、`test/guard.test.ts`(forget 拒绝文案)与 README「任务收尾」。
+      配置 `rebaseTarget` → `trunk()` → 本地 `main` → `master`,跳过 root commit;显式目标解析到 root 是
+      模型错误,必须报错而不是静默换目标;全失败才报「问用户」)→ `roots(::@ ~ ::target)` 探测整段栈 →
+      `jj rebase -s` → 复核 base 并返回冲突数据。不要把这些步骤拆回 prompt;`needsCommit` 时先让模型
+      `jj_commit`,不要代为描述。
+    - **stale 恢复必须包住整个流程**:stale 时连目标/栈的 `jj log` 读取都会失败,所以 `handoff()` 用
+      「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
+      rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
+    - `firstChange` 必须是本 workspace 在目标之上那段栈的**栈底**(在 `roots(::@ ~ ::target)` 里):传 `@`
+      或中间 change 会只移动一部分却返回 `rebased/onTarget` 成功,必须报错并给出候选。
+    - 目标解析/失败信息必须自带下一步(本地 bookmark 列表、`firstChange` 候选),不要返回裸 jj revset 错误;
+      已集成路径同样要处理请求的 bookmark(移动或 `bookmarkSkipped`),不能静默丢弃。
+    - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(按 `exec.agent`
+      记在 `WeakMap`,记录**名字+规范路径**)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的
+      workspace 才能注销;注销前必须先 `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。
+      这是对旧「清理只能交给用户」规则的**唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝
+      (`buildJjWorkspaceForgetRefusal`)。
+    - `JjOperations.workspaceAdd` 必须显式传 `--name`(缺省名用 `basename`)并按名字/规范路径解析返回的
+      workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
+    - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端,含 stale、firstChange
+      校验、ambiguous roots、cleanup 所有权)、`test/multi-session.test.ts`(收尾清单文案)、
+      `test/guard.test.ts`(forget 拒绝文案)与 README「任务收尾」。
 
 ## 代码约定
 
