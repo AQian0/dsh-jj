@@ -124,7 +124,8 @@ body 习惯。历史为空、少于 3 条,或多种风格混杂无法确定时,�
 多会话指引生效时,收尾不再让模型手工串 fetch / rebase / 验证、失败就回来问用户,而是一次调用完成:
 
 1. 用 `jj_commit` 提交最后一个内聚步骤,让本会话的改动是一段连续的 change 栈(不要留下未提交改动)。
-2. 调用 `jj_handoff`(默认 workspace 里要传 `firstChange` = 本会话创建的最底层 change,避免 rebase 别人的历史;
+2. 调用 `jj_handoff`(根/default workspace 里要传 `firstChange` = 本会话创建的最底层 change,避免 rebase 别人的历史;
+   根 workspace 按 `.jj/repo` 是目录这一布局识别,重命名后仍然生效;
    工具会拒绝栈底以外的值(例如 `@`),否则只移动一半却报「已复核」。独立 workspace 里自动探测)。它一次完成:
    - `jj git fetch`;仓库没有远端不算错误(`no-remote`),继续用本地目标;
    - 自动解析集成目标:显式 `destination` → 配置的 `rebaseTarget`(默认 `trunk()`)→ `trunk()` → 本地 `main` → `master`;
