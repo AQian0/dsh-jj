@@ -18,24 +18,34 @@
 
 - Node.js 24+:测试直接由 Node 内置类型擦除运行 `.ts`;CI 固定 Node 24。
 - 真实 `jj`(CI 固定 0.46.0)和 `git` 必须在 `PATH`:测试用真实仓库夹具,不 mock 二进制行为。
-- `tsc` 6.x(CI 固定 `typescript@6.0.3`、`@types/node@26.6.5`;仓库刻意不带 devDependencies)。
-- 首次准备:`npm run setup`。它把 `node_modules/@deepseek-ai`、`node_modules/@types` 软链到本机 DSH 全局安装
-  (默认 `/home/aqian/.cache/.bun/install/global/node_modules`,用 `DSH_NODE_MODULES` 覆盖)。只有 `tsc` 需要这些软链,
-  `node --test` 不依赖它们。
-- 全程离线:不要新增依赖、不要提交 lockfile、不要让测试访问网络。
-- 查 DSH API:类型与实现位于全局安装的 `node_modules/@deepseek-ai/*`(`lib/` + `lib/types/*.d.ts`),
-  与 `scripts/setup-links.ts` 默认指向同一位置。
+- `tsc` 6.x(CI 固定 `typescript@6.0.3`、`@types/node@26.6.5`;仓库刻意不带 devDependencies)与 DSH 的公开
+  peer 类型都需要下面准备的依赖:软链方式只提供 DSH 类型,`tsc` 需在 `PATH` 或本地 `node_modules/.bin` 中。
+- 首次准备(二选一;`npm run setup` 自动探测,已就绪时直接 no-op):
+  1. **软链到 DSH 安装**(CLI / bun 全局安装):`npm run setup` 把 `node_modules/@deepseek-ai`、
+     `node_modules/@types` 软链到本机 DSH 的 `node_modules`。源依次尝试 `DSH_NODE_MODULES`、
+     `$HOME/.cache/.bun/install/global/node_modules`、`$HOME/.bun/install/global/node_modules`。
+     桌面版 DSH(macOS / Windows)把依赖放在 app bundle 内、无法软链,用第 2 种方式。
+  2. **npm 安装公开 peer 依赖**(仅首次需要网络;不写 lockfile、不新增依赖):仓库根执行
+     `npm install --no-package-lock --ignore-scripts`,再装编译器
+     `npm install --no-save typescript@6.0.3 @types/node@26.6.5`。之后 `npm run setup` / `npm test`
+     检测到依赖已可解析会直接 no-op,日常开发保持离线。
+- `npm run setup:check`(即 `node scripts/setup-links.ts --check`)只探测不写文件,适合 CI 或提交前确认 bootstrap。
+  只有 `tsc`(构建、`npm run typecheck`)需要这些依赖;`node --test` 本身不依赖软链。
+- 日常开发全程离线:不要新增依赖、不要提交 lockfile、不要让测试访问网络。
+- 查 DSH API:类型与实现位于本仓库 `node_modules/@deepseek-ai/*`(`lib/` + `lib/types/*.d.ts`),由上面的
+  bootstrap 提供;桌面版 app bundle 内的副本不直接可读。
 
 ## 常用命令
 
 | 命令 | 作用 |
 |---|---|
-| `npm test` | 提交前必须全绿:setup-links → 构建(`tsc`)→ 测试类型检查 → `node --test` |
+| `npm test` | 提交前必须全绿:setup-links(依赖已就绪则 no-op)→ 测试类型检查 → `node --test`(`build.test.ts` 负责构建 `lib/`)|
 | `npm run build` | `tsc -p tsconfig.json`:`src/` → `lib/`(构建产物,不入库) |
 | `npm run typecheck` | 对 `src/` + `test/` + `scripts/` 做类型检查(`tsconfig.test.json`,`noEmit`) |
 | `npm run check` | 构建项目的 `noEmit` 检查 |
 | `npm run test:unit` | 只跑测试;仍要求真实 jj/git,`build.test.ts` 会先构建 `lib/` |
-| `npm run setup` | 重建离线 `node_modules` 软链 |
+| `npm run setup` | 准备离线依赖:软链 DSH 安装,或检测到 npm 安装的依赖后 no-op |
+| `npm run setup:check` | 只探测依赖是否就绪(`--check`,不写文件) |
 
 没有 lint / format 脚本,也没有 PR CI;唯一的 workflow 是打 tag 触发的发布流程(`.github/workflows/release.yml`)。
 
@@ -59,7 +69,7 @@
 | `test/multi-session.test.ts` | 多会话检测模式与指引文案的单元测试 |
 | `test/service.test.ts` | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试 |
 | `test/jj-command.test.ts` | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试 |
-| `scripts/setup-links.ts` | 离线依赖软链脚本 |
+| `scripts/setup-links.ts` | 可移植的离线依赖引导:已就绪时 no-op、`--check` 只探测、否则软链到 DSH 安装 |
 | `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`) |
 | `cordis.patch.yml` | bundle patch:三行 `insert` + `agent-instructions` 配置覆盖 |
 | `lib/` | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定 |

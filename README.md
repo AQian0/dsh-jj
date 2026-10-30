@@ -24,7 +24,7 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 也可以在插件管理页面（Plugin Manager）中安装，spec 填 `@aqian0/dsh-jj`。
 
-**从本地目录安装**：先在仓库根目录执行 `npm run build`（`lib/` 是构建产物，不入库），再把本仓库的绝对路径作为 spec 安装。Web GUI 在「设置 → 插件管理」中操作，Agent 侧用 `plugin_manager` 的 `install_bundle`。
+**从本地目录安装**：首次先按 [AGENTS.md](./AGENTS.md)「环境与准备」准备构建依赖（`npm run setup`，或一次性 `npm install` 公开 peer 依赖与 `tsc`）；然后在仓库根目录执行 `npm run build`（`lib/` 是构建产物，不入库），再把本仓库的绝对路径作为 spec 安装。Web GUI 在「设置 → 插件管理」中操作，Agent 侧用 `plugin_manager` 的 `install_bundle`。
 
 安装后会自动启用 `jj-runtime`、`jj-tools`、`jj-guard` 三个入口，并给 `agent-instructions` 加上 `.jj` 项目根标记；可以在插件管理页面或 `list_plugins` 中确认。
 

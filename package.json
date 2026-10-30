@@ -62,10 +62,11 @@
   ],
   "scripts": {
     "setup": "node scripts/setup-links.ts",
+    "setup:check": "node scripts/setup-links.ts --check",
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "test:unit": "node --test \"test/**/*.test.ts\"",
-    "test": "node scripts/setup-links.ts && tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test \"test/**/*.test.ts\"",
+    "test": "node scripts/setup-links.ts && tsc -p tsconfig.test.json && node --test \"test/**/*.test.ts\"",
     "check": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.test.json"
   },
