@@ -1,9 +1,10 @@
 # dsh-jj bundle patch (design contract §4.4).
 #
-# Three independently loadable entries. Row order is load order: the runtime
-# entry comes first, and the tools/guard entries depend on it once the `ctx.jj`
-# service exists (tools layer). Remove an `insert` block to install only part of
-# the feature.
+# Three bundle entries. Row order is load order: the runtime entry (`jj-runtime`)
+# registers the `ctx.jj` service, and the tools/guard entries inject it, so the
+# runtime row is the required base. Remove only the tools row or only the guard
+# row to install part of the feature; removing the runtime row requires removing
+# the other two as well.
 - insert:
     - id: jj-runtime
       name: '@aqian0/dsh-jj'

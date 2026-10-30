@@ -44,10 +44,12 @@
 | `npm run typecheck` | 对 `src/` + `test/` + `scripts/` 做类型检查(`tsconfig.test.json`,`noEmit`) |
 | `npm run check` | 构建项目的 `noEmit` 检查 |
 | `npm run test:unit` | 只跑测试;仍要求真实 jj/git,`build.test.ts` 会先构建 `lib/` |
+| `npm run test:coverage` | 用 Node 内置覆盖率跑全部测试(`--test-coverage-include='src/**/*.ts'`,排除 `lib/`);当前 line ≈96% |
 | `npm run setup` | 准备离线依赖:软链 DSH 安装,或检测到 npm 安装的依赖后 no-op |
 | `npm run setup:check` | 只探测依赖是否就绪(`--check`,不写文件) |
 
-没有 lint / format 脚本,也没有 PR CI;唯一的 workflow 是打 tag 触发的发布流程(`.github/workflows/release.yml`)。
+没有 lint / format 脚本;push / PR CI 运行 `npm test`(`.github/workflows/ci.yml`);`release.yml` 在发布前复用同一门禁
+(`npm test`,`build.test.ts` 负责构建 `lib/`),再显式构建、校验发布内容并发布。
 
 ## 仓库布局
 
@@ -70,6 +72,7 @@
 | `test/service.test.ts` | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试 |
 | `test/jj-command.test.ts` | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试 |
 | `scripts/setup-links.ts` | 可移植的离线依赖引导:已就绪时 no-op、`--check` 只探测、否则软链到 DSH 安装 |
+| `.github/workflows/` | CI:`ci.yml`(push / PR 跑 `npm test`)、`release.yml`(tag 触发发布,复用同一门禁) |
 | `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`) |
 | `cordis.patch.yml` | bundle patch:三行 `insert` + `agent-instructions` 配置覆盖 |
 | `lib/` | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定 |
@@ -144,6 +147,9 @@
 - 测试:`node:test` + `node:assert/strict`,一个测试文件对应一个模块;夹具用 `mktemp` 隔离、显式 `cwd`、
   并自检 jj root 指向夹具目录(防止在真实仓库里建/改夹具——曾发生过共享 workspace 被误操作的事故);
   不要 mock 仓库行为;改行为先补测试。
+- `test/build.test.ts` 额外守护:产物清单从 `src/*.ts` 推导(含 `lib/types/*.d.ts`)、`package.json` 的
+  `main`/`types`/`exports`/`files` 目标必须存在、纯模块的 DSH 运行时 import(单/双引号)均被拒绝、
+  以及手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示)。新增源模块或改打包配置时先让这些断言通过。
 
 ## 常见任务
 
@@ -205,8 +211,14 @@ git 嵌套 / 共享 workspace 等场景;同步 README「已知限制」。
   `refactor(bundle): …`、`ci(release): …`。已用类型:feat / fix / refactor / docs / chore / ci / build / test。
 - 未经用户明确要求不要 push;推送用 `jj git push --bookmark main`。
 - `.gitignore` 由 jj/git 共用(没有 `.jjignore`);`lib/`、`node_modules/`、`scratch/`、`*.tgz`、lockfile 均已忽略。
-- 发布:版本号在 `package.json`,打 `vX.Y.Z` tag 触发 `release.yml`(校验 tag 与版本一致 → typecheck/build/test →
-  npm OIDC 发布 → GitHub Release);不要手改 workflow 中的具体版本号。
+- 发布:插件版本号只在 `package.json`。发版步骤(jj 0.46):
+  1. `jj commit -m "chore(release): vX.Y.Z"`(或 `jj describe -m …` 后 `jj new`)提交版本号改动,再 `jj bookmark set main -r @-`;
+  2. `jj tag set -r @- vX.Y.Z` 创建 tag,`jj tag list` 确认(移动已存在的 tag 需加 `--allow-move`);
+  3. `jj git push --bookmark main` 推送提交,`jj git push --tag vX.Y.Z` 推送 tag(触发 `release.yml`);
+  4. 观察 `release.yml`:校验 tag 与 `package.json` 版本一致 → 跑同一门禁 `npm test` → 显式 `npm run build` →
+     npm OIDC 发布 → GitHub Release;失败可用 `workflow_dispatch` 传入同一 tag 重跑。
+- 工具链 pin(Node 24、jj 0.46.0、typescript 6.0.3、`@types/node` 26.6.5)集中在 `.github/workflows/ci.yml`、
+  `release.yml` 与本文件「环境与准备」,升级时三处同步修改;不要手改插件版本号以外的 workflow 版本。
 
 ## 提交前检查清单
 
