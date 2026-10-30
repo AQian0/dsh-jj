@@ -79,3 +79,34 @@ test('explicit multi-session config is preserved, and rebaseTarget must not be e
   assert.throws(() => assertServiceableConfig(resolveConfig({ rebaseTarget: '   ' })), /rebaseTarget/);
   assert.doesNotThrow(() => assertServiceableConfig(resolveConfig({ rebaseTarget: 'main@origin' })));
 });
+
+test('every Config key and default agrees between schemastery and resolveConfig', () => {
+  const defaults = Config({}) as unknown as Record<string, unknown>;
+  const resolved = resolveConfig({}) as unknown as Record<string, unknown>;
+  assert.deepEqual(
+    Object.keys(resolved).sort(),
+    Object.keys(defaults).sort(),
+    'the schemastery schema and resolveConfig must expose the same keys',
+  );
+  for (const key of Object.keys(defaults)) {
+    assert.deepEqual(resolved[key], defaults[key], `default mismatch for ${key}`);
+  }
+});
+
+test('assertServiceableConfig rejects invalid timing and limit values', () => {
+  const base = resolveConfig({});
+  const cases: ReadonlyArray<readonly [string, () => void]> = [
+    ['timeoutMs', () => assertServiceableConfig({ ...base, timeoutMs: 0 })],
+    ['graceMs', () => assertServiceableConfig({ ...base, graceMs: 0 })],
+    ['maxOutputBytes', () => assertServiceableConfig({ ...base, maxOutputBytes: -1 })],
+    ['detectCacheTtlMs', () => assertServiceableConfig({ ...base, detectCacheTtlMs: 0 })],
+    ['timeoutMs', () => assertServiceableConfig({ ...base, timeoutMs: Number.NaN })],
+    ['timeoutMs', () => assertServiceableConfig({ ...base, timeoutMs: Number.MAX_SAFE_INTEGER + 1 })],
+    ['jjCommand', () => assertServiceableConfig({ ...base, jjCommand: '   ' })],
+    ['gitCommand', () => assertServiceableConfig({ ...base, gitCommand: '' })],
+    ['defaultLogLimit', () => assertServiceableConfig({ ...base, defaultLogLimit: 0 })],
+    ['maxLogLimit', () => assertServiceableConfig({ ...base, maxLogLimit: 10, defaultLogLimit: 20 })],
+  ];
+  for (const [pattern, run] of cases) assert.throws(run, new RegExp(pattern));
+  assert.doesNotThrow(() => assertServiceableConfig(base));
+});
