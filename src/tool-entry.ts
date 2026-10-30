@@ -8,9 +8,29 @@
  * @module dsh-jj/tool-entry
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { resolveConfig, type JjPluginConfig } from './config.ts';
+import { resolveConfig, warnMisplacedConfig, type JjPluginConfig } from './config.ts';
 import { jjToolDefinitions } from './tool-definitions.ts';
 import type { JjToolService, JjToolsHost } from './tool-shared.ts';
+
+/**
+ * Read the host logger without touching an unavailable Cordis service property.
+ *
+ * The tools row injects `tools`/`jj`/`workingDirectory`; `logger` is a built-in context
+ * member, but a defensive read keeps a bare test context (no `get`, no `logger`) working.
+ */
+function hostLogger(ctx: Context): unknown {
+  try {
+    const get = (ctx as unknown as { get?: (name: string, strict?: boolean) => unknown }).get;
+    if (typeof get === 'function') return get.call(ctx, 'logger');
+  } catch {
+    // Fall through to the optional member read.
+  }
+  try {
+    return (ctx as unknown as { logger?: unknown }).logger;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Register every `jj_*` tool.
@@ -94,6 +114,9 @@ export const inject = ['tools', 'jj', 'workingDirectory'] as const;
  * @param config - partial plugin configuration.
  */
 export function apply(ctx: Context, config: JjPluginConfig = {}): void {
+  // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
+  // Warn (never fail) so a key placed on the wrong bundle row is visible.
+  warnMisplacedConfig(hostLogger(ctx), config, 'tools');
   const service = (ctx as unknown as { jj: JjToolService }).jj;
   const disposer = registerJjTools(ctx as unknown as JjToolsHost, { service, config });
   const effect = (ctx as unknown as { effect?: (body: () => () => void, label?: string) => unknown }).effect;

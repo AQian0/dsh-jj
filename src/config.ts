@@ -77,6 +77,98 @@ const SCHEMA_DEFAULTS: ResolvedJjConfig = Config({});
 /** Hard upper bound accepted for timer-valued keys (mirrors DSH MAX_TIMER_DELAY_MS). */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+/** Which bundle row reads a configuration key. */
+export type ConfigOwner = 'runtime' | 'tools' | 'guard';
+
+/** Entry names printed in misplaced-config warnings (`dsh-jj` row names). */
+export const CONFIG_OWNER_ENTRY: Readonly<Record<ConfigOwner, string>> = Object.freeze({
+  runtime: 'jj-runtime',
+  tools: 'jj-tools',
+  guard: 'jj-guard',
+});
+
+/**
+ * The bundle row that actually reads each configuration key.
+ *
+ * Every entry point re-exports the same {@link Config}, so Cordis accepts any key on
+ * any row; only the listed row consumes it. The runtime row owns detection and the
+ * session context, the tools row owns `jj_*` tool behaviour, and the guard row owns
+ * the git-confusion policies. A key configured on the wrong row is silently ignored
+ * by default, which is what {@link misplacedConfigKeys} surfaces.
+ */
+export const CONFIG_OWNERSHIP: Readonly<Record<keyof ResolvedJjConfig, ConfigOwner>> = Object.freeze({
+  jjCommand: 'runtime',
+  gitCommand: 'runtime',
+  timeoutMs: 'runtime',
+  graceMs: 'runtime',
+  maxOutputBytes: 'runtime',
+  detectCacheTtlMs: 'runtime',
+  guardMutatingGit: 'guard',
+  guardGitInJjNative: 'guard',
+  guardJjRepositoryWide: 'guard',
+  guardTools: 'guard',
+  guardCreateWorktree: 'guard',
+  readOnlyGitNotice: 'guard',
+  preferJjContext: 'runtime',
+  multiSessionGuidance: 'runtime',
+  rebaseTarget: 'runtime',
+  commitGuidance: 'runtime',
+  commitStyle: 'runtime',
+  commitStyleCustom: 'runtime',
+  preferSplitCommits: 'runtime',
+  commitStyleSampleLimit: 'runtime',
+  defaultLogLimit: 'tools',
+  maxLogLimit: 'tools',
+  defaultCwd: 'tools',
+});
+
+/**
+ * Keys a row was configured with but does not read.
+ *
+ * Only explicitly supplied keys count: an `undefined` value is never a configuration
+ * mistake. The result is sorted so warnings and tests are deterministic.
+ *
+ * @param config - raw (partial) plugin config for one entry row.
+ * @param owner - the row whose `apply` is validating the config.
+ * @returns the misplaced keys, sorted.
+ */
+export function misplacedConfigKeys(config: JjPluginConfig, owner: ConfigOwner): (keyof ResolvedJjConfig)[] {
+  const misplaced: (keyof ResolvedJjConfig)[] = [];
+  for (const key of Object.keys(CONFIG_OWNERSHIP) as (keyof ResolvedJjConfig)[]) {
+    if (config[key] === undefined) continue;
+    if (CONFIG_OWNERSHIP[key] !== owner) misplaced.push(key);
+  }
+  return misplaced.sort();
+}
+
+/**
+ * Warn once per key that belongs to another bundle row.
+ *
+ * Observability must never block startup: a missing, malformed, or throwing logger is
+ * ignored. The text names both the key and the row that would read it.
+ *
+ * @param logger - host logger (usually `{ warn }`); anything else is a no-op.
+ * @param config - raw (partial) plugin config for one entry row.
+ * @param owner - the row whose `apply` is validating the config.
+ */
+export function warnMisplacedConfig(logger: unknown, config: JjPluginConfig, owner: ConfigOwner): void {
+  const misplaced = misplacedConfigKeys(config, owner);
+  if (misplaced.length === 0) return;
+  const record = typeof logger === 'object' && logger !== null ? (logger as Record<string, unknown>) : undefined;
+  const warn = record?.['warn'];
+  if (typeof warn !== 'function') return;
+  for (const key of misplaced) {
+    const message =
+      `dsh-jj: \`${key}\` belongs to the ${CONFIG_OWNER_ENTRY[CONFIG_OWNERSHIP[key]]} row; ` +
+      `this row (${CONFIG_OWNER_ENTRY[owner]}) ignores it`;
+    try {
+      (warn as (message: string) => void).call(logger, message);
+    } catch {
+      // A failing logger must not break plugin startup.
+    }
+  }
+}
+
 /**
  * Apply contract defaults to a partial config.
  *
