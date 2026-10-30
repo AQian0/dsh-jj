@@ -106,8 +106,20 @@ export interface JjWorkspaceAddResult {
   readonly change: JjChangeRecord;
 }
 
-/** jj's empty root commit id: a destination that resolves to it is never an integration base. */
+/**
+ * jj's empty root commit id as spelled in a SHA-1 repository (the default): a
+ * destination that resolves to it is never an integration base.
+ *
+ * The constant is kept for API compatibility (`src/index.ts` re-exports it and
+ * `test/build.test.ts` asserts the SHA-1 spelling). SHA-256 Git repositories use
+ * 64 zeroes instead, so detection must go through {@link isRootCommitId}.
+ */
 export const ROOT_COMMIT_ID = '0'.repeat(40);
+
+/** Whether a commit id is jj's empty root commit (SHA-1: 40 zeroes, SHA-256: 64). */
+function isRootCommitId(commitId: string): boolean {
+  return /^0{40,}$/.test(commitId);
+}
 
 /** How a hand-off destination was chosen (model-facing provenance). */
 export type JjHandoffTargetSource = 'argument' | 'configured' | 'trunk' | 'main' | 'master';
@@ -435,8 +447,12 @@ export class JjOperations {
         const parsed: unknown = JSON.parse(line);
         descriptions.push(typeof parsed === 'string' ? parsed : String(parsed));
       } catch (error) {
-        // A bounded output stream can cut the last JSON record in half; the complete
-        // records before it are still useful (a style sample is best-effort).
+        // A bounded output stream is cut at an arbitrary byte boundary. DSH's
+        // collected output keeps the TAIL, so the partial record is the FIRST line
+        // and the complete records follow it; runners that keep the head cut the
+        // LAST line instead. A style sample is best-effort: skip the partial head
+        // and stop after a partial tail, but never hide unexpected invalid output.
+        if (result.truncated && index === 0) continue;
         if (result.truncated && index === lines.length - 1) break;
         throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`, {
           argv,
@@ -477,33 +493,54 @@ export class JjOperations {
     if (operationId !== undefined && !OPERATION_ID_RE.test(operationId)) {
       throw badInput('operationId must be a hexadecimal operation id prefix (4-128 characters) as shown by jj_op_log.');
     }
-    const headOperationId = await this.headOperationId(cwd, signal);
+    // Deliberately reads the head *with* its leading snapshot: `jj undo` undoes the
+    // snapshot operation this read creates (when the working copy has unsnapshotted
+    // changes), so that operation is the exact rollback target named below.
+    const headOperationId = await this.readHeadOperationId(cwd, signal, true);
     const argv = operationId === undefined ? ['undo'] : ['op', 'restore', operationId];
     const result = await this.run(cwd, argv, signal);
-    const message = [
-      bound(result.stdout.trim(), 2 * 1024).text,
-      `head operation before this call: ${headOperationId} — to roll back, run \`jj op restore ${headOperationId}\` (a second \`jj undo\` would undo this undo, not redo it).`,
-    ]
-      .filter((line) => line.length > 0)
-      .join('\n');
+    const rollbackHint =
+      headOperationId === undefined
+        ? 'dsh-jj could not read the head operation id; if you need to roll back this undo, inspect the operation log (jj_op_log) and pass the target operation id to jj_undo.'
+        : `head operation before this call: ${headOperationId} — to roll back, run \`jj op restore ${headOperationId}\` (a second \`jj undo\` would undo this undo, not redo it).`;
+    const message = [bound(result.stdout.trim(), 2 * 1024).text, rollbackHint].filter((line) => line.length > 0).join('\n');
     return {
       mode: operationId === undefined ? 'undo' : 'restore',
-      operationId: operationId ?? headOperationId,
-      headOperationId,
+      operationId: operationId ?? headOperationId ?? 'unknown',
+      headOperationId: headOperationId ?? 'unknown',
       message,
     };
   }
 
-  /** `jj op log -n 1 --no-graph -T 'self.id()'` — the self-protection step (contract §8.3b). */
-  async headOperationId(cwd: string, signal?: AbortSignal): Promise<string> {
+  /**
+   * `jj op log -n 1 --no-graph -T 'self.id()'` — the self-protection step
+   * (contract §8.3b).
+   *
+   * The guard calls this before every shell command, so the public entry reads with
+   * `--ignore-working-copy`: a plain `jj op log` would snapshot the working copy and
+   * create an operation on every call (polluting the operation log and changing the
+   * rollback target). `undo()` opts into the snapshot with `snapshot: true` because
+   * it needs the exact operation its own `jj undo` is about to undo.
+   *
+   * @param cwd - workspace directory.
+   * @param signal - cancellation signal.
+   * @param snapshot - allow jj to snapshot the working copy before reading.
+   * @returns the newest recorded operation id, or `undefined` when it cannot be read.
+   */
+  private async readHeadOperationId(cwd: string, signal?: AbortSignal, snapshot = false): Promise<string | undefined> {
     try {
-      const argv = ['op', 'log', '-n', '1', '--no-graph', '-T', 'self.id()'];
+      const argv = ['op', 'log', '-n', '1', '--no-graph', ...(snapshot ? [] : ['--ignore-working-copy']), '-T', 'self.id()'];
       const result = await this.runJj(this.options(cwd, argv, signal));
       const id = result.stdout.trim().split('\n')[0]?.trim();
-      return id !== undefined && id.length > 0 ? id : 'unknown';
+      return id !== undefined && id.length > 0 ? id : undefined;
     } catch {
-      return 'unknown';
+      return undefined;
     }
+  }
+
+  /** `jj op log -n 1 --no-graph -T 'self.id()'`; `'unknown'` when unreadable (compat API). */
+  async headOperationId(cwd: string, signal?: AbortSignal): Promise<string> {
+    return (await this.readHeadOperationId(cwd, signal)) ?? 'unknown';
   }
 
   /** `jj op log -n <n> --no-graph -T 'json(self) ++ "\n"'`. */
@@ -701,7 +738,7 @@ export class JjOperations {
   ): Promise<string> {
     if (destination.trim() === 'trunk()') {
       const trunk = await this.tryReadAt(cwd, destination, signal);
-      if (trunk !== undefined && trunk.commitId === ROOT_COMMIT_ID) {
+      if (trunk !== undefined && isRootCommitId(trunk.commitId)) {
         throw badInput(
           "`trunk()` resolves to jj's empty root commit here: this repository has no fetched remote main (local main/master bookmarks do not define trunk()). Pass a real destination such as `main` or a change id, or call jj_handoff, which resolves the integration target automatically.",
         );
@@ -802,7 +839,7 @@ export class JjOperations {
         unresolved.push(`${candidate.revset} (${candidate.source})`);
         continue;
       }
-      if (change.commitId === ROOT_COMMIT_ID) {
+      if (isRootCommitId(change.commitId)) {
         // An explicitly named root commit is a model mistake, not a signal to
         // silently integrate somewhere else; the fallbacks only rescue defaults.
         if (candidate.source === 'argument') {
@@ -1042,7 +1079,15 @@ export class JjOperations {
     }
   }
 
-  /** Read one revision without throwing: an unresolvable revset reports `undefined` for fallbacks. */
+  /**
+   * Read one revision without throwing only when the *revset* does not resolve.
+   *
+   * Hand-off fallbacks rely on an unresolvable candidate (`main` before it exists)
+   * reporting `undefined`, but infrastructure failures (jj missing, template/parse
+   * failure, broken repository, abort/timeout, stale working copy) must keep their
+   * real error: turning them into "revset does not resolve" made `jj_handoff` claim
+   * it could not find an integration target while the actual cause was invisible.
+   */
   private async tryReadAt(cwd: string, revset: string, signal?: AbortSignal): Promise<JjChangeRecord | undefined> {
     try {
       return await this.readAt(cwd, signal, revset);
@@ -1050,8 +1095,8 @@ export class JjOperations {
       // A stale working copy makes every content read fail; the hand-off wrapper
       // recovers it once, so this must not look like a nonexistent revision.
       if (isStaleWorkingCopyFailure(error)) throw error;
-      if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
-      return undefined;
+      if (error instanceof JjError && error.code === 'JJ_BAD_REVSET') return undefined;
+      throw error;
     }
   }
 
@@ -1065,6 +1110,41 @@ export class JjOperations {
 
 /** Plugin configuration schema re-exported for the service entry. */
 export { Config };
+
+/**
+ * Merge the service-lifetime abort signal with a caller signal.
+ *
+ * Disposal aborts the lifetime controller, so merging it into every runner call is
+ * what makes the documented disposal ladder ("abort → settle pending → clear cache")
+ * actually cancel in-flight `jj`/`git` work instead of awaiting it until its timeout.
+ * `AbortSignal.any` is available on the supported Node versions; the fallback keeps
+ * older hosts working by forwarding both sources into one controller.
+ *
+ * @param lifetime - controller aborted by {@link JjService} disposal.
+ * @param caller - per-call cancellation signal, when the caller supplied one.
+ * @returns a signal that aborts when either source aborts.
+ */
+function mergeAbortSignals(lifetime: AbortSignal, caller?: AbortSignal): AbortSignal {
+  if (caller === undefined) return lifetime;
+  const anyOf = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyOf === 'function') return anyOf([lifetime, caller]);
+  const controller = new AbortController();
+  const onLifetime = (): void => controller.abort(lifetime.reason);
+  const onCaller = (): void => controller.abort(caller.reason);
+  if (lifetime.aborted) onLifetime();
+  else lifetime.addEventListener('abort', onLifetime, { once: true });
+  if (caller.aborted) onCaller();
+  else caller.addEventListener('abort', onCaller, { once: true });
+  controller.signal.addEventListener(
+    'abort',
+    () => {
+      lifetime.removeEventListener('abort', onLifetime);
+      caller.removeEventListener('abort', onCaller);
+    },
+    { once: true },
+  );
+  return controller.signal;
+}
 
 /**
  * `ctx.jj` — the Cordis service face of {@link JjOperations}.
@@ -1088,7 +1168,10 @@ export class JjService extends Service {
     assertServiceableConfig(resolved);
     this.operations = new JjOperations({
       config,
-      runJj: (options) => this.track(createRunJj(ctx, resolved)(options)),
+      // Every operation runs through the lifetime signal so disposal cancels in-flight
+      // jj calls instead of blocking `Promise.allSettled(pending)` until their timeout.
+      runJj: (options) =>
+        this.track(createRunJj(ctx, resolved)({ ...options, signal: mergeAbortSignals(this.lifetime.signal, options.signal) })),
     });
     ctx.effect(() => async () => {
       this.lifetime.abort(new Error('dsh-jj service disposed'));
@@ -1117,7 +1200,7 @@ export class JjService extends Service {
 
   /** Forced refresh of the detection cache. */
   async warm(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor> {
-    const descriptor = await this.track(detectVcs(cwd, this.detectDeps(), signal));
+    const descriptor = await this.track(detectVcs(cwd, this.detectDeps(), mergeAbortSignals(this.lifetime.signal, signal)));
     this.cache.set(this.cacheKey(cwd), { descriptor, probedAt: descriptor.probedAt });
     return descriptor;
   }
