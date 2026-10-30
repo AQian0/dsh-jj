@@ -49,7 +49,9 @@
 | `npm run setup:check` | 只探测依赖是否就绪(`--check`,不写文件) |
 
 没有 lint / format 脚本;push / PR CI 运行 `npm test`(`.github/workflows/ci.yml`);`release.yml` 在发布前复用同一门禁
-(`npm test`,`build.test.ts` 负责构建 `lib/`),再显式构建、校验发布内容并发布。
+(`npm test`,`build.test.ts` 负责构建 `lib/`),再显式构建、校验发布内容并发布。两个 workflow 的 jj 安装会校验资产
+SHA-256,actions 固定到 commit SHA(注释写明来源与升级方式),并显式安装测试专用依赖
+`@deepseek-ai/dsh-session-projection`(本插件不是它的 peer)。
 
 ## 仓库布局
 
@@ -110,7 +112,8 @@
    guard 拒绝文案在 `guard.ts` 的 `build*` 函数。任何路径都不得静默回退到 git。
 9. **配置一致**:`Config` 是默认值与键集合的唯一来源;`ResolvedJjConfig` / `JjPluginConfig` 由
    schemastery `Schemastery.TypeT` / `Partial<...>` 派生,`resolveConfig` 用 `Config({})` 的默认值 + 调用方覆盖,
-   `assertServiceableConfig` 只做构造期业务校验——新增键只需改 `Config` 一处。
+   `assertServiceableConfig` 只做构造期业务校验——新增键只需改 `Config` 一处。三个入口 `apply` 会对
+   「放错 bundle 行」的显式键 `logger.warn`(归属表 `CONFIG_OWNERSHIP`;仅告警、不阻断启动)。
 10. **bundle patch 语义**:`cordis.patch.yml` 里非 `insert` 行会**整体替换**目标行 config:只写改动项会清掉其余键,
     必须重述所有要保留的键(如 `maxBytes: 65536`),并在 `build.test.ts` 里补对应断言。
 11. **版本兼容**:DSH peer 依赖(`@deepseek-ai/dsh-*`)必须写成 caret 范围(如 `^0.2.1-rc.2`),
