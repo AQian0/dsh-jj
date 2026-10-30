@@ -1,78 +1,40 @@
 /**
- * jj operations and the `ctx.jj` service (design contract §5.4 / §5.6).
+ * jj operations layer and the public `service` barrel (design contract §5.4 / §5.6).
  *
  * {@link JjOperations} holds every jj-native operation; it is pure with respect
  * to the host (one injected {@link RunJj}), which makes the whole operation layer
  * testable against real repositories without mounting Cordis.
  *
- * {@link JjService} is the Cordis face: it owns the TTL cache used by the
- * synchronous guard, the disposal ladder (abort → settle pending → clear cache),
- * and the process-lifetime version cache.
+ * The module is split for readability: pure template constants and record parsers
+ * live in `jj-templates`, the Cordis `ctx.jj` service in `jj-service`; both are
+ * re-exported at the bottom so every existing `from './service.ts'` import keeps
+ * working unchanged.
  *
  * @module dsh-jj/service
  */
 
 import { realpathSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
-import { Service, type Context } from '@deepseek-ai/cordis';
 import { assertServiceableConfig, Config, resolveConfig, type JjPluginConfig, type ResolvedJjConfig } from './config.ts';
-import { detectVcs } from './detect.ts';
-import { createRunGit, createRunJj, JjError, runJjChecked, type RunJj } from './jj-command.ts';
-import type { JjChange, JjOperation, JjRunResult, VcsDescriptor, VcsKind } from './types.ts';
-
-/** `jj log -r <rev> --no-graph -T <TPL_STATUS>` template (contract §2.8, verbatim). */
-export const TPL_STATUS =
-  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ ",\\"paths\\":" ++ json(self.diff().files().map(|f| f.path())) ++ "}\\n"';
-
-/**
- * `jj log` change template **without** the diff `paths` field (`TPL_STATUS` minus
- * `paths`).
- *
- * `self.diff()` is the expensive part of `TPL_STATUS`: on a working copy with
- * 3000 changed files one read costs ≈270ms instead of ≈23ms. The generic change
- * reader ({@link JjOperations}'s `readAt`) therefore uses this template; only
- * `status()` (and `commit()`'s path reporting) needs the `paths` field.
- */
-export const TPL_CHANGE =
-  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
-
-/**
- * `jj log` template returning only the commit id of every selected revision.
- *
- * Used for parent/base checks where the full change record (and its diff) is not
- * needed; one line per revision, in jj's revset order.
- */
-const TPL_COMMIT_IDS = 'commit_id ++ "\\n"';
-
-/** `jj log` per-change template (contract §2.8, verbatim). */
-export const TPL_LOG =
-  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description.first_line()) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
-
-/** `jj workspace list` template used by the tools (tab-separated; names may contain spaces). */
-export const TPL_WORKSPACE_LIST_TAB = 'name ++ "\\t" ++ root ++ "\\n"';
-
-/**
- * `jj op log` template (contract §7.3.8): `json(self)` exposes id/description/
- * time/username/hostname/workspace_name/is_snapshot/attributes.
- */
-export const TPL_OP_LOG = 'json(self) ++ "\\n"';
-
-/** `jj bookmark list` template (contract §7.3.11). */
-export const TPL_BOOKMARK_LIST = 'json(self) ++ "\\n"';
-
-/**
- * `jj log` template returning one full description per line as JSON.
- *
- * Used by the commit-style sampler: the first line carries the style, but the
- * model also needs to see body/footer habits, which `TPL_LOG` (`first_line`)
- * intentionally drops.
- */
-export const TPL_DESCRIPTION = 'json(description) ++ "\\n"';
-
-/** Bounded text helper. */
-function bound(text: string, limit: number): { text: string; truncated: boolean } {
-  return text.length <= limit ? { text, truncated: false } : { text: text.slice(0, limit), truncated: true };
-}
+import { JjError, runJjChecked, type RunJj } from './jj-command.ts';
+import {
+  asRecord,
+  bound,
+  changeFromRecord,
+  parseChangeLines,
+  parseJsonLine,
+  TemplateParseError,
+  TPL_BOOKMARK_LIST,
+  TPL_CHANGE,
+  TPL_COMMIT_IDS,
+  TPL_DESCRIPTION,
+  TPL_LOG,
+  TPL_OP_LOG,
+  TPL_STATUS,
+  TPL_WORKSPACE_LIST_TAB,
+  type JjChangeRecord,
+} from './jj-templates.ts';
+import type { JjOperation, JjRunResult } from './types.ts';
 
 /** How `jj rebase` selects the revisions to move (jj 0.46). */
 export type JjRebaseMode = 'revisions' | 'source' | 'branch';
@@ -86,18 +48,6 @@ function badInput(message: string, argv: readonly string[] = []): JjError {
 
 const OPERATION_ID_RE = /^[0-9a-f]{4,128}$/;
 const BOOKMARK_NAME_RE = /^[^\s@]+$/;
-
-/** One jj change, as parsed from the JSON templates. */
-export interface JjChangeRecord extends JjChange {
-  /**
-   * Paths changed by this revision.
-   *
-   * Populated only by `status()` and `commit()` (which read with `TPL_STATUS`);
-   * the generic change reader uses the lightweight `TPL_CHANGE` and leaves this
-   * array empty so it never pays for `self.diff()`.
-   */
-  readonly paths: readonly string[];
-}
 
 /** Result of `status()`. */
 export interface JjStatusResult {
@@ -234,68 +184,44 @@ function canonicalPath(path: string): string {
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
-}
-
-function parseJsonLine(stdout: string, argv: readonly string[]): Record<string, unknown> {
-  const line = stdout.split('\n').find((candidate) => candidate.trim().length > 0);
-  if (line === undefined) {
-    throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` returned no parseable record.`, {
-      argv,
+/**
+ * Re-throw a pure template parse failure as the contract `JjError`.
+ *
+ * `jj-templates` cannot construct `JjError` itself (it must stay free of the
+ * subprocess adapter), so its parsers throw {@link TemplateParseError}; this is
+ * where the original `JJ_OUTPUT_INVALID` code, message, and detail are restored.
+ *
+ * @param error - whatever a parser threw.
+ * @throws JjError when the error is a template parse failure, else rethrows it.
+ */
+function contractParseFailure(error: unknown): never {
+  if (error instanceof TemplateParseError) {
+    throw new JjError('JJ_OUTPUT_INVALID', error.message, {
+      argv: error.detail.argv,
       exitCode: 0,
-      stderr: '',
-      stdout: bound(stdout, 512).text,
+      stderr: error.detail.stderr,
+      stdout: error.detail.stdout,
     });
   }
+  throw error;
+}
+
+/** Parse the first JSON record of a single-revision read; failures become `JjError`. */
+function readChangeRecord(stdout: string, argv: readonly string[]): JjChangeRecord {
   try {
-    const parsed: unknown = JSON.parse(line);
-    const record = asRecord(parsed);
-    if (record === undefined) throw new Error('not an object');
-    return record;
+    return changeFromRecord(parseJsonLine(stdout, argv));
   } catch (error) {
-    throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(stdout, 512).text}`, {
-      argv,
-      exitCode: 0,
-      stderr: error instanceof Error ? error.message : String(error),
-      stdout: bound(stdout, 512).text,
-    });
+    contractParseFailure(error);
   }
 }
 
-function changeFromRecord(record: Record<string, unknown>): JjChangeRecord {
-  const bookmarks = Array.isArray(record['bookmarks']) ? record['bookmarks'].map((entry) => String(entry)) : [];
-  const paths = Array.isArray(record['paths']) ? record['paths'].map((entry) => String(entry)) : [];
-  return {
-    changeId: String(record['change_id'] ?? ''),
-    commitId: String(record['commit_id'] ?? ''),
-    description: String(record['description'] ?? '').replace(/\n$/, ''),
-    empty: record['empty'] === true,
-    conflict: record['conflict'] === true,
-    currentWorkingCopy: record['current_working_copy'] === true,
-    bookmarks,
-    author: String(record['author'] ?? ''),
-    paths,
-  };
-}
-
-function parseChangeLines(stdout: string, argv: readonly string[]): JjChangeRecord[] {
-  const changes: JjChangeRecord[] = [];
-  for (const line of stdout.split('\n')) {
-    if (line.trim().length === 0) continue;
-    try {
-      const record = asRecord(JSON.parse(line));
-      if (record !== undefined) changes.push(changeFromRecord(record));
-    } catch {
-      throw new JjError('JJ_OUTPUT_INVALID', `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(stdout, 512).text}`, {
-        argv,
-        exitCode: 0,
-        stderr: '',
-        stdout: bound(stdout, 512).text,
-      });
-    }
+/** Parse every JSON record of a multi-revision read; failures become `JjError`. */
+function readChangeRecords(stdout: string, argv: readonly string[]): JjChangeRecord[] {
+  try {
+    return parseChangeLines(stdout, argv);
+  } catch (error) {
+    contractParseFailure(error);
   }
-  return changes;
 }
 
 /** Every jj-native operation dsh-jj exposes, over one injected runner. */
@@ -343,7 +269,7 @@ export class JjOperations {
   async status(cwd: string, signal?: AbortSignal): Promise<JjStatusResult> {
     const argv = ['log', '-r', '@', '--no-graph', '-T', TPL_STATUS];
     const changeResult = await this.run(cwd, argv, signal);
-    const change = changeFromRecord(parseJsonLine(changeResult.stdout, argv));
+    const change = readChangeRecord(changeResult.stdout, argv);
     const statusArgv = ['status'];
     const statusResult = await this.run(cwd, statusArgv, signal);
     const raw = statusResult.stdout;
@@ -364,7 +290,7 @@ export class JjOperations {
     // to metadata reads, which are listed below).
     const argv = ['log', '-r', revset, '--no-graph', '--limit', String(limit), '-T', TPL_LOG];
     const result = await this.run(cwd, argv, signal);
-    return parseChangeLines(result.stdout, argv);
+    return readChangeRecords(result.stdout, argv);
   }
 
   /** `jj diff -r <revset> (--stat|--git) [-- <paths…>]`. */
@@ -1197,7 +1123,7 @@ export class JjOperations {
   private async readAt(cwd: string, signal?: AbortSignal, revset = '@'): Promise<JjChangeRecord> {
     const argv = ['log', '-r', revset, '--no-graph', '-T', TPL_CHANGE];
     const result = await this.run(cwd, argv, signal);
-    return changeFromRecord(parseJsonLine(result.stdout, argv));
+    return readChangeRecord(result.stdout, argv);
   }
 
   /** Read every revision selected by a revset (used to fold `@` and `@-` into one call). */
@@ -1209,215 +1135,15 @@ export class JjOperations {
   ): Promise<JjChangeRecord[]> {
     const argv = ['log', '-r', revset, '--no-graph', '-T', template];
     const result = await this.run(cwd, argv, signal);
-    return parseChangeLines(result.stdout, argv);
+    return readChangeRecords(result.stdout, argv);
   }
 }
 
 /** Plugin configuration schema re-exported for the service entry. */
 export { Config };
 
-/**
- * Merge the service-lifetime abort signal with a caller signal.
- *
- * Disposal aborts the lifetime controller, so merging it into every runner call is
- * what makes the documented disposal ladder ("abort → settle pending → clear cache")
- * actually cancel in-flight `jj`/`git` work instead of awaiting it until its timeout.
- * `AbortSignal.any` is available on the supported Node versions; the fallback keeps
- * older hosts working by forwarding both sources into one controller.
- *
- * @param lifetime - controller aborted by {@link JjService} disposal.
- * @param caller - per-call cancellation signal, when the caller supplied one.
- * @returns a signal that aborts when either source aborts.
- */
-function mergeAbortSignals(lifetime: AbortSignal, caller?: AbortSignal): AbortSignal {
-  if (caller === undefined) return lifetime;
-  const anyOf = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (typeof anyOf === 'function') return anyOf([lifetime, caller]);
-  const controller = new AbortController();
-  const onLifetime = (): void => controller.abort(lifetime.reason);
-  const onCaller = (): void => controller.abort(caller.reason);
-  if (lifetime.aborted) onLifetime();
-  else lifetime.addEventListener('abort', onLifetime, { once: true });
-  if (caller.aborted) onCaller();
-  else caller.addEventListener('abort', onCaller, { once: true });
-  controller.signal.addEventListener(
-    'abort',
-    () => {
-      lifetime.removeEventListener('abort', onLifetime);
-      caller.removeEventListener('abort', onCaller);
-    },
-    { once: true },
-  );
-  return controller.signal;
-}
+/** Pure template constants and record parsers (see `jj-templates`). */
+export * from './jj-templates.ts';
 
-/**
- * `ctx.jj` — the Cordis service face of {@link JjOperations}.
- *
- * The TTL cache is what makes the synchronous guard possible: `peek` never
- * spawns, `warm` refreshes, and disposal aborts in-flight work and clears it.
- * Concurrent probes for one cwd are coalesced (one `detectVcs` per in-flight key)
- * and the cache is pruned so a long-lived process with many workspaces cannot grow
- * it without bound.
- */
-export class JjService extends Service {
-  /** Hard cap on cached descriptors (one descriptor is ≈1.5 KB in JSON). */
-  static readonly DETECT_CACHE_MAX_ENTRIES = 64;
-  /** Cached descriptors older than max(ttl × 6, 5 min) are pruned on refresh. */
-  static readonly DETECT_CACHE_MIN_MAX_AGE_MS = 5 * 60_000;
-
-  static inject = ['subprocess', 'workingDirectory'];
-  static Config = Config;
-
-  readonly operations: JjOperations;
-  private readonly lifetime = new AbortController();
-  private readonly pending = new Set<Promise<unknown>>();
-  private readonly cache = new Map<string, { descriptor: VcsDescriptor; probedAt: number }>();
-  /** In-flight detection per cache key; concurrent detect/warm calls share one probe. */
-  private readonly inflight = new Map<string, Promise<VcsDescriptor>>();
-  private versionCache: { jj: string | undefined; git: string | undefined } | undefined;
-
-  constructor(ctx: Context, config: JjPluginConfig = {}) {
-    super(ctx, 'jj');
-    const resolved = resolveConfig(config);
-    assertServiceableConfig(resolved);
-    this.operations = new JjOperations({
-      config,
-      // Every operation runs through the lifetime signal so disposal cancels in-flight
-      // jj calls instead of blocking `Promise.allSettled(pending)` until their timeout.
-      runJj: (options) =>
-        this.track(createRunJj(ctx, resolved)({ ...options, signal: mergeAbortSignals(this.lifetime.signal, options.signal) })),
-    });
-    ctx.effect(() => async () => {
-      this.lifetime.abort(new Error('dsh-jj service disposed'));
-      await Promise.allSettled(this.pending);
-      this.pending.clear();
-      this.inflight.clear();
-      this.cache.clear();
-    });
-  }
-
-  /** Track one in-flight jj call so disposal can settle it. */
-  private track<T>(promise: Promise<T>): Promise<T> {
-    this.pending.add(promise);
-    void promise.finally(() => this.pending.delete(promise)).catch(() => undefined);
-    return promise;
-  }
-
-  /** TTL-cached detection (contract §6.4). */
-  async detect(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor> {
-    const key = this.cacheKey(cwd);
-    const cached = this.cache.get(key);
-    if (cached !== undefined && Date.now() - cached.probedAt <= this.operations.config.detectCacheTtlMs) {
-      return cached.descriptor;
-    }
-    return await this.warm(cwd, signal);
-  }
-
-  /**
-   * Forced refresh of the detection cache.
-   *
-   * Concurrent calls for the same cwd share one probe: the guard warm-up and
-   * parallel tool calls would otherwise each run the full 5-process `detectVcs`.
-   * The shared probe is cleaned up on success and on failure.
-   */
-  async warm(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor> {
-    const key = this.cacheKey(cwd);
-    const pendingProbe = this.inflight.get(key);
-    if (pendingProbe !== undefined) return await pendingProbe;
-    const probe = (async (): Promise<VcsDescriptor> => {
-      const descriptor = await detectVcs(cwd, this.detectDeps(), mergeAbortSignals(this.lifetime.signal, signal));
-      this.cache.set(key, { descriptor, probedAt: descriptor.probedAt });
-      this.pruneCache();
-      return descriptor;
-    })();
-    const tracked = this.track(probe);
-    this.inflight.set(key, tracked);
-    try {
-      return await tracked;
-    } finally {
-      if (this.inflight.get(key) === tracked) this.inflight.delete(key);
-    }
-  }
-
-  /**
-   * Keep the synchronous cache bounded: drop stale entries and evict the oldest
-   * descriptors above {@link JjService.DETECT_CACHE_MAX_ENTRIES}.
-   */
-  private pruneCache(): void {
-    const ttl = this.operations.config.detectCacheTtlMs;
-    const maxAge = Math.max(ttl * 6, JjService.DETECT_CACHE_MIN_MAX_AGE_MS);
-    const now = Date.now();
-    for (const [key, entry] of this.cache) {
-      if (now - entry.probedAt > maxAge) this.cache.delete(key);
-    }
-    if (this.cache.size <= JjService.DETECT_CACHE_MAX_ENTRIES) return;
-    const oldestFirst = [...this.cache.entries()].sort((left, right) => left[1].probedAt - right[1].probedAt);
-    for (const [key] of oldestFirst.slice(0, this.cache.size - JjService.DETECT_CACHE_MAX_ENTRIES)) {
-      this.cache.delete(key);
-    }
-  }
-
-  /** Synchronous cache read for the guard; `undefined` on a miss (fail-open). */
-  peek(cwd: string): VcsDescriptor | undefined {
-    return this.cache.get(this.cacheKey(cwd))?.descriptor;
-  }
-
-  /** Single-line human summary (contract §5.4). */
-  describe(target: VcsDescriptor | VcsKind): string {
-    if (typeof target === 'string') {
-      switch (target) {
-        case 'git':
-          return 'Git repository (no Jujutsu workspace)';
-        case 'jj-native':
-          return 'Jujutsu (jj) native repository';
-        case 'jj-colocated':
-          return 'Jujutsu (jj) colocated with Git';
-        case 'none':
-          return 'No repository';
-      }
-    }
-    const descriptor = target;
-    return `${descriptor.kind} workspace "${descriptor.workspaceName ?? 'unknown'}" at ${descriptor.root} (${descriptor.jjVersion ?? 'jj version unknown'})`;
-  }
-
-  /**
-   * Process-lifetime version cache.
-   *
-   * Only a *successful* jj probe is cached: caching `undefined` would freeze a
-   * transient failure (or a probe that ran before jj was installed) for the whole
-   * process lifetime.
-   */
-  async version(cwd: string, signal?: AbortSignal): Promise<{ jj: string | undefined; git: string | undefined }> {
-    if (this.versionCache !== undefined) return this.versionCache;
-    const probe = await this.operations.version(cwd, signal);
-    const descriptor = this.peek(cwd);
-    const resolved = { jj: probe.jj ?? descriptor?.jjVersion, git: descriptor?.gitVersion };
-    if (resolved.jj !== undefined) this.versionCache = resolved;
-    return resolved;
-  }
-
-  private cacheKey(cwd: string): string {
-    try {
-      return resolveKey(cwd);
-    } catch {
-      return cwd;
-    }
-  }
-
-  private detectDeps() {
-    const resolved = this.operations.config;
-    return {
-      runJj: createRunJj(this.ctx, resolved),
-      runGit: createRunGit(this.ctx, resolved),
-      jjCommand: resolved.jjCommand,
-      gitCommand: resolved.gitCommand,
-      timeoutMs: resolved.timeoutMs,
-    };
-  }
-}
-
-function resolveKey(cwd: string): string {
-  // path.resolve without realpath: the guard's sync path cannot do I/O.
-  return cwd.startsWith('/') ? cwd.replace(/\/+$/, '') || '/' : cwd;
-}
+/** The Cordis `ctx.jj` service (see `jj-service`). */
+export * from './jj-service.ts';
