@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj } from '../src/jj-command.ts';
-import { JjOperations, TPL_STATUS } from '../src/service.ts';
+import { JjOperations, TPL_CHANGE, TPL_STATUS } from '../src/service.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
 import { assertToolchain, initGit, initJjColocated, initJjNative, initJjSha256, makeFixture, mustRun, realpath, type Fixture } from './helpers/fixtures.ts';
 import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools';
@@ -496,6 +496,24 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
   assert.deepEqual([...missed.workingCopyPaths], ['two.txt'], 'the real change remains in the working copy');
 });
 
+test('operation layer: jj commit reads the committed change and the new @ in one log call', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-commit-single-read');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await fx.run(['bash', '-c', 'printf one > one.txt; printf two > two.txt'], { cwd: repo, timeoutMs: 5_000 });
+
+  calls.length = 0;
+  const result = await operations.commit(repo, 'feat: merged read', ['one.txt']);
+  assert.equal(calls.length, 2, 'one commit spawn plus one merged read spawn');
+  const mergedReads = calls.filter((argv) => argv.includes('@ | @-'));
+  assert.equal(mergedReads.length, 1, 'the committed change and the new @ come from a single jj log call');
+  assert.deepEqual([...result.committed.paths], ['one.txt'], 'the merged read still reports the committed paths');
+  assert.deepEqual([...result.workingCopy.paths], ['two.txt'], 'the merged read still reports the remaining paths');
+});
+
 test('jj_commit_style inherits Conventional history, asks when undecidable, and honours config', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tool-style');
   await assertToolchain(fx.run, fx.root);
@@ -642,6 +660,20 @@ test('TPL_STATUS is the contract template and parses into a change', async (t) =
   assert.match(result.stdout, /\n$/, 'the template ends every record with a newline');
 });
 
+test('TPL_CHANGE is the lightweight change template without diff paths', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-template-change');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  // A dirty working copy must not leak paths into the lightweight template: the
+  // whole point is to skip `self.diff()` on generic change reads.
+  await fx.run(['bash', '-c', 'printf dirty > dirty.txt'], { cwd: repo, timeoutMs: 5_000 });
+  const result = await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'log', '-r', '@', '--no-graph', '-T', TPL_CHANGE], repo);
+  assert.match(result.stdout, /"change_id":/);
+  assert.match(result.stdout, /"current_working_copy":/);
+  assert.doesNotMatch(result.stdout, /"paths":/);
+  assert.doesNotMatch(result.stdout, /self\.diff\(\)/);
+  assert.match(result.stdout, /\n$/, 'the template ends every record with a newline');
+});
+
 // ---------------------------------------------------------------------------
 // End-of-work hand-off (jj_handoff) and session-owned workspace cleanup.
 // ---------------------------------------------------------------------------
@@ -730,10 +762,15 @@ test('operation layer: jj_handoff reports an already-integrated stack without re
   assert.ok(result.firstChangeId.length > 0);
   assert.match(result.message, /already/);
   assert.ok(!calls.some((argv) => argv.includes('rebase')), 'no rebase is spawned when the stack already sits on the target');
+  assert.ok(calls.length <= 7, `the clean integrated hand-off budget is 7 spawns, saw ${calls.length}`);
+  assert.ok(
+    !calls.some((argv) => argv.includes('bookmark') && argv.includes('list')),
+    'the happy path must not list bookmarks just to build an unused error hint',
+  );
 });
 
 test('operation layer: jj_handoff asks for a commit instead of folding uncommitted changes into the rebase', async (t) => {
-  const { fx, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-dirty');
+  const { fx, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-dirty');
   await writeFixtureFile(fx, ws, 'dirty.txt', 'dirty');
 
   const result = await operations.handoff(ws);
@@ -741,6 +778,9 @@ test('operation layer: jj_handoff asks for a commit instead of folding uncommitt
   assert.equal(result.rebased, false);
   assert.match(result.message, /Commit them first with jj_commit/);
   assert.equal(result.stack.length, 1, 'the working-copy change is reported back to the model');
+  assert.ok(calls.length <= 1, `a dirty working copy only pays for the @ read, saw ${calls.length} spawns`);
+  assert.ok(!calls.some((argv) => argv.includes('fetch')), 'no git fetch is attempted when the working copy needs a commit');
+  assert.equal(result.fetch.status, 'skipped', 'the skipped fetch is reported to the model');
 });
 
 test('operation layer: jj_handoff surfaces conflicts as data instead of stopping the session', async (t) => {
@@ -1035,6 +1075,9 @@ test('operation layer: jj_handoff moves a bookmark on an already-integrated stac
   assert.ok(tip !== undefined);
   assert.equal(result.bookmark?.target, tip.commitId);
   assert.ok(!calls.some((argv) => argv.includes('fetch')), 'fetch:false spawns no git fetch');
+  assert.ok(calls.length <= 9, `the integrated+bookmark budget is 9 spawns, saw ${calls.length}`);
+  const bookmarkLists = calls.filter((argv) => argv.includes('bookmark') && argv.includes('list'));
+  assert.equal(bookmarkLists.length, 1, 'only the pre-set existence check lists bookmarks; the target is known');
 });
 
 test('operation layer: jj_handoff falls back to master and ignores an unresolvable configured target', async (t) => {
