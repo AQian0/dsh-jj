@@ -146,6 +146,8 @@ Use the jj equivalent instead:
 > `maxOutputBytes` / `detectCacheTtlMs` 由 `jj-runtime` 行读取（超时、截断与命令名经 `ctx.jj` 作用于全部工具）；
 > `guard*` 开头的键和 `readOnlyGitNotice` 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` / `defaultCwd`
 > 由 `jj-tools` 行读取。
+>
+> 把某个键写到不读取它的入口行时，该行启动时只输出一条 `logger.warn` 提示并忽略它，不会阻断启动。
 
 ## 已知限制
 
