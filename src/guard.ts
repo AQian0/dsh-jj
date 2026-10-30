@@ -896,7 +896,11 @@ export function installGitConfusionGuard(
       const cwd = resolvedCwd.cwd;
       const descriptor = peek(cwd);
       if (descriptor === undefined) return undefined;
-      if (!isJjKind(descriptor.kind) && descriptor.jjRoot === undefined) return undefined;
+      // Nearest repository owns the directory, the same rule the git-command path
+      // uses (F6): a nested Git repository inside a jj workspace is a plain Git
+      // repository, so creating a worktree there does not affect the jj workspace.
+      // Only a directory actually owned by jj is refused.
+      if (!isJjKind(descriptor.kind)) return undefined;
       const message = buildWorktreeToolRefusalMessage(execution.name, descriptor);
       const emit = optionalMember(host, 'emit');
       if (typeof emit === 'function') {

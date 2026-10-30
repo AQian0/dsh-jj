@@ -195,6 +195,16 @@ test('F6 shadowed case: a nested Git repository is not guarded', async (t) => {
   const harness = createGuardContext();
   install(harness, { defaultCwd: nested });
   assert.equal(harness.runGuard(bash('git commit -m x', nested)), undefined, 'git owns this directory');
+
+  // The nearest-repository rule also covers tools: this directory is a plain Git
+  // repository, so `create_worktree` is allowed (the jj workspace is only an ancestor).
+  const nestedToolHarness = createGuardContext();
+  install(nestedToolHarness, { defaultCwd: nested });
+  assert.equal(
+    nestedToolHarness.runGuard({ name: 'create_worktree', arguments: { name: 'feature' } }),
+    undefined,
+    'create_worktree follows the nearest repository, like git commands do',
+  );
 });
 
 test('unknown and unparsable invocations are never blocked', async (t) => {
