@@ -263,7 +263,9 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
         if (!sniffed.kind.startsWith('jj-')) return '';
         kind = sniffed.kind;
         root = sniffed.jjRoot ?? sniffed.cwd;
-        workspaceName = (sniffed as { workspaceName?: string }).workspaceName;
+        // The filesystem sniff cannot resolve a workspace *name* (`jj workspace
+        // list` is the only source); leave it undefined instead of reading a field
+        // the sniff result does not have.
         identity = {
           workspaceRoot: root,
           ...(sniffed.jjRepoPath !== undefined ? { jjRepoPath: sniffed.jjRepoPath } : {}),
