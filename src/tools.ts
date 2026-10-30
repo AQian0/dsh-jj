@@ -582,7 +582,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_op_log',
       description:
-        'Show the Jujutsu (jj) operation log — the recorded history of repository mutations, including automatic working-copy snapshots. Use it to find an operation id for jj_undo.',
+        'Show the Jujutsu (jj) operation log — the recorded history of repository mutations, including automatic working-copy snapshots. This is jj, not git: the operation log is not a git reflog and captures every jj mutation, so use it to find an operation id for jj_undo.',
       parameters: {
         limit: { type: 'integer', description: 'Maximum operations to return; 1…100, default 20.' },
       },
@@ -668,7 +668,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
 
     defineTool({
       name: 'jj_workspace_list',
-      description: 'List the Jujutsu (jj) workspaces of this repository. Each workspace is a separate working copy with its own current change (@).',
+      description:
+        'List the Jujutsu (jj) workspaces of this repository. This is jj, not git: each workspace is a separate jj working copy with its own current change (@), registered with jj — not a git worktree.',
       parameters: {},
       output: {
         schema: {
@@ -711,7 +712,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_bookmark_list',
       description:
-        "List Jujutsu (jj) bookmarks. Bookmarks are jj's optional named pointers: unlike git branches they are not required to create or keep changes, so most changes may have no bookmark at all.",
+        "List Jujutsu (jj) bookmarks. This is jj, not git: bookmarks are jj's optional named pointers, not git branches — they are not required to create or keep changes, so most changes may have no bookmark at all.",
       parameters: {
         allRemotes: { type: 'boolean', description: 'Also include remote-tracking entries (name@remote).' },
       },
@@ -748,7 +749,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_bookmark_set',
       description:
-        'Create or move a Jujutsu (jj) bookmark to a revision. jj refuses backward or sideways moves unless explicitly allowed, because that usually means the wrong revision was selected.',
+        'Create or move a Jujutsu (jj) bookmark to a revision. This is jj, not git: a bookmark is jj\'s named pointer with its own move rules, not a git branch. jj refuses backward or sideways moves unless explicitly allowed, because that usually means the wrong revision was selected.',
       parameters: {
         name: { type: 'string', description: "Bookmark name; must not contain whitespace or '@'.", required: true },
         revset: { type: 'string', description: "jj revset the bookmark should point at; defaults to '@'." },
@@ -935,7 +936,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_cleanup',
       description:
-        'Unregister this session\'s own temporary Jujutsu (jj) workspace after a verified hand-off. It moves the session back to the default workspace (working_directory set) and runs jj workspace forget only for a workspace this exact session created through jj_workspace_add; any other workspace is refused and must be cleaned by the user. The directory keeps its files on disk. Use it instead of leaving a registered workspace behind or asking the user to forget it.',
+        'Unregister this session\'s own temporary Jujutsu (jj) workspace after a verified hand-off. This is jj, not git: it unregisters a jj workspace (not a git worktree), moves the session back to the default workspace (working_directory set), and runs jj workspace forget only for a workspace this exact session created through jj_workspace_add; any other workspace is refused and must be cleaned by the user. The directory keeps its files on disk. Use it instead of leaving a registered workspace behind or asking the user to forget it.',
       parameters: {},
       output: {
         schema: {

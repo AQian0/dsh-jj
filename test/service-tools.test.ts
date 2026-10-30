@@ -239,24 +239,9 @@ test('all 17 jj_* tools are defined with contract names, descriptions, and schem
     'jj_workspace_cleanup',
   ];
   assert.deepEqual([...byName.keys()], expected);
-  const antiConfusion = new Set([
-    'jj_status',
-    'jj_log',
-    'jj_diff',
-    'jj_new',
-    'jj_commit',
-    'jj_describe',
-    'jj_commit_style',
-    'jj_squash',
-    'jj_undo',
-    'jj_workspace_add',
-    'jj_rebase',
-  ]);
   for (const definition of definitions) {
     assert.match(definition.description, /Jujutsu \(jj\)/, `${definition.name} must name jj`);
-    if (antiConfusion.has(definition.name)) {
-      assert.match(definition.description, /jj, not git/, `${definition.name} must distinguish itself from git`);
-    }
+    assert.match(definition.description, /jj, not git/, `${definition.name} must distinguish itself from git`);
     assert.equal(typeof definition.execute, 'function');
     assert.equal(typeof definition.output.render, 'function');
     assert.equal(definition.output.schema.type, 'object');
