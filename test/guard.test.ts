@@ -684,3 +684,64 @@ test('audited wrapper / attached-option bypasses are refused', async (t) => {
   });
   assert.match(attached ?? '', /targets `/, 'an attached -R target is still scope creep');
 });
+
+test('guard warm-up reuses the TTL detection cache for ordinary commands', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-ttl');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  let warms = 0;
+  let detects = 0;
+  const service = {
+    peek: () => ({ kind: 'jj-colocated', jjRoot: colo, root: colo, workspaceName: 'default' }),
+    warm: async () => {
+      warms += 1;
+    },
+    detect: async () => {
+      detects += 1;
+    },
+    operations: { headOperationId: async () => 'deadbeef' },
+  } as unknown as GuardServiceLike;
+  install(harness, { config: { defaultCwd: colo }, service });
+
+  // Ordinary shell call: TTL cache, no forced refresh.
+  await harness.runPipeline({ name: 'bash', callId: 'ttl-ls', arguments: { command: 'ls', workdir: colo } });
+  assert.equal(detects, 1);
+  assert.equal(warms, 0);
+
+  // Mutating git: still TTL (the hard-deny scopes below are what force freshness).
+  await harness.runPipeline({ name: 'bash', callId: 'ttl-git', arguments: { command: 'git commit -m x', workdir: colo } });
+  assert.equal(detects, 2);
+  assert.equal(warms, 0);
+
+  // Destructive/repo-wide/scope-creep jj commands keep the forced refresh.
+  await harness.runPipeline({ name: 'bash', callId: 'ttl-restore', arguments: { command: 'jj restore', workdir: colo } });
+  assert.equal(warms, 1);
+  await harness.runPipeline({ name: 'bash', callId: 'ttl-undo', arguments: { command: 'jj undo', workdir: colo } });
+  assert.equal(warms, 2);
+  await harness.runPipeline({
+    name: 'bash',
+    callId: 'ttl-scope',
+    arguments: { command: `jj -R ${colo} undo`, workdir: colo },
+  });
+  assert.equal(warms, 3);
+
+  // A command-less guarded call (create_worktree) uses the TTL path too.
+  await harness.runPipeline({ name: 'create_worktree', callId: 'ttl-wt', arguments: { name: 'x' } });
+  assert.equal(detects, 3);
+});
+
+test('a service without a TTL detect entry keeps the forced warm-up fallback', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-ttl-fallback');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  let warms = 0;
+  const service = {
+    peek: () => ({ kind: 'jj-colocated', jjRoot: colo, root: colo, workspaceName: 'default' }),
+    warm: async () => {
+      warms += 1;
+    },
+  } as unknown as GuardServiceLike;
+  install(harness, { config: { defaultCwd: colo }, service });
+  await harness.runPipeline({ name: 'bash', callId: 'fallback-ls', arguments: { command: 'ls', workdir: colo } });
+  assert.equal(warms, 1);
+});
