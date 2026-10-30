@@ -9,7 +9,8 @@
  * @module dsh-jj/tools
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
@@ -95,6 +96,21 @@ function canonicalWorkspacePath(path: string): string {
     return realpathSync(path);
   } catch {
     return path;
+  }
+}
+
+/**
+ * Whether this session runs in the repository's root ("default") workspace.
+ *
+ * Determined from the layout, not the name: the root workspace owns `.jj/repo` as
+ * a real directory, while a linked workspace's `.jj/repo` is a pointer file. This
+ * keeps the `firstChange` safety requirement when the root workspace was renamed.
+ */
+function isRootWorkspace(descriptor: VcsDescriptor): boolean {
+  try {
+    return statSync(join(descriptor.root, '.jj', 'repo')).isDirectory();
+  } catch {
+    return (descriptor.workspaceName ?? 'default') === 'default';
   }
 }
 
@@ -807,7 +823,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         firstChange: {
           type: 'string',
           description:
-            "Bottom-most change id of this workspace's stack above the resolved target. Omit inside a dedicated session workspace (the stack above the destination is detected automatically). Required in the default workspace, whose history may contain changes this session does not own; the tool rejects a change that is not the stack bottom (for example '@') because moving only part of the stack would falsely report success.",
+            "Bottom-most change id of this workspace's stack above the resolved target. Omit inside a dedicated session workspace (the stack above the destination is detected automatically). Required in the root (default) workspace — detected by layout, so a renamed root workspace cannot bypass it — whose history may contain changes this session does not own; the tool rejects a change that is not the stack bottom (for example '@') because moving only part of the stack would falsely report success.",
         },
         bookmark: {
           type: 'string',
@@ -877,9 +893,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const descriptor = await requireWorkspace(context, cwd, exec.signal);
         const workspaceName = descriptor.workspaceName ?? 'default';
         const explicitFirst = args.firstChange?.trim();
-        if (workspaceName === 'default' && (explicitFirst === undefined || explicitFirst.length === 0)) {
+        if (isRootWorkspace(descriptor) && (explicitFirst === undefined || explicitFirst.length === 0)) {
           throw new Error(
-            'jj_handoff in the default workspace needs `firstChange` (the bottom-most change id this session created): the default workspace history may contain changes from earlier work, and jj_handoff must never rebase changes it does not own. Inspect jj_log when unsure. Inside a dedicated session workspace the stack is detected automatically.',
+            'jj_handoff in the root (default) workspace needs `firstChange` (the bottom-most change id this session created): the root workspace history may contain changes from earlier work, and jj_handoff must never rebase changes it does not own. Inspect jj_log when unsure. Inside a dedicated session workspace the stack is detected automatically.',
           );
         }
         const result = await operations.handoff(

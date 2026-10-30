@@ -806,7 +806,7 @@ test('jj_handoff tool: runs the whole hand-off and reports model next steps', as
   assert.match(String(value['nextSteps']), /Report the rebased change ids/);
   assert.match(String(value['nextSteps']), /user action/, 'cleanup of a workspace not created through jj_workspace_add stays with the user');
 
-  // The default workspace requires the explicit stack bottom: never rebase foreign history.
+  // The root workspace requires the explicit stack bottom: never rebase foreign history.
   fx.cwd = repo;
   await assert.rejects(() => handoff.execute({}, fakeExec()), /needs `firstChange`/);
   await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'feat: own change'], repo);
@@ -817,6 +817,13 @@ test('jj_handoff tool: runs the whole hand-off and reports model next steps', as
   const defaultValue = (await handoff.execute({ firstChange: own.changeId }, fakeExec())) as Record<string, unknown>;
   assert.equal(defaultValue['alreadyIntegrated'], true);
   assert.equal(defaultValue['workspaceName'], 'default');
+
+  // The protection is layout-based: renaming the root workspace cannot bypass it.
+  await mustRun(fx.run, ['jj', 'workspace', 'rename', 'root-renamed'], repo);
+  assert.equal((await operations.status(repo)).change.currentWorkingCopy, true);
+  const renamedDefinitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get('jj_handoff')!;
+  fx.cwd = repo;
+  await assert.rejects(() => renamedDefinitions.execute({}, fakeExec()), /needs `firstChange`/);
 });
 
 test('jj_workspace_cleanup tool: unregisters only a session-created workspace and returns to the default workspace', async (t) => {
@@ -901,8 +908,10 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
     'a recreated workspace with the same name at another root is not session-owned',
   );
 
-  // A workspace created without an explicit name is still attributed correctly.
+  // A workspace created without an explicit name is still attributed correctly,
+  // even when jj's alphabetical workspace order would end on a user workspace.
   fx.cwd = repo;
+  await mustRun(fx.run, ['jj', 'workspace', 'add', join(fx.root, 'zzz-user-ws'), '--name', 'zzz-user'], repo);
   const unnamedPath = join(fx.root, 'ws-unnamed');
   const unnamed = (await definitions.get('jj_workspace_add')!.execute({ path: unnamedPath }, fakeExec(agent))) as {
     readonly name: string;

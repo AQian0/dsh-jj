@@ -105,7 +105,9 @@
       「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
       rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
     - `firstChange` 必须是本 workspace 在目标之上那段栈的**栈底**(在 `roots(::@ ~ ::target)` 里):传 `@`
-      或中间 change 会只移动一部分却返回 `rebased/onTarget` 成功,必须报错并给出候选。
+      或中间 change 会只移动一部分却返回 `rebased/onTarget` 成功,必须报错并给出候选。根(default)workspace
+      的判定用**布局**而不是名字(`<root>/.jj/repo` 是目录 ⇒ 根 workspace,linked workspace 是 pointer 文件),
+      这样 `jj workspace rename` 之后仍然要求 `firstChange`。
     - 目标解析/失败信息必须自带下一步(本地 bookmark 列表、`firstChange` 候选),不要返回裸 jj revset 错误;
       已集成路径同样要处理请求的 bookmark(移动或 `bookmarkSkipped`),不能静默丢弃。
     - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(按 `exec.agent`
