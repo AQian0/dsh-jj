@@ -1052,15 +1052,35 @@ export function registerJjTools(
   options: { service: JjToolService; config?: JjPluginConfig },
 ): () => void {
   const config = resolveConfig(options.config ?? {});
+  /**
+   * Resolve the directory one tool call runs in.
+   *
+   * With a calling agent, the session directory is authoritative and a failed
+   * resolution is an error: guessing `defaultCwd`/`process.cwd()` could run jj in
+   * the wrong repository (the tools entry declares `workingDirectory` as required).
+   * `defaultCwd` remains the documented path only for calls without an agent
+   * (tests/embedders).
+   */
   const cwdFor = async (exec: { agent?: unknown; signal?: AbortSignal }): Promise<string> => {
-    if (exec.agent !== undefined && host.workingDirectory !== undefined) {
-      try {
-        return await host.workingDirectory.ensure(exec.agent, exec.signal);
-      } catch {
-        // Fall through to the configured default.
-      }
+    const fallback = config.defaultCwd.length > 0 ? config.defaultCwd : process.cwd();
+    if (exec.agent === undefined) return fallback;
+    if (host.workingDirectory === undefined) {
+      throw new Error(
+        'dsh-jj: cannot resolve the session working directory (the host exposes no workingDirectory service); ' +
+          'refusing to guess a repository. Fix the host wiring or configure `defaultCwd` for agent-less calls.',
+      );
     }
-    return config.defaultCwd.length > 0 ? config.defaultCwd : process.cwd();
+    try {
+      const cwd = await host.workingDirectory.ensure(exec.agent, exec.signal);
+      if (typeof cwd === 'string' && cwd.length > 0) return cwd;
+      throw new Error('the workingDirectory service returned an empty path');
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `dsh-jj: cannot resolve the session working directory (${reason}); ` +
+          'refusing to run jj in a guessed repository. Fix the session working directory and retry.',
+      );
+    }
   };
   const disposers = jjToolDefinitions({ service: options.service, config, host, cwdFor }).map((definition) =>
     host.tools.register(definition),
