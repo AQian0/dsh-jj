@@ -24,6 +24,7 @@ import {
   assertServiceableConfig,
   Config,
   resolveConfig,
+  warnMisplacedConfig,
   type JjPluginConfig,
   type ResolvedJjConfig,
 } from './config.ts';
@@ -121,8 +122,11 @@ export interface GitGuardFinding {
 
 /** Options for {@link evaluateGitCommand}. */
 export interface EvaluateGitCommandOptions {
-  /** Injectable sniff (tests simulate layouts without touching the disk). */
-  readonly sniff?: (cwd: string) => GuardDescriptorLike;
+  /**
+   * Injectable sniff (tests simulate layouts without touching the disk).
+   * `undefined` means "no usable descriptor here" and is treated as fail-open.
+   */
+  readonly sniff?: (cwd: string) => GuardDescriptorLike | undefined;
 }
 
 /** Minimal descriptor view the guard needs (full descriptor or sniff fallback). */
@@ -165,7 +169,30 @@ function optionalMember(value: unknown, key: string): unknown {
   return record === undefined ? undefined : record[key];
 }
 
-function descriptorFromSniff(sniff: VcsSniff): GuardDescriptorLike {
+/**
+ * Sniff diagnostic codes that mean the `.jj` metadata is unusable.
+ *
+ * The CLI authority (`detectVcs`) reports such directories as `kind: 'none'` with
+ * `verified: false`; the synchronous sniff cannot tell a broken repository from a
+ * real one, so the guard must not deny based on it (fail-open, contract §8.1).
+ */
+const BROKEN_JJ_NOTICE_CODE = 'jj-metadata-incomplete';
+
+/** True when a sniff found jj markers but detected unusable/error metadata. */
+function sniffHasBrokenMetadata(sniff: VcsSniff): boolean {
+  return sniff.diagnostics.some(
+    (notice) => notice.severity === 'error' || notice.code === BROKEN_JJ_NOTICE_CODE,
+  );
+}
+
+/**
+ * Convert one synchronous sniff result into the guard's minimal descriptor.
+ *
+ * @returns the descriptor, or `undefined` when the sniff reports broken jj metadata
+ *   (callers must fail open instead of denying a mutating git command).
+ */
+function descriptorFromSniff(sniff: VcsSniff): GuardDescriptorLike | undefined {
+  if (sniffHasBrokenMetadata(sniff)) return undefined;
   return {
     kind: sniff.kind,
     jjRoot: sniff.jjRoot,
@@ -280,7 +307,11 @@ export function buildWorktreeToolRefusalMessage(toolName: string, descriptor: Gu
 }
 
 /**
- * Refusal text for a repository-wide jj command (contract §8.3b, verbatim).
+ * Refusal text for a repository-wide jj command (contract §8.3b).
+ *
+ * The location clause depends on where the command actually starts: a session at the
+ * workspace root is not "in a directory that is not the workspace root", so the text
+ * says so explicitly instead of contradicting the most common deny case.
  *
  * @param invocation - the classified jj invocation.
  * @param descriptor - descriptor of the effective directory.
@@ -288,8 +319,12 @@ export function buildWorktreeToolRefusalMessage(toolName: string, descriptor: Gu
  * @returns the refusal text.
  */
 export function buildJjRepoWideRefusal(invocation: JjInvocation, descriptor: GuardDescriptorLike, cwd: string): string {
+  const atWorkspaceRoot = canonicalGuardPath(cwd) === canonicalGuardPath(descriptor.root);
+  const location = atWorkspaceRoot
+    ? `from this workspace's own root (${cwd})`
+    : `from a directory that is not this repository's own workspace root (${cwd} -> ${descriptor.root})`;
   return [
-    `Blocked: \`jj ${invocation.subcommand}\` targets repository-wide state from a directory that is not this repository's own workspace root (${cwd} -> ${descriptor.root}).`,
+    `Blocked: \`jj ${invocation.subcommand}\` targets repository-wide state ${location}.`,
     `This operation would rewrite the working copy of ${descriptor.root}, which is shared with other sessions or agents working in this directory, and would delete any file created after the restored operation.`,
     '',
     'Safer alternatives:',
@@ -405,6 +440,7 @@ export function evaluateGitCommand(
       effectiveCwds[invocationIndex] = effective;
       if (!invocation.mutating) continue;
       const descriptor = sniff(effective);
+      if (descriptor === undefined) continue; // broken/absent metadata: fail open
       if (!isJjKind(descriptor.kind)) continue;
       findings.push({
         invocation,
@@ -1067,6 +1103,9 @@ export function apply(
     ...(ctx.emit !== undefined ? { emit: ctx.emit } : {}),
     ...(workingDirectory !== undefined ? { workingDirectory } : {}),
   };
+  // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
+  // Warn (never fail) so a key placed on the wrong bundle row is visible.
+  warnMisplacedConfig(host.logger, config, 'guard');
   const guard = installGitConfusionGuard(host, { config, ...(ctx.jj !== undefined ? { service: ctx.jj } : {}) });
   if (typeof ctx.effect === 'function') ctx.effect(() => () => guard.dispose(), 'dsh-jj: git-confusion guard');
 }

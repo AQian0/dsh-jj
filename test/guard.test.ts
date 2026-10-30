@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { symlinkSync } from 'node:fs';
+import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
 import type { JjPluginConfig } from '../src/config.ts';
@@ -745,3 +745,82 @@ test('a service without a TTL detect entry keeps the forced warm-up fallback', a
   await harness.runPipeline({ name: 'bash', callId: 'fallback-ls', arguments: { command: 'ls', workdir: colo } });
   assert.equal(warms, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Audited L4: broken `.jj` metadata in the sniff fallback fails open.
+// ---------------------------------------------------------------------------
+
+test('L4: broken `.jj` metadata in the guard sniff path fails open instead of denying', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-broken-metadata');
+  const broken = fx.path('broken');
+  // Empty `.jj` without `.jj/repo`: the CLI authority reports kind:none/verified:false
+  // (test/detect-failures.test.ts F2), so the synchronous sniff fallback must not
+  // turn the same directory into a deny decision.
+  mkdirSync(join(broken, '.jj'), { recursive: true });
+  const harness = createGuardContext();
+  install(harness, { guardMutatingGit: 'deny', defaultCwd: broken });
+  assert.equal(
+    harness.runGuard(bash('git commit -m x', broken)),
+    undefined,
+    'a broken .jj must be treated like "not a jj workspace" (fail-open)',
+  );
+
+  // Control: a real jj repository in the same guard configuration is still denied.
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const controlHarness = createGuardContext();
+  install(controlHarness, { guardMutatingGit: 'deny', defaultCwd: colo });
+  assert.match(controlHarness.runGuard(bash('git commit -m x', colo)) ?? '', /^Blocked: `git commit`/);
+});
+
+// ---------------------------------------------------------------------------
+// Audited L3: the repository-wide refusal text depends on where the command runs.
+// ---------------------------------------------------------------------------
+
+test('L3: the repo-wide refusal text distinguishes the workspace root from subdirectories', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-repo-wide-text');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const sub = fx.path('colo/nested/deep');
+
+  const rootHarness = createGuardContext();
+  install(rootHarness, { guardJjRepositoryWide: 'deny', defaultCwd: colo });
+  const atRoot = rootHarness.runGuard(bash('jj undo', colo));
+  assert.match(atRoot ?? '', /targets repository-wide state from this workspace's own root/);
+  assert.doesNotMatch(
+    atRoot ?? '',
+    /not this repository's own workspace root/,
+    'a session at the workspace root must not be told it is outside the root',
+  );
+
+  const subHarness = createGuardContext();
+  install(subHarness, { guardJjRepositoryWide: 'deny', defaultCwd: sub });
+  const belowRoot = subHarness.runGuard(bash('jj undo', sub));
+  assert.match(belowRoot ?? '', /not this repository's own workspace root/);
+  assert.match(belowRoot ?? '', /^Blocked: `jj undo`/);
+});
+
+// ---------------------------------------------------------------------------
+// Cross-row config ownership warnings (audit core M8) at the guard entry.
+// ---------------------------------------------------------------------------
+
+test('the guard entry warns once about config keys owned by other rows', () => {
+  const harness = createGuardContext();
+  const ctx = harness.ctx as unknown as Parameters<typeof applyGuardEntry>[0];
+  applyGuardEntry(ctx, { guardMutatingGit: 'deny', commitStyle: 'angular', defaultLogLimit: 10 });
+  const messages = harness.logged.map((entry) => String(entry));
+  assert.ok(
+    messages.some((message) => /`commitStyle` belongs to the jj-runtime row; this row \(jj-guard\) ignores it/.test(message)),
+    `expected a commitStyle ownership warning, got: ${messages.join(' | ')}`,
+  );
+  assert.ok(
+    messages.some((message) => /`defaultLogLimit` belongs to the jj-tools row/.test(message)),
+    'expected a defaultLogLimit ownership warning',
+  );
+  assert.ok(
+    !messages.some((message) => /`guardMutatingGit` belongs to/.test(message)),
+    'a key on its own row must not be reported',
+  );
+  assert.equal(harness.guards.length, 1, 'the warning must not change guard registration');
+  harness.runGuard(bash('git commit -m x'));
+  assert.equal(harness.guards.length, 1);
+});
+
