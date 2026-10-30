@@ -24,6 +24,26 @@ import type { JjChange, JjOperation, JjRunResult, VcsDescriptor, VcsKind } from 
 export const TPL_STATUS =
   '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ ",\\"paths\\":" ++ json(self.diff().files().map(|f| f.path())) ++ "}\\n"';
 
+/**
+ * `jj log` change template **without** the diff `paths` field (`TPL_STATUS` minus
+ * `paths`).
+ *
+ * `self.diff()` is the expensive part of `TPL_STATUS`: on a working copy with
+ * 3000 changed files one read costs ≈270ms instead of ≈23ms. The generic change
+ * reader ({@link JjOperations}'s `readAt`) therefore uses this template; only
+ * `status()` (and `commit()`'s path reporting) needs the `paths` field.
+ */
+export const TPL_CHANGE =
+  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
+
+/**
+ * `jj log` template returning only the commit id of every selected revision.
+ *
+ * Used for parent/base checks where the full change record (and its diff) is not
+ * needed; one line per revision, in jj's revset order.
+ */
+const TPL_COMMIT_IDS = 'commit_id ++ "\\n"';
+
 /** `jj log` per-change template (contract §2.8, verbatim). */
 export const TPL_LOG =
   '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description.first_line()) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
@@ -69,6 +89,13 @@ const BOOKMARK_NAME_RE = /^[^\s@]+$/;
 
 /** One jj change, as parsed from the JSON templates. */
 export interface JjChangeRecord extends JjChange {
+  /**
+   * Paths changed by this revision.
+   *
+   * Populated only by `status()` and `commit()` (which read with `TPL_STATUS`);
+   * the generic change reader uses the lightweight `TPL_CHANGE` and leaves this
+   * array empty so it never pays for `self.diff()`.
+   */
   readonly paths: readonly string[];
 }
 
@@ -369,18 +396,16 @@ export class JjOperations {
     return await this.readAt(cwd, signal);
   }
 
-  /** `jj describe -r <revset> -m <message>` then read the revision back. */
+  /** `jj describe -r <revset> -m <message>` then read the revision back (light template). */
   async describeChange(cwd: string, revset: string, message: string, signal?: AbortSignal): Promise<JjChangeRecord> {
     const argv = ['describe', '-r', revset, '-m', message];
     await this.run(cwd, argv, signal);
-    const readArgv = ['log', '-r', revset, '--no-graph', '-T', TPL_STATUS];
-    const result = await this.run(cwd, readArgv, signal);
-    return changeFromRecord(parseJsonLine(result.stdout, readArgv));
+    return await this.readAt(cwd, signal, revset);
   }
 
   /**
    * `jj commit -m <message> [-- <paths…>]` then read the committed change (`@-`)
-   * and the new working copy (`@`).
+   * and the new working copy (`@`) **in one log call**.
    *
    * jj commit is describe + new in one step: the current change keeps its content
    * (or only the given paths, which lets a caller split a messy working copy),
@@ -388,6 +413,10 @@ export class JjOperations {
    * some changes were left behind). Warnings jj reports on a zero exit (for
    * example a pathspec that matched no file) are returned instead of being
    * discarded, because a silent empty commit would defeat the split workflow.
+   *
+   * The read-back uses `TPL_STATUS` (not the lightweight `TPL_CHANGE`) because the
+   * tools surface `committedPaths`/`workingCopyPaths`, but it reads both revisions
+   * in one `jj log -r '@ | @-'` instead of two separate spawns.
    *
    * @param cwd - workspace directory.
    * @param message - non-empty description; callers are expected to follow the repository style.
@@ -414,8 +443,16 @@ export class JjOperations {
       .map((line) => line.trim())
       .filter((line) => /^Warning:/.test(line));
     if (warningLines.length > 0) warnings.push(bound(warningLines.join('\n'), 2 * 1024).text);
-    const workingCopy = await this.readAt(cwd, signal);
-    const committed = await this.readAt(cwd, signal, '@-');
+    const records = await this.readChangesAt(cwd, '@ | @-', TPL_STATUS, signal);
+    const workingCopy = records.find((change) => change.currentWorkingCopy);
+    const committed = records.find((change) => !change.currentWorkingCopy);
+    if (workingCopy === undefined || committed === undefined) {
+      throw new JjError(
+        'JJ_OUTPUT_INVALID',
+        `\`jj log -r '@ | @-'\` did not report both the committed change and the new working copy (${records.length} record(s)).`,
+        { argv, exitCode: 0, stderr: commitResult.stderr, stdout: '' },
+      );
+    }
     if (paths.length > 0 && committed.empty) {
       warnings.push(
         'No changes matched the given paths, so the committed change is empty; the working copy still holds the changes. Check that the paths are repository-relative.',
@@ -693,13 +730,21 @@ export class JjOperations {
     return bookmarks;
   }
 
-  /** `jj bookmark set <name> -r <revset> [--allow-backwards]`, then read the target back. */
+  /**
+   * `jj bookmark set <name> -r <revset> [--allow-backwards]`, then read the target back.
+   *
+   * @param knownTargetCommitId - commit id the revset is known to resolve to (the
+   *   hand-off passes the tip commit id of the change it just read). When supplied,
+   *   the read-back `jj bookmark list` is skipped: a zero exit from
+   *   `jj bookmark set` guarantees the bookmark points at that revision.
+   */
   async bookmarkSet(
     cwd: string,
     name: string,
     revset: string,
     allowBackwards: boolean,
     signal?: AbortSignal,
+    knownTargetCommitId?: string,
   ): Promise<{ name: string; target: string; moved: boolean }> {
     if (!BOOKMARK_NAME_RE.test(name) || name.includes('@')) {
       throw badInput("bookmark names must be non-empty and must not contain whitespace or '@'.");
@@ -709,8 +754,11 @@ export class JjOperations {
     const argv = ['bookmark', 'set', name, '-r', revset];
     if (allowBackwards) argv.push('--allow-backwards');
     await this.run(cwd, argv, signal);
-    const after = await this.bookmarkList(cwd, false, signal);
-    const target = after.find((bookmark) => bookmark.name === name)?.target ?? '';
+    let target = knownTargetCommitId ?? '';
+    if (knownTargetCommitId === undefined) {
+      const after = await this.bookmarkList(cwd, false, signal);
+      target = after.find((bookmark) => bookmark.name === name)?.target ?? '';
+    }
     return { name, target, moved: existing !== undefined };
   }
 
@@ -821,19 +869,25 @@ export class JjOperations {
     }
     candidates.push({ revset: 'trunk()', source: 'trunk' }, { revset: 'main', source: 'main' }, { revset: 'master', source: 'master' });
 
-    const bookmarks = await this.localBookmarkNames(cwd, signal);
-    const bookmarkHint = bookmarks.length > 0 ? bookmarks.join(', ') : 'none';
     const seen = new Set<string>();
     const rootOnly: string[] = [];
     const unresolved: string[] = [];
+    // Bookmark names are only needed for actionable *errors*: resolving a target must
+    // not pay for an extra `jj bookmark list` on the happy path.
+    let bookmarkHintPromise: Promise<string> | undefined;
+    const bookmarkHint = async (): Promise<string> => {
+      bookmarkHintPromise ??= this.localBookmarkNames(cwd, signal).then((names) => (names.length > 0 ? names.join(', ') : 'none'));
+      return await bookmarkHintPromise;
+    };
     for (const candidate of candidates) {
       if (seen.has(candidate.revset)) continue;
       seen.add(candidate.revset);
       const change = await this.tryReadAt(cwd, candidate.revset, signal);
       if (change === undefined) {
         if (candidate.source === 'argument') {
+          const hint = await bookmarkHint();
           throw badInput(
-            `jj_handoff cannot use destination ${JSON.stringify(candidate.revset)}: the revset does not resolve in this repository. Pass a real revision (local bookmarks: ${bookmarkHint}), or omit destination to let jj_handoff resolve the target with fallbacks.`,
+            `jj_handoff cannot use destination ${JSON.stringify(candidate.revset)}: the revset does not resolve in this repository. Pass a real revision (local bookmarks: ${hint}), or omit destination to let jj_handoff resolve the target with fallbacks.`,
           );
         }
         unresolved.push(`${candidate.revset} (${candidate.source})`);
@@ -843,8 +897,9 @@ export class JjOperations {
         // An explicitly named root commit is a model mistake, not a signal to
         // silently integrate somewhere else; the fallbacks only rescue defaults.
         if (candidate.source === 'argument') {
+          const hint = await bookmarkHint();
           throw badInput(
-            `jj_handoff destination ${JSON.stringify(candidate.revset)} resolves to jj's empty root commit (there is no remote trunk here). Pass a real revision such as a local bookmark (${bookmarkHint}), or omit destination to let jj_handoff pick the target automatically.`,
+            `jj_handoff destination ${JSON.stringify(candidate.revset)} resolves to jj's empty root commit (there is no remote trunk here). Pass a real revision such as a local bookmark (${hint}), or omit destination to let jj_handoff pick the target automatically.`,
           );
         }
         rootOnly.push(`${candidate.revset} (${candidate.source})`);
@@ -855,8 +910,9 @@ export class JjOperations {
     const details: string[] = [];
     if (rootOnly.length > 0) details.push(`resolved to jj's empty root commit: ${rootOnly.join(', ')}`);
     if (unresolved.length > 0) details.push(`did not resolve: ${unresolved.join(', ')}`);
+    const hint = await bookmarkHint();
     throw badInput(
-      `jj_handoff found no usable integration target — ${details.length > 0 ? details.join('; ') : 'no candidate was tried'}. Local bookmarks: ${bookmarkHint}. Ask the user which revision to integrate onto, pass it as destination, and call jj_handoff again.`,
+      `jj_handoff found no usable integration target — ${details.length > 0 ? details.join('; ') : 'no candidate was tried'}. Local bookmarks: ${hint}. Ask the user which revision to integrate onto, pass it as destination, and call jj_handoff again.`,
     );
   }
 
@@ -895,6 +951,32 @@ export class JjOperations {
 
   /** One hand-off attempt; {@link handoff} retries it once after stale recovery. */
   private async handoffFlow(cwd: string, options: JjHandoffOptions, signal?: AbortSignal): Promise<JjHandoffResult> {
+    // Cheap check first: with uncommitted changes the model must commit before any
+    // hand-off step, so neither the network fetch nor the target probes are paid for.
+    const workingCopy = await this.readAt(cwd, signal);
+    if (!workingCopy.empty) {
+      return {
+        fetch:
+          options.fetch === false
+            ? { status: 'skipped', message: 'jj git fetch was disabled for this call.' }
+            : { status: 'skipped', message: 'jj git fetch was skipped because the working copy needs a commit first.' },
+        destination: '',
+        destinationSource: 'configured',
+        destinationChangeId: '',
+        destinationCommitId: '',
+        firstChangeId: '',
+        stack: [workingCopy],
+        rebased: false,
+        alreadyIntegrated: false,
+        onTarget: false,
+        ambiguousRoots: [],
+        conflicts: [],
+        needsCommit: true,
+        message:
+          'The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository\'s style), then call jj_handoff again.',
+      };
+    }
+
     const fetchResult: JjFetchResult =
       options.fetch === false
         ? { status: 'skipped', message: 'jj git fetch was disabled for this call.' }
@@ -923,17 +1005,6 @@ export class JjOperations {
       needsCommit: false,
       message: '',
     };
-
-    const workingCopy = await this.readAt(cwd, signal);
-    if (!workingCopy.empty) {
-      return {
-        ...base,
-        needsCommit: true,
-        stack: [workingCopy],
-        message:
-          'The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository\'s style), then call jj_handoff again.',
-      };
-    }
 
     const roots = await this.stackRoots(cwd, target.revset, signal);
     const explicitFirst = options.firstChange?.trim();
@@ -1035,7 +1106,7 @@ export class JjOperations {
     if (tip === undefined) {
       return { bookmarkSkipped: 'The stack has no content change to point a bookmark at.' };
     }
-    return { bookmark: await this.bookmarkSet(cwd, name, tip.changeId, false, signal) };
+    return { bookmark: await this.bookmarkSet(cwd, name, tip.changeId, false, signal, tip.commitId) };
   }
 
   /** Bottom-most change(s) of this workspace's stack above `target` (`roots(::@ ~ ::target)`). */
@@ -1050,8 +1121,30 @@ export class JjOperations {
 
   /** Parent commit id of a revision, or `undefined` when it does not resolve. */
   private async parentCommitId(cwd: string, revset: string, signal?: AbortSignal): Promise<string | undefined> {
-    const parent = await this.tryReadAt(cwd, `(${revset})-`, signal);
-    return parent?.commitId;
+    return (await this.readCommitIds(cwd, `(${revset})-`, signal))[0];
+  }
+
+  /**
+   * Commit ids selected by a revset (`commit_id`-only template).
+   *
+   * Parent/base checks only need the commit id; reading a full change record would
+   * pay for the `self.diff()` of every parent (expensive on large commits). Missing
+   * revisions report `[]`; every other error is rethrown (same contract as
+   * {@link tryReadAt}).
+   */
+  private async readCommitIds(cwd: string, revset: string, signal?: AbortSignal): Promise<readonly string[]> {
+    try {
+      const argv = ['log', '-r', revset, '--no-graph', '-T', TPL_COMMIT_IDS];
+      const result = await this.run(cwd, argv, signal);
+      return result.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    } catch (error) {
+      if (isStaleWorkingCopyFailure(error)) throw error;
+      if (error instanceof JjError && error.code === 'JJ_BAD_REVSET') return [];
+      throw error;
+    }
   }
 
   /** Conflicted changes in one stack, model-facing. */
@@ -1100,11 +1193,23 @@ export class JjOperations {
     }
   }
 
-  /** Read `@` (or a revset) as a {@link JjChangeRecord}. */
+  /** Read one revision as a {@link JjChangeRecord} (default `@`, lightweight template). */
   private async readAt(cwd: string, signal?: AbortSignal, revset = '@'): Promise<JjChangeRecord> {
-    const argv = ['log', '-r', revset, '--no-graph', '-T', TPL_STATUS];
+    const argv = ['log', '-r', revset, '--no-graph', '-T', TPL_CHANGE];
     const result = await this.run(cwd, argv, signal);
     return changeFromRecord(parseJsonLine(result.stdout, argv));
+  }
+
+  /** Read every revision selected by a revset (used to fold `@` and `@-` into one call). */
+  private async readChangesAt(
+    cwd: string,
+    revset: string,
+    template: string,
+    signal?: AbortSignal,
+  ): Promise<JjChangeRecord[]> {
+    const argv = ['log', '-r', revset, '--no-graph', '-T', template];
+    const result = await this.run(cwd, argv, signal);
+    return parseChangeLines(result.stdout, argv);
   }
 }
 
@@ -1151,8 +1256,16 @@ function mergeAbortSignals(lifetime: AbortSignal, caller?: AbortSignal): AbortSi
  *
  * The TTL cache is what makes the synchronous guard possible: `peek` never
  * spawns, `warm` refreshes, and disposal aborts in-flight work and clears it.
+ * Concurrent probes for one cwd are coalesced (one `detectVcs` per in-flight key)
+ * and the cache is pruned so a long-lived process with many workspaces cannot grow
+ * it without bound.
  */
 export class JjService extends Service {
+  /** Hard cap on cached descriptors (one descriptor is ≈1.5 KB in JSON). */
+  static readonly DETECT_CACHE_MAX_ENTRIES = 64;
+  /** Cached descriptors older than max(ttl × 6, 5 min) are pruned on refresh. */
+  static readonly DETECT_CACHE_MIN_MAX_AGE_MS = 5 * 60_000;
+
   static inject = ['subprocess', 'workingDirectory'];
   static Config = Config;
 
@@ -1160,6 +1273,8 @@ export class JjService extends Service {
   private readonly lifetime = new AbortController();
   private readonly pending = new Set<Promise<unknown>>();
   private readonly cache = new Map<string, { descriptor: VcsDescriptor; probedAt: number }>();
+  /** In-flight detection per cache key; concurrent detect/warm calls share one probe. */
+  private readonly inflight = new Map<string, Promise<VcsDescriptor>>();
   private versionCache: { jj: string | undefined; git: string | undefined } | undefined;
 
   constructor(ctx: Context, config: JjPluginConfig = {}) {
@@ -1177,6 +1292,7 @@ export class JjService extends Service {
       this.lifetime.abort(new Error('dsh-jj service disposed'));
       await Promise.allSettled(this.pending);
       this.pending.clear();
+      this.inflight.clear();
       this.cache.clear();
     });
   }
@@ -1198,11 +1314,48 @@ export class JjService extends Service {
     return await this.warm(cwd, signal);
   }
 
-  /** Forced refresh of the detection cache. */
+  /**
+   * Forced refresh of the detection cache.
+   *
+   * Concurrent calls for the same cwd share one probe: the guard warm-up and
+   * parallel tool calls would otherwise each run the full 5-process `detectVcs`.
+   * The shared probe is cleaned up on success and on failure.
+   */
   async warm(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor> {
-    const descriptor = await this.track(detectVcs(cwd, this.detectDeps(), mergeAbortSignals(this.lifetime.signal, signal)));
-    this.cache.set(this.cacheKey(cwd), { descriptor, probedAt: descriptor.probedAt });
-    return descriptor;
+    const key = this.cacheKey(cwd);
+    const pendingProbe = this.inflight.get(key);
+    if (pendingProbe !== undefined) return await pendingProbe;
+    const probe = (async (): Promise<VcsDescriptor> => {
+      const descriptor = await detectVcs(cwd, this.detectDeps(), mergeAbortSignals(this.lifetime.signal, signal));
+      this.cache.set(key, { descriptor, probedAt: descriptor.probedAt });
+      this.pruneCache();
+      return descriptor;
+    })();
+    const tracked = this.track(probe);
+    this.inflight.set(key, tracked);
+    try {
+      return await tracked;
+    } finally {
+      if (this.inflight.get(key) === tracked) this.inflight.delete(key);
+    }
+  }
+
+  /**
+   * Keep the synchronous cache bounded: drop stale entries and evict the oldest
+   * descriptors above {@link JjService.DETECT_CACHE_MAX_ENTRIES}.
+   */
+  private pruneCache(): void {
+    const ttl = this.operations.config.detectCacheTtlMs;
+    const maxAge = Math.max(ttl * 6, JjService.DETECT_CACHE_MIN_MAX_AGE_MS);
+    const now = Date.now();
+    for (const [key, entry] of this.cache) {
+      if (now - entry.probedAt > maxAge) this.cache.delete(key);
+    }
+    if (this.cache.size <= JjService.DETECT_CACHE_MAX_ENTRIES) return;
+    const oldestFirst = [...this.cache.entries()].sort((left, right) => left[1].probedAt - right[1].probedAt);
+    for (const [key] of oldestFirst.slice(0, this.cache.size - JjService.DETECT_CACHE_MAX_ENTRIES)) {
+      this.cache.delete(key);
+    }
   }
 
   /** Synchronous cache read for the guard; `undefined` on a miss (fail-open). */
@@ -1228,13 +1381,20 @@ export class JjService extends Service {
     return `${descriptor.kind} workspace "${descriptor.workspaceName ?? 'unknown'}" at ${descriptor.root} (${descriptor.jjVersion ?? 'jj version unknown'})`;
   }
 
-  /** Process-lifetime version cache. */
+  /**
+   * Process-lifetime version cache.
+   *
+   * Only a *successful* jj probe is cached: caching `undefined` would freeze a
+   * transient failure (or a probe that ran before jj was installed) for the whole
+   * process lifetime.
+   */
   async version(cwd: string, signal?: AbortSignal): Promise<{ jj: string | undefined; git: string | undefined }> {
     if (this.versionCache !== undefined) return this.versionCache;
     const probe = await this.operations.version(cwd, signal);
     const descriptor = this.peek(cwd);
-    this.versionCache = { jj: probe.jj ?? descriptor?.jjVersion, git: descriptor?.gitVersion };
-    return this.versionCache;
+    const resolved = { jj: probe.jj ?? descriptor?.jjVersion, git: descriptor?.gitVersion };
+    if (resolved.jj !== undefined) this.versionCache = resolved;
+    return resolved;
   }
 
   private cacheKey(cwd: string): string {
