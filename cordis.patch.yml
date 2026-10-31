@@ -1,10 +1,10 @@
 # dsh-jj bundle patch (design contract §4.4).
 #
-# Three bundle entries. Row order is load order: the runtime entry (`jj-runtime`)
-# registers the `ctx.jj` service, and the tools/guard entries inject it, so the
-# runtime row is the required base. Remove only the tools row or only the guard
-# row to install part of the feature; removing the runtime row requires removing
-# the other two as well.
+# Four bundle entries. Row order is load order: the runtime entry (`jj-runtime`)
+# registers the `ctx.jj` service, and the tools/guard/changes entries inject it,
+# so the runtime row is the required base. Remove only the tools row, only the
+# guard row, or only the changes row to install part of the feature; removing
+# the runtime row requires removing the other three as well.
 - insert:
     - id: jj-runtime
       name: '@aqian0/dsh-jj'
@@ -14,6 +14,24 @@
 - insert:
     - id: jj-guard
       name: '@aqian0/dsh-jj/guard'
+# ── Per-turn changed-files card, served from jj instead of Git ──────────────
+#
+# The Web app's `workspace-changes` row records each turn's changed files from
+# Git working-tree snapshots. That cannot see a jj-native workspace (`.jj`
+# only), records a stale view in a linked workspace or a repository whose Git
+# index does not track Jujutsu's working-copy commit, and therefore reports
+# wrong "line counts" for the changed-files card. The `jj-changes` row replaces
+# that provider: a non-insert row disables the built-in row, and the inserted
+# row reuses it in an isolated Cordis scope for non-jj Sessions while it
+# records jj-derived summaries for Sessions inside a Jujutsu workspace (see
+# `src/changes.ts`). The row needs no config: schema defaults are safe, and
+# `workspaceChanges: builtin` keeps the old behavior when a profile wants it.
+- id: workspace-changes
+  name: '@deepseek-ai/dsh-workspace-changes'
+  disabled: true
+- insert:
+    - id: jj-changes
+      name: '@aqian0/dsh-jj/changes'
 # Project-root discovery must understand jj workspaces (task-10).
 #
 # `@deepseek-ai/dsh-agent-instructions` defaults to `projectRootMarkers: ['.git']`,

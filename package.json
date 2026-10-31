@@ -23,6 +23,7 @@
     "locale/*.json",
     "tools/locale/*.json",
     "guard/locale/*.json",
+    "changes/locale/*.json",
     "icon.svg",
     "src/**/*.ts"
   ],
@@ -43,6 +44,10 @@
       "types": "./lib/types/guard.d.ts",
       "default": "./lib/guard.js"
     },
+    "./changes": {
+      "types": "./lib/types/changes.d.ts",
+      "default": "./lib/changes.js"
+    },
     "./detect": {
       "types": "./lib/types/detect.d.ts",
       "default": "./lib/detect.js"
@@ -58,7 +63,8 @@
     "./guard/locale/*.json": "./guard/locale/*.json",
     "./guard/icon": "./icon.svg",
     "./package.json": "./package.json",
-    "./cordis.patch.yml": "./cordis.patch.yml"
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./changes/locale/*.json": "./changes/locale/*.json"
   },
   "publishConfig": {
     "access": "public"
@@ -88,6 +94,7 @@
     "@deepseek-ai/dsh-subprocess": "^0.2.1-rc.2",
     "@deepseek-ai/dsh-tools": "^0.2.1-rc.2",
     "@deepseek-ai/dsh-working-directory": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-workspace-changes": "^0.2.1-rc.2",
     "@deepseek-ai/schemastery": "~3.18.5"
   },
   "packageManager": "pnpm@12.16.1",

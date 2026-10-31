@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Jujutsu (jj) 变更记录",
+    "description": "用 jj 工作副本快照记录每一轮改动的文件与行数，让 Web 端「已编辑 N 个文件」卡片改用 jj 数据；不在 jj workspace 的会话仍沿用内置的 Git 与文件工具记录。"
+  }
+}

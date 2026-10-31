@@ -71,6 +71,12 @@ const PURE_MODULES = [
   'types',
   'commit-style',
   'multi-session',
+  'changes-types',
+  'changes-paths',
+  'changes-diff',
+  'changes-jj',
+  'changes-recorder',
+  'changes-service',
 ] as const;
 
 /** Manifest fields the packaging and toolchain guards inspect. */
@@ -167,7 +173,7 @@ test('pure modules stay free of runtime @deepseek-ai imports', () => {
 });
 
 /** `exports` subpaths the published package must keep. */
-const REQUIRED_EXPORTS = ['.', './tools', './guard', './detect', './git-command'] as const;
+const REQUIRED_EXPORTS = ['.', './tools', './guard', './changes', './detect', './git-command'] as const;
 
 /** `files` entries the published package must ship (`lib/` artifacts plus the runtime data). */
 const REQUIRED_FILES = [
@@ -177,6 +183,7 @@ const REQUIRED_FILES = [
   'locale/*.json',
   'tools/locale/*.json',
   'guard/locale/*.json',
+  'changes/locale/*.json',
   'icon.svg',
 ] as const;
 
@@ -274,11 +281,12 @@ test('pnpm and Vite+ are wired as the repository toolchain', () => {
   assert.match(viteConfig, /lint:\s*\{/, 'vite.config.ts must configure Oxlint');
 });
 
-test('all three entries import under plain Node with name/inject/apply/Config', async () => {
+test('all four entries import under plain Node with name/inject/apply/Config', async () => {
   const entries: ReadonlyArray<readonly [string, string, readonly string[]]> = [
     ['.', 'jj', ['subprocess', 'workingDirectory']],
     ['./tools', 'jj-tools', ['tools', 'jj', 'workingDirectory']],
     ['./guard', 'jj-guard', ['tools', 'jj']],
+    ['./changes', 'jj-changes', ['subprocess', 'fs', 'jj']],
   ];
   for (const [specifier, expectedName, expectedInject] of entries) {
     const module = (await import(pathToFileURL(join(packageDir, 'lib', entryFile(specifier))).href)) as BuiltModule;
@@ -297,9 +305,14 @@ test('the bare package name resolves each documented export', async () => {
   const root = await import('@aqian0/dsh-jj');
   const tools = await import('@aqian0/dsh-jj/tools');
   const guard = await import('@aqian0/dsh-jj/guard');
+  const changes = await import('@aqian0/dsh-jj/changes');
   assert.equal(root.name, 'jj');
   assert.equal(tools.name, 'jj-tools');
   assert.equal(guard.name, 'jj-guard');
+  assert.equal(changes.name, 'jj-changes');
+  assert.ok(changes.Config !== undefined, 'the changes row validates its own configuration schema');
+  assert.equal(typeof changes.apply, 'function');
+  assert.equal(typeof changes.jjWorkspaceRootAt, 'function', 'jj workspace classification is part of the public API');
   assert.equal(root.Config, tools.Config, 'the same schemastery Config is shared');
   assert.equal(tools.Config, guard.Config);
   assert.equal(typeof root.detectVcs, 'function');
@@ -486,6 +499,7 @@ test('the runtime entry forwards live top-level sessions into the multi-session 
 function entryFile(specifier: string): string {
   if (specifier === './tools') return 'tools.js';
   if (specifier === './guard') return 'guard.js';
+  if (specifier === './changes') return 'changes.js';
   return 'index.js';
 }
 
@@ -554,11 +568,17 @@ test('hand-written TypeScript has no tabs, trailing whitespace, or CRLF line end
   }
 });
 
-test('bundle patch carries the jj-aware project-root row (task-10)', () => {
+test('bundle patch carries the jj-aware project-root row and the change-recording rows', () => {
   const patch = readFileSync(join(packageDir, 'cordis.patch.yml'), 'utf8');
   assert.match(patch, /- insert:[\s\S]*name: '@aqian0\/dsh-jj'/, 'the runtime row is declared');
   assert.match(patch, /name: '@aqian0\/dsh-jj\/tools'/, 'the tools row is declared');
   assert.match(patch, /name: '@aqian0\/dsh-jj\/guard'/, 'the guard row is declared');
+  assert.match(patch, /name: '@aqian0\/dsh-jj\/changes'/, 'the jj change-recording row is declared');
+  assert.match(
+    patch,
+    /^- id: workspace-changes$\n  name: '@deepseek-ai\/dsh-workspace-changes'\n  disabled: true$/m,
+    'the built-in Git-only workspace-changes row must be disabled so jj owns the changed-files card',
+  );
   assert.match(patch, /^- id: agent-instructions$/m, 'the id-targeted agent-instructions row is declared');
   assert.match(patch, /name: '@deepseek-ai\/dsh-agent-instructions'/);
   assert.match(patch, /maxBytes: 65536/, 'the composed maxBytes value must be restated (whole-config replacement)');
