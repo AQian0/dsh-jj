@@ -7,11 +7,14 @@
 ## 项目速览
 
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
-- 三个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
+- 四个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
   - `dsh-jj/tools`(`jj-tools`):17 个 `jj_*` 模型工具;
-  - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护。
-- 纯 TypeScript + ESM,**零运行时依赖**:DSH 包全部通过 `peerDependencies` 由宿主提供(版本见 `package.json`)。
+  - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护;
+  - `dsh-jj/changes`(`jj-changes`):用 jj 工作副本快照实现每轮「已编辑 N 个文件」变更卡片,并通过 bundle patch
+    禁用 DSH 内置的 Git-only `workspace-changes` 行、在隔离 service scope 里复用它的记录器。
+- 纯 TypeScript + ESM,**零运行时依赖**:DSH 包全部通过 `peerDependencies` 由宿主提供(版本见 `package.json`);
+  `@deepseek-ai/dsh-workspace-changes` 是 changes 行的运行期 peer(宿主 deliverables bundle 提供)。
 - 开发工具链只在 `devDependencies` 里(`vite-plus` / `typescript` / `@types/node` + 测试专用的
   `@deepseek-ai/dsh-session-projection`);构建仍只用 `tsc`,测试仍只用 `node --test`。
 
@@ -31,6 +34,8 @@
   `@deepseek-ai/dsh-working-directory` 声明的 exact peer 保持一致:上游 `0.2.1-rcN` 升级时同步改这个
   devDependency,再重跑 `pnpm install` 更新 lockfile,并确认 `pnpm peers check` 没有新告警。
 - 依赖变更保持克制:运行时依赖仍为零,不新增运行时依赖;lockfile 随任何依赖变更一起提交,测试不得访问网络。
+  `@deepseek-ai/dsh-workspace-changes` 与其它 DSH peer 一样用 caret 范围(宿主按运行时版本匹配),它只被
+  `src/changes.ts` 以 `import()` 动态引用,headless profile 没有该包时 changes 行降级为一条 warning,不阻断启动。
 - 查 DSH API:类型与实现位于本仓库 `node_modules/@deepseek-ai/*`(`lib/` + `lib/types/*.d.ts`),由 `pnpm install`
   解析到本地;桌面版 app bundle 内的副本不直接可读。
 
@@ -64,52 +69,60 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 
 ## 仓库布局
 
-| 路径                                        | 内容                                                                                                                                                                                    |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`                              | 运行时入口:`JjService` 注册 + 全局 prompt context;`assembleBaseLayer` 供测试                                                                                                            |
-| `src/service.ts`                            | `JjOperations`(17 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                               |
-| `src/jj-templates.ts`                       | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess)                                                                                                                  |
-| `src/jj-service.ts`                         | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                              |
-| `src/tools.ts`                              | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
-| `src/tool-schemas.ts`                       | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
-| `src/tool-shared.ts`                        | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
-| `src/tool-definitions.ts`                   | `jjToolDefinitions` 与 17 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
-| `src/tool-entry.ts`                         | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
-| `src/detect.ts`                             | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
-| `src/git-command.ts`                        | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
-| `src/git-tokenize.ts`                       | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                   |
-| `src/git-equivalence.ts`                    | git 安全分类与等价命令表类型/规则(纯数据)                                                                                                                                               |
-| `src/git-rules.ts`                          | git 子命令规则表与 `classifyGitInvocation`(纯函数)                                                                                                                                      |
-| `src/jj-rules.ts`                           | jj 子命令 scope 表与 `classifyJjInvocation`(纯函数)                                                                                                                                     |
-| `src/guard.ts`                              | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案                                                                                                                                         |
-| `src/jj-command.ts`                         | jj/git 子进程适配、非交互 env、错误归类                                                                                                                                                 |
-| `src/config.ts`                             | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验                                                                                                                       |
-| `src/commit-style.ts`                       | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)与拆分提交指引(纯模块,无 I/O)                                                                                                       |
-| `src/types.ts`                              | 共享类型与词汇(纯声明)                                                                                                                                                                  |
-| `src/prompt-context.ts`                     | 会话开始时注入「优先用 jj」、提交描述/拆分提交与多会话/收尾 rebase 的模型可见上下文                                                                                                     |
-| `src/multi-session.ts`                      | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess)                                                            |
-| `test/**/*.test.ts`                         | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
-| `test/multi-session.test.ts`                | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
-| `test/service.test.ts`                      | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                            |
-| `test/jj-command.test.ts`                   | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试                                                                                                                         |
-| `vite.config.ts`                            | Vite+ 工具链配置:Oxfmt(`printWidth: 120` / `singleQuote`)与 Oxlint(`unicorn` / `typescript` / `oxc` / `import`),格式与 lint 规则的唯一来源                                              |
-| `pnpm-workspace.yaml`                       | 单包 pnpm 设置:把 `vite` 别名到 `vite-plus` 自带 core、把 `vitest` 钉到自带运行器,并放行对应 peer 版本(别名版本与 `vite-plus` devDependency 同步,`build.test.ts` 会校验)                |
-| `pnpm-lock.yaml`                            | 提交的锁文件:工具链与公开 peer 依赖的唯一解析来源,由 `pnpm install` 生成/更新                                                                                                           |
-| `.github/workflows/`                        | CI:`ci.yml`(push / PR:`pnpm install --frozen-lockfile` + `pnpm test` + `pnpm pack` smoke check)、`release.yml`(tag 触发:同一门禁 + `pnpm run build` + `pnpm pack` 校验后 npm OIDC 发布) |
-| `locale/`、`tools/locale/`、`guard/locale/` | 三个入口各自的本地化 meta(`en.json` / `zh.json`)                                                                                                                                        |
-| `cordis.patch.yml`                          | bundle patch:三行 `insert` + `agent-instructions` 配置覆盖                                                                                                                              |
-| `lib/`                                      | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定                                                                                                                            |
+| 路径                                                           | 内容                                                                                                                                                                                    |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.ts`                                                 | 运行时入口:`JjService` 注册 + 全局 prompt context;`assembleBaseLayer` 供测试                                                                                                            |
+| `src/service.ts`                                               | `JjOperations`(17 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                               |
+| `src/jj-templates.ts`                                          | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess)                                                                                                                  |
+| `src/jj-service.ts`                                            | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                              |
+| `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
+| `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
+| `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
+| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 17 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
+| `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
+| `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
+| `src/git-command.ts`                                           | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
+| `src/git-tokenize.ts`                                          | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                   |
+| `src/git-equivalence.ts`                                       | git 安全分类与等价命令表类型/规则(纯数据)                                                                                                                                               |
+| `src/git-rules.ts`                                             | git 子命令规则表与 `classifyGitInvocation`(纯函数)                                                                                                                                      |
+| `src/jj-rules.ts`                                              | jj 子命令 scope 表与 `classifyJjInvocation`(纯函数)                                                                                                                                     |
+| `src/guard.ts`                                                 | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案                                                                                                                                         |
+| `src/jj-command.ts`                                            | jj/git 子进程适配、非交互 env、错误归类                                                                                                                                                 |
+| `src/config.ts`                                                | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验                                                                                                                       |
+| `src/commit-style.ts`                                          | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)与拆分提交指引(纯模块,无 I/O)                                                                                                       |
+| `src/types.ts`                                                 | 共享类型与词汇(纯声明)                                                                                                                                                                  |
+| `src/prompt-context.ts`                                        | 会话开始时注入「优先用 jj」、提交描述/拆分提交与多会话/收尾 rebase 的模型可见上下文                                                                                                     |
+| `src/multi-session.ts`                                         | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess)                                                            |
+| `test/**/*.test.ts`                                            | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
+| `test/multi-session.test.ts`                                   | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
+| `test/service.test.ts`                                         | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                            |
+| `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 0.46 输出 + 真实夹具)                                                                                                                            |
+| `test/changes-jj.test.ts`                                      | `changes-jj` 读取器测试(真实 jj-native/colocated 夹具 + fake runner 失败形态)                                                                                                           |
+| `test/changes-recorder.test.ts`                                | `changes-recorder` 状态机测试(fake reader:轮次、失败、上限、binary、oversized、forget/dispose)                                                                                          |
+| `test/changes-service.test.ts`                                 | `changes-service` 合并/路由测试(fake recorder + upstream)                                                                                                                               |
+| `test/changes-entry.test.ts`                                   | `jj-changes` 入口端到端测试(真实 Cordis + 真实 jj/git 夹具:jj-native 卡片、colocated 合并、纯 Git 回退、三种模式)                                                                       |
+| `test/jj-command.test.ts`                                      | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试                                                                                                                         |
+| `vite.config.ts`                                               | Vite+ 工具链配置:Oxfmt(`printWidth: 120` / `singleQuote`)与 Oxlint(`unicorn` / `typescript` / `oxc` / `import`),格式与 lint 规则的唯一来源                                              |
+| `pnpm-workspace.yaml`                                          | 单包 pnpm 设置:把 `vite` 别名到 `vite-plus` 自带 core、把 `vitest` 钉到自带运行器,并放行对应 peer 版本(别名版本与 `vite-plus` devDependency 同步,`build.test.ts` 会校验)                |
+| `pnpm-lock.yaml`                                               | 提交的锁文件:工具链与公开 peer 依赖的唯一解析来源,由 `pnpm install` 生成/更新                                                                                                           |
+| `.github/workflows/`                                           | CI:`ci.yml`(push / PR:`pnpm install --frozen-lockfile` + `pnpm test` + `pnpm pack` smoke check)、`release.yml`(tag 触发:同一门禁 + `pnpm run build` + `pnpm pack` 校验后 npm OIDC 发布) |
+| `locale/`、`tools/locale/`、`guard/locale/`、`changes/locale/` | 四个入口各自的本地化 meta(`en.json` / `zh.json`)                                                                                                                                        |
+| `cordis.patch.yml`                                             | bundle patch:四行 `insert`、禁用内置 `workspace-changes` 的 `disabled: true` 行、`agent-instructions` 配置覆盖                                                                          |
+| `lib/`                                                         | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定                                                                                                                            |
 
 ## 架构与硬性规则
 
 1. **入口契约**:每个入口导出 `name` / `inject` / `apply` / `Config`;`build.test.ts` 会校验这些值与 `inject` 列表。
-2. **分层**:`index.ts` 拥有 `ctx.jj`;tools/guard 通过 `inject: ['tools', 'jj'(, 'workingDirectory')]` 消费。
-   删改 `inject` 会破坏其他行加载。
+2. **分层**:`index.ts` 拥有 `ctx.jj`;tools/guard 通过 `inject: ['tools', 'jj'(, 'workingDirectory')]` 消费,
+   changes 通过 `inject: ['subprocess', 'fs', 'jj']` 消费(runtime 行提供 jj 命令名与进程限额,也保证 bundle 行
+   顺序)。删改 `inject` 会破坏其他行加载。
 3. **纯模块**:`detect.ts`、`git-command.ts`(barrel)、`git-tokenize.ts`、`git-equivalence.ts`、
-   `git-rules.ts`、`jj-rules.ts`、`types.ts`、`commit-style.ts`、`multi-session.ts`、`jj-templates.ts`
-   不得在运行时 import 任何 `@deepseek-ai/*`(由 `build.test.ts` 强制)。DSH 运行时 import 仅限:
-   `config.ts`(schemastery)、`jj-service.ts`(cordis)、`tool-definitions.ts`(dsh-tools)、
-   `jj-command.ts`(dsh-subprocess)。
+   `git-rules.ts`、`jj-rules.ts`、`types.ts`、`commit-style.ts`、`multi-session.ts`、`jj-templates.ts`、
+   `changes-types.ts`、`changes-paths.ts`、`changes-diff.ts`、`changes-jj.ts`、`changes-recorder.ts`、
+   `changes-service.ts` 不得在运行时 import 任何 `@deepseek-ai/*`(由 `build.test.ts` 强制;类型导入可以)。
+   DSH 运行时 import 仅限:`config.ts`(schemastery)、`jj-service.ts`(cordis)、`tool-definitions.ts`
+   (dsh-tools)、`jj-command.ts`(dsh-subprocess)、`changes.ts`(cordis + 动态 `import()` 内置
+   `@deepseek-ai/dsh-workspace-changes`)。
 4. **不直接 spawn**:所有 jj/git 调用都走注入的 `RunJj` / `RunCommand`(统一超时、宽限、输出截断、env 清洗)。
    这是可测试性的基础,也保证 guard/service 行为一致。
 5. **检测语义**:`detectVcs` 永远返回 `VcsDescriptor`,仓库问题通过 `notices` + `verified === false` 上报,
@@ -125,8 +138,13 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    schemastery `Schemastery.TypeT` / `Partial<...>` 派生,`resolveConfig` 用 `Config({})` 的默认值 + 调用方覆盖,
    `assertServiceableConfig` 只做构造期业务校验——新增键只需改 `Config` 一处。三个入口 `apply` 会对
    「放错 bundle 行」的显式键 `logger.warn`(归属表 `CONFIG_OWNERSHIP`;仅告警、不阻断启动)。
+   `jj-changes` 行有**自己**的 schema(`src/changes.ts` 的 `Config`:workspaceChanges 模式与变更卡片上限),
+   不进入 `CONFIG_OWNERSHIP`;新增这类键改 changes 的 schema 与 README「配置」的 changes 小节。
 10. **bundle patch 语义**:`cordis.patch.yml` 里非 `insert` 行会**整体替换**目标行 config:只写改动项会清掉其余键,
-    必须重述所有要保留的键(如 `maxBytes: 65536`),并在 `build.test.ts` 里补对应断言。
+    必须重述所有要保留的键(如 `maxBytes: 65536`),并在 `build.test.ts` 里补对应断言。非 `insert` 行也可以用
+    `disabled: true` 按 id 禁用**其它 bundle 的**行——changes 行就是这样禁用 Web app 的 Git-only
+    `workspace-changes` 行(`build.test.ts` 断言该行存在且被禁用);未来上游若删掉该行,禁用 patch 只 warn,
+    `src/changes.ts` 发现已有 provider 时也只 warn 不顶替,profile 仍能启动。
 11. **版本兼容**:DSH peer 依赖(`@deepseek-ai/dsh-*`)必须写成 caret 范围(如 `^0.2.1-rc.2`),
     不要钉死精确版本——宿主在安装和 profile 启动时用运行时版本(`dsh --version`)与该范围做 SemVer 匹配
     (预发布也参与),精确钉版会把本版适配版本之后的每个补丁版都判定为不兼容。`build.test.ts` 强制这一点。
@@ -162,6 +180,25 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端,含 stale、firstChange
       校验、ambiguous roots、cleanup 所有权)、`test/multi-session.test.ts`(收尾清单文案)、
       `test/guard.test.ts`(forget 拒绝文案)与 README「任务收尾」。
+14. **变更记录(`jj-changes` / 变更卡片)**:
+    - bundle patch 禁用内置 `workspace-changes` 行并插入 `jj-changes`;`src/changes.ts` 的 `apply` 先
+      `ctx.isolate('workspaceChanges')` 在隔离 scope 里跑内置 `apply`(拿到只读的 builtin service),再在父
+      scope `ctx.provide('workspaceChanges', 合并服务)`。不要改成两个 provider 同时 provide(同一 scope 重复会抛错
+      并可能拖垮 profile),也不要直接改内置包的内部状态。
+    - 记录路径固定为「turn 开始读 `@` commit id(允许 jj 快照)→ turn 结束再读一次 → `jj diff --from A --to B`
+      解析」。turn 结束的 `readCommit` 必须在 `readDiff` 之前;`--ignore-working-copy` 只用于 `readDiff`。
+    - 一切失败 fail-open:reader 返回 `undefined`、recorder 不写事件、合并服务退回内置 summary,任何路径都不得
+      抛进宿主或阻断 turn。合并按绝对路径去重、jj 数据优先,`total` 在超出两边 `maxFiles` 时是近似值(已在
+      `changes-service.ts` JSDoc 说明)。
+    - 顶层会话才记录(与内置 recorder 一致);cwd 取 `working-directory/change` 事件维护的有效目录,而不是
+      `session.header.cwd`;`agent/turn-stopping` 必须 `await recorder.stopping(...)`(否则 `turn/end` 先提交,
+      卡片数据晚到)。
+    - 测试:`test/changes-diff.test.ts`(解析)、`test/changes-jj.test.ts`(真实 jj 读取)、
+      `test/changes-recorder.test.ts`(状态机)、`test/changes-service.test.ts`(合并/路由)与
+      `test/changes-entry.test.ts`(真实 Cordis 端到端:jj-native、colocated 合并、纯 Git 回退、三种模式)。
+    - 修改 changes 的 `Config` 键、行名或 bundle 插入位置时,同步 `test/build.test.ts`(
+      四个 entry、`REQUIRED_EXPORTS`、patch 断言)、`package.json` 的 `exports`/`files`、`changes/locale/*.json`
+      与 README「变更卡片」「配置」。
 
 ## 代码约定
 
@@ -180,7 +217,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
   并自检 jj root 指向夹具目录(防止在真实仓库里建/改夹具——曾发生过共享 workspace 被误操作的事故);
   不要 mock 仓库行为;改行为先补测试。
 - `test/build.test.ts` 额外守护:产物清单从 `src/*.ts` 推导(含 `lib/types/*.d.ts`)、`package.json` 的
-  `main`/`types`/`exports`/`files` 目标必须存在、纯模块的 DSH 运行时 import(单/双引号)均被拒绝、
+  `main`/`types`/`exports`/`files` 目标必须存在、四个 entry 的 `name`/`inject`/`Config` 形状、bundle patch
+  里的四行入口与「禁用内置 `workspace-changes`」断言、纯模块的 DSH 运行时 import(单/双引号)均被拒绝、
   手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示),以及 pnpm + Vite+ 工具链接线(`packageManager`、
   `devDependencies`、`vp` 脚本、`pnpm-lock.yaml` / `pnpm-workspace.yaml` / `vite.config.ts` 存在,`vite` 别名
   版本与 `vite-plus` 一致)。新增源模块或改打包/工具链配置时先让这些断言通过。
@@ -231,6 +269,17 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    `test/build.test.ts` 的纯模块列表;
 7. 同步 README「使用 / 配置 / 工具一览 / 已知限制」与 `locale/*.json` 的 meta.description;默认保持 `auto`
    (跨进程需用户显式配置 `always`),不要让多会话检测变成隐式依赖。
+
+**修改变更记录 / 变更卡片(`jj-changes`)**
+
+1. 数据链路:`changes-jj.ts`(注入 `RunJj` 读 commit id 与 diff)→ `changes-diff.ts`(纯解析)→
+   `changes-recorder.ts`(每会话串行状态机,写 `workspace/changes` 事件)→ `changes-service.ts`(与内置
+   recorder 的摘要按绝对路径合并/路由)→ `changes.ts`(Cordis 装配、隔离内置 provider、事件分发、合并服务)。
+2. 保持 fail-open:reader/recorder 的失败都要吞掉并 warn,不得让宿主看到未处理的 rejection;新增 jj 命令必须走
+   `createRunJj` 注入的 runner 和 `--ignore-working-copy` 约定(只有 turn 边界快照除外)。
+3. 改展示语义时同步 `changes-paths.ts`(与内置 recorder 的 path/display 规则一致)和 README「变更卡片」。
+4. 测试与断言见上一层规则 14;`test/changes-entry.test.ts` 是唯一的真实 Cordis 端到端证据(用进程内 fake
+   subprocess service,不新增测试依赖)。
 
 **修改检测**:sniff 与 CLI 权威两条路径都要覆盖;夹具需包含 colocated / jj-native / 损坏元数据 /
 git 嵌套 / 共享 workspace 等场景;同步 README「已知限制」。
