@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseGitFormatDiff, parseNulPaths } from '../src/changes-diff.ts';
+import { parseGitFormatDiff, parseNulPaths, parseRefusedSnapshotFiles } from '../src/changes-diff.ts';
 import { makeTempRoot, writeJjConfig } from './helpers/fixtures.ts';
 
 /** Join diff lines with LF; the appended LF makes every fixture end like jj output. */
@@ -162,6 +162,42 @@ test('parseNulPaths splits NUL records and tolerates the trailing NUL', () => {
   assert.deepEqual(parseNulPaths('sp ace.txt\0ünïcode/文件.txt\0'), ['sp ace.txt', 'ünïcode/文件.txt']);
   assert.deepEqual(parseNulPaths(''), []);
   assert.deepEqual(parseNulPaths('\0'), []);
+});
+
+test('parseRefusedSnapshotFiles reads the oversized-new-file warning block', () => {
+  const stderr = [
+    'Warning: Refused to snapshot some files:',
+    '  big one.bin: 1.9MiB (2000000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    '  nested/文件.txt: 1.1MiB (1100000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    'Hint: This is to prevent large files from being added by accident. To fix this:',
+    '  * Add the file(s) to `.gitignore`',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseRefusedSnapshotFiles(stderr), ['big one.bin', 'nested/文件.txt']);
+});
+
+test('parseRefusedSnapshotFiles accepts the singular header and ignores unrelated warnings', () => {
+  const singular = [
+    'Warning: Refused to snapshot 1 file:',
+    '  huge.bin: 2.0MiB (2097152 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    '',
+  ].join('\r\n');
+  assert.deepEqual(parseRefusedSnapshotFiles(singular), ['huge.bin']);
+
+  const unrelated = ['Warning: The working copy is stale', '  huge.bin: not really a refusal', ''].join('\n');
+  assert.deepEqual(parseRefusedSnapshotFiles(unrelated), []);
+  assert.deepEqual(parseRefusedSnapshotFiles(''), []);
+});
+
+test('parseRefusedSnapshotFiles stops at the first line that is not a warning entry', () => {
+  const stderr = [
+    'Warning: Refused to snapshot some files:',
+    '  a.bin: 1.5MiB (1500000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    'Hint: This is to prevent large files from being added by accident. To fix this:',
+    '  stray.bin: 1.5MiB (1500000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseRefusedSnapshotFiles(stderr), ['a.bin']);
 });
 
 test('parseGitFormatDiff parses a modified file with counts, hunks and exact byte size', () => {

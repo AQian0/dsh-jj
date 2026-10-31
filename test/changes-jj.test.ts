@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { JjChangesReader } from '../src/changes-types.ts';
 import { createJjChangesReader, type JjChangesCommandLimits } from '../src/changes-jj.ts';
@@ -75,15 +75,68 @@ test('readCommit returns a 40-hex id, changes after a write, and is stable witho
 
   const first = await reader.readCommit({ cwd: repo });
   assert.ok(first !== undefined, 'a fresh jj-native repo must produce a commit id');
-  assert.match(first, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
-  assert.equal(await reader.readCommit({ cwd: repo }), first, 'no changes means no new working-copy commit');
+  assert.match(first.id, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
+  assert.deepEqual(first.refused, [], 'no file was refused');
+  assert.deepEqual(await reader.readCommit({ cwd: repo }), first, 'no changes means no new working-copy commit');
 
   writeFileSync(join(repo, 'added.txt'), 'hello\n');
   const afterWrite = await reader.readCommit({ cwd: repo });
   assert.ok(afterWrite !== undefined, 'the snapshot after a write must still produce a commit id');
-  assert.match(afterWrite, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
-  assert.notEqual(afterWrite, first, 'readCommit must snapshot the working copy, not return a cached parent id');
-  assert.equal(await reader.readCommit({ cwd: repo }), afterWrite, 'a second read without edits must be stable');
+  assert.match(afterWrite.id, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
+  assert.notEqual(afterWrite.id, first.id, 'readCommit must snapshot the working copy, not return a cached parent id');
+  assert.deepEqual(await reader.readCommit({ cwd: repo }), afterWrite, 'a second read without edits must be stable');
+});
+
+test('readCommit reports the oversized new file jj refused to snapshot (real jj)', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-refused');
+  const repo = await initJjNative(fx.run, fx.path('repo'));
+  const reader = readerFor(fx);
+  writeFileSync(join(repo, 'small.txt'), 'one\n');
+  const before = await reader.readCommit({ cwd: repo });
+  assert.ok(before !== undefined);
+  assert.deepEqual(before.refused, [], 'nothing is refused before the large file appears');
+
+  // jj's default `snapshot.max-new-file-size` is 1 MiB.
+  writeFileSync(join(repo, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 0x61));
+  const after = await reader.readCommit({ cwd: repo });
+  assert.ok(after !== undefined);
+  assert.deepEqual(after.refused, [join(repo, 'big.bin')], 'the refused path is absolute');
+  assert.equal(after.id, before.id, 'a refused file alone does not move the working-copy commit');
+
+  rmSync(join(repo, 'big.bin'));
+  const cleaned = await reader.readCommit({ cwd: repo });
+  assert.ok(cleaned !== undefined);
+  assert.deepEqual(cleaned.refused, [], 'removing the oversized file clears the refusal');
+});
+
+test('readCommit resolves refused paths from a working directory below the workspace root', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-refused-subdir');
+  const repo = await initJjNative(fx.run, fx.path('repo'));
+  const sub = join(repo, 'sub');
+  mkdirSync(sub, { recursive: true });
+  const reader = readerFor(fx);
+  writeFileSync(join(sub, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 0x61));
+  const snapshot = await reader.readCommit({ cwd: sub });
+  assert.ok(snapshot !== undefined);
+  assert.deepEqual(snapshot.refused, [join(sub, 'big.bin')], 'jj prints cwd-relative paths; the reader resolves them');
+});
+
+test('readCommit parses, deduplicates, and sorts refused paths from a command stderr (fake runner)', async () => {
+  const id = '0123456789abcdef0123456789abcdef01234567';
+  const stderr = [
+    'Some unrelated warning',
+    'Warning: Refused to snapshot some files:',
+    '  sub/big one.bin: 1.9MiB (2000000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    '  dup.bin: 1.1MiB (1100000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    '  dup.bin: 1.1MiB (1100000 bytes); the maximum size allowed is 1.0MiB (1048576 bytes)',
+    'Hint: This is to prevent large files from being added by accident. To fix this:',
+  ].join('\n');
+  const { runJj } = recordingRunner([runResult({ stdout: `${id}\n`, stderr })]);
+  const reader = createJjChangesReader(runJj, LIMITS);
+  assert.deepEqual(await reader.readCommit({ cwd: '/repo' }), {
+    id,
+    refused: ['/repo/dup.bin', '/repo/sub/big one.bin'],
+  });
 });
 
 test('readDiff reports added/deleted counts, renames, mode-only and binary changes', async (t) => {
@@ -109,9 +162,9 @@ test('readDiff reports added/deleted counts, renames, mode-only and binary chang
   writeFileSync(join(repo, 'bin.dat'), Buffer.from([0x00, 0x01, 0x02, 0xff])); // binary add
   const to = await reader.readCommit({ cwd: repo });
   assert.ok(to !== undefined, 'turn-end commit id');
-  assert.notEqual(to, from);
+  assert.notEqual(to.id, from.id);
 
-  const changes = await reader.readDiff({ cwd: repo, from, to });
+  const changes = await reader.readDiff({ cwd: repo, from: from.id, to: to.id });
   assert.ok(changes !== undefined, 'readDiff over two recorded commits must resolve');
   assert.equal(changes.length, 6, `unexpected files: ${changes.map((change) => change.path).join(', ')}`);
   const byPath = new Map(changes.map((change) => [change.path, change]));
@@ -170,7 +223,7 @@ test('readDiff returns [] when from and to are the same commit', async (t) => {
   writeFileSync(join(repo, 'f.txt'), 'x\n');
   const id = await reader.readCommit({ cwd: repo });
   assert.ok(id !== undefined);
-  assert.deepEqual(await reader.readDiff({ cwd: repo, from: id, to: id }), []);
+  assert.deepEqual(await reader.readDiff({ cwd: repo, from: id.id, to: id.id }), []);
 });
 
 test('readDiff works in both jj-native and colocated repositories', async (t) => {
@@ -187,7 +240,7 @@ test('readDiff works in both jj-native and colocated repositories', async (t) =>
     writeFileSync(join(repo, 'f.txt'), 'a\nb\n');
     const to = await reader.readCommit({ cwd: repo });
     assert.ok(to !== undefined, `${label}: turn-end commit id`);
-    const changes = await reader.readDiff({ cwd: repo, from, to });
+    const changes = await reader.readDiff({ cwd: repo, from: from.id, to: to.id });
     assert.ok(changes !== undefined, `${label}: readDiff must resolve`);
     assert.equal(changes.length, 1, `${label}: exactly one changed file`);
     assert.equal(changes[0]?.path, 'f.txt', `${label}: changed path`);
@@ -214,8 +267,8 @@ test('readDiff resolves undefined when a commit id is not a known revision', asy
   assert.ok(id !== undefined);
   // `'0'.repeat(40)` is jj's root commit, so use an id that cannot resolve instead.
   const bogus = 'deadbeef'.repeat(5);
-  assert.equal(await reader.readDiff({ cwd: repo, from: bogus, to: id }), undefined);
-  assert.equal(await reader.readDiff({ cwd: repo, from: id, to: bogus }), undefined);
+  assert.equal(await reader.readDiff({ cwd: repo, from: bogus, to: id.id }), undefined);
+  assert.equal(await reader.readDiff({ cwd: repo, from: id.id, to: bogus }), undefined);
 });
 
 test('readCommit binds limits, forwards the signal, and never passes --ignore-working-copy', async () => {
@@ -223,7 +276,7 @@ test('readCommit binds limits, forwards the signal, and never passes --ignore-wo
   const { runJj, calls } = recordingRunner([runResult({ stdout: `${id}\n` })]);
   const reader = createJjChangesReader(runJj, LIMITS);
   const signal = new AbortController().signal;
-  assert.equal(await reader.readCommit({ cwd: '/repo', signal }), id);
+  assert.deepEqual(await reader.readCommit({ cwd: '/repo', signal }), { id, refused: [] });
   assert.equal(calls.length, 1);
   const call = calls[0];
   assert.deepEqual(call.argv, ['log', '--no-graph', '-r', '@', '-T', 'commit_id ++ "\\n"']);
@@ -236,7 +289,11 @@ test('readCommit binds limits, forwards the signal, and never passes --ignore-wo
 
   const sha256 = 'a'.repeat(64);
   const sha256Reader = createJjChangesReader(recordingRunner([runResult({ stdout: sha256 })]).runJj, LIMITS);
-  assert.equal(await sha256Reader.readCommit({ cwd: '/repo' }), sha256, 'SHA-256 commit ids are accepted');
+  assert.deepEqual(
+    await sha256Reader.readCommit({ cwd: '/repo' }),
+    { id: sha256, refused: [] },
+    'SHA-256 commit ids are accepted',
+  );
 });
 
 test('readCommit resolves undefined for every failed read shape', async () => {

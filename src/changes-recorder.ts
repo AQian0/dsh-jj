@@ -22,7 +22,12 @@
  *   nothing, so the built-in recorder's Git-derived summary remains available
  *   (fail-open);
  * - a working copy whose turn-end commit equals its turn-start commit appends no
- *   event (nothing changed, so there is nothing to show);
+ *   event (nothing changed, so there is nothing to show) unless the turn created
+ *   a new file that jj refused to snapshot for exceeding
+ *   `snapshot.max-new-file-size`: those files do not move the commit, so they are
+ *   listed from the snapshot's refusal report as `oversized` entries with no line
+ *   counts or comparison. A path the turn-start snapshot also refused is not this
+ *   turn's change and stays out of the summary;
  * - one Session's snapshot/diff/append work is serialized on a promise chain so
  *   concurrent turns, session disposal, and plugin disposal cannot interleave.
  *
@@ -83,7 +88,12 @@ export interface StartedTurn {
 type Baseline =
   | { readonly kind: 'pending' }
   | { readonly kind: 'failed' }
-  | { readonly kind: 'commit'; readonly id: string };
+  | {
+      readonly kind: 'commit';
+      readonly id: string;
+      /** Absolute paths the turn-start snapshot already refused as oversized. */
+      readonly refused: readonly string[];
+    };
 
 /** State of the one turn this recorder currently has open for a Session. */
 interface TurnState {
@@ -182,7 +192,8 @@ export class TurnChangesRecorder {
     void this.enqueue(state, async (signal) => {
       try {
         const commit = await this.options.reader.readCommit({ cwd: turnState.cwd, signal });
-        turnState.baseline = commit === undefined ? { kind: 'failed' } : { kind: 'commit', id: commit };
+        turnState.baseline =
+          commit === undefined ? { kind: 'failed' } : { kind: 'commit', id: commit.id, refused: commit.refused };
       } catch (error) {
         // A repository whose snapshot failed must not be summarized as unchanged.
         turnState.baseline = { kind: 'failed' };
@@ -405,14 +416,30 @@ export class TurnChangesRecorder {
     if (turnState.lastToolResultSeq < 0) return;
     const { cwd, root } = turnState;
     const end = await this.options.reader.readCommit({ cwd, signal });
-    if (end === undefined || end === baseline.id || signal.aborted) return;
-    const changes = await this.options.reader.readDiff({ cwd, from: baseline.id, to: end, signal });
-    if (changes === undefined || changes.length === 0 || signal.aborted) return;
+    if (end === undefined || signal.aborted) return;
+    const refused = newlyRefused(end.refused, baseline.refused);
+    const moved = end.id !== baseline.id;
+    // A refused file never moves the working-copy commit, so a turn that only
+    // created one has no diff to read while still having something to record.
+    const changes = moved ? await this.options.reader.readDiff({ cwd, from: baseline.id, to: end.id, signal }) : [];
+    // A failed diff read keeps the fail-open behavior: no jj summary, so the
+    // built-in recorder stays authoritative for the turn.
+    if (changes === undefined || signal.aborted) return;
+    if (changes.length === 0 && refused.length === 0) return;
     const { home, maxFiles, maxFileBytes } = this.options;
     const listed: ListedChange[] = changes.map((change) => ({
       file: changedFile(change, cwd, root, home),
       comparison: comparisonOf(change, maxFileBytes),
     }));
+    const listedPaths = new Set(changes.map((change) => resolve(root, change.path)));
+    for (const absolute of refused) {
+      // Defensive only: a refused path is untracked, so it cannot also be a diff entry.
+      if (listedPaths.has(absolute)) continue;
+      listed.push({
+        file: refusedFile(absolute, cwd, root, home),
+        comparison: { kind: 'oversized' },
+      });
+    }
     listed.sort((a, b) => compareDisplay(a.file, b.file));
     const files = listed.slice(0, Math.max(0, maxFiles));
     const summary: WorkspaceChangesSummary = {
@@ -450,6 +477,46 @@ function changedFile(change: ParsedChange, cwd: string, root: string, home: stri
     deleted,
     ...(change.binary ? { binary: true as const } : {}),
   };
+}
+
+/**
+ * The Host-facing file entry for a new file jj refused to snapshot.
+ *
+ * The file has no working-copy diff (jj never added it), so it is listed with
+ * zero counts and the Host's `oversized` flag: the card shows "too large" and
+ * the comparison is refused instead of the file disappearing from the turn.
+ *
+ * @param absolute - canonical path of the refused file.
+ * @param cwd - Session working directory the summary paths are relative to.
+ * @param root - jj workspace root.
+ * @param home - canonical home directory for the `~` display form.
+ * @returns the summary entry for the refused file.
+ */
+function refusedFile(absolute: string, cwd: string, root: string, home: string): WorkspaceChangedFile {
+  return {
+    path: durablePathOf(absolute, cwd),
+    display: displayPathOf(absolute, cwd, root, home),
+    added: 0,
+    deleted: 0,
+    oversized: true,
+  };
+}
+
+/**
+ * Paths the turn-end snapshot refused but the turn-start snapshot did not.
+ *
+ * A file already refused at turn start was not created by this turn, so it must
+ * stay out of the summary; only a refusal that appeared during the turn is this
+ * turn's oversized new file.
+ *
+ * @param end - absolute refused paths of the turn-end snapshot.
+ * @param start - absolute refused paths of the turn-start snapshot.
+ * @returns the new refused paths, in the end snapshot's order.
+ */
+function newlyRefused(end: readonly string[], start: readonly string[]): readonly string[] {
+  if (start.length === 0) return end;
+  const before = new Set(start);
+  return end.filter((path) => !before.has(path));
 }
 
 /** The comparison kept for one parsed change; binary and oversized files refuse hunks. */
