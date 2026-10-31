@@ -190,6 +190,19 @@ test('classifyJjFailure: jj failure vocabulary is table-driven', () => {
       'JJ_REPO_BROKEN',
     ],
     ['inaccessible repository', settled({ exitCode: 1, stderr: 'Cannot access .jj/repo' }), 'JJ_REPO_BROKEN'],
+    [
+      'inaccessible git metadata',
+      settled({ exitCode: 1, stderr: 'Cannot access /repo/.git/config' }),
+      'JJ_REPO_BROKEN',
+    ],
+    // A user-supplied path that jj cannot access is a bad argument, not a broken
+    // repository (jj_workspace_add /root/... would otherwise tell the model to
+    // rebuild the repo instead of picking another path).
+    [
+      'inaccessible argument path',
+      settled({ exitCode: 1, stderr: 'Cannot access /root/some-ws' }),
+      'JJ_COMMAND_FAILED',
+    ],
     ['not a repository', settled({ exitCode: 1, stderr: 'Error: There is no jj repo in "/tmp/x"' }), 'JJ_NOT_A_REPO'],
     ['bad revset', settled({ exitCode: 1, stderr: 'Failed to parse revset: nope' }), 'JJ_BAD_REVSET'],
     ['usage error exit code', settled({ exitCode: 2, stderr: '' }), 'JJ_BAD_INPUT'],

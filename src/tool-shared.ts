@@ -157,6 +157,11 @@ export function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescrip
       cleanup,
     ].join('\n');
   }
+  // A workspace behind the destination has no stack above it to rebase, so no
+  // rebase ran: say that instead of claiming the base is wrong after a rebase.
+  if (!result.rebased && !result.alreadyIntegrated) {
+    return `This workspace is behind ${result.destination}: the destination already contains this workspace's history, so nothing was rebased and nothing changed. Inspect the graph with jj_log and report the situation to the user; do not hand the remaining steps to the user.${cleanupNote} ${cleanup}`;
+  }
   if (!result.onTarget) {
     return `The rebase command ran but the stack base is not the resolved destination yet. Inspect the change graph with jj_log and report the change ids; do not hand the remaining steps to the user. ${cleanup}`;
   }

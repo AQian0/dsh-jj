@@ -40,8 +40,16 @@ export const TPL_COMMIT_IDS = 'commit_id ++ "\\n"';
 export const TPL_LOG =
   '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description.first_line()) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
 
-/** `jj workspace list` template used by the tools (tab-separated; names may contain spaces). */
-export const TPL_WORKSPACE_LIST_TAB = 'name ++ "\\t" ++ root ++ "\\n"';
+/**
+ * `jj workspace list` template used by the tools (tab-separated; both fields JSON).
+ *
+ * Both values are `json(...)`-encoded rather than printed bare: jj 0.46 renders a
+ * workspace name that needs quoting (`my session`) as `"my session"` when the
+ * template prints the raw name, so the read-back name was quoted and the cleanup
+ * ownership comparison failed. `json()` also escapes tabs inside names, keeping the
+ * tab field separator unambiguous (detect uses the same JSON encoding).
+ */
+export const TPL_WORKSPACE_LIST_TAB = 'json(name) ++ "\\t" ++ json(root) ++ "\\n"';
 
 /**
  * `jj op log` template (contract §7.3.8): `json(self)` exposes id/description/

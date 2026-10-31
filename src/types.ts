@@ -55,6 +55,13 @@ export interface JjOperation {
   readonly id: string;
   readonly shortId: string;
   readonly description: string;
+  /**
+   * Operation start time as jj reports it (RFC 3339 with a UTC offset).
+   *
+   * jj 0.46 serializes `json(self).time` as a `{ start, end }` object; the parsed
+   * field is the `start` instant so the model always gets a parseable timestamp
+   * instead of the stringified object.
+   */
   readonly time: string;
   readonly user: string;
   readonly workspaceName: string | null;
