@@ -1,7 +1,7 @@
 /**
- * Parsers for the two `jj diff` outputs behind the workspace-changes recorder.
+ * Parsers for the jj outputs behind the workspace-changes recorder.
  *
- * A recorder turn runs two commands for one commit pair:
+ * A recorder turn runs two `jj diff` commands for one commit pair:
  *
  * 1. `jj diff --from <from> --to <to> -T 'path ++ "\0"'` prints one
  *    NUL-terminated workspace-relative target path per changed entry, in jj's
@@ -11,6 +11,12 @@
  * 2. `jj diff --from <from> --to <to> --git` prints a Git-format unified diff
  *    with per-file hunks. jj 0.46 never C-quotes paths, but the Git quoting form
  *    is tolerated defensively because a future jj release may adopt it.
+ *
+ * The turn-boundary snapshot (`jj log -r @`) additionally reports files jj
+ * refuses to snapshot because they are larger than
+ * `snapshot.max-new-file-size`; {@link parseRefusedSnapshotFiles} reads that
+ * warning out of the command's stderr so the recorder can list those files in
+ * the card instead of dropping them silently.
  *
  * This module is pure: no I/O, no subprocess, and no `@deepseek-ai/*` runtime
  * import (the declarations it needs are imported as types only).
@@ -49,6 +55,45 @@ export function parseNulPaths(output: string): string[] {
   const records = output.split('\0');
   if (records.length > 0 && records[records.length - 1] === '') records.pop();
   return records.filter((record) => record.length > 0);
+}
+
+/** Heading line of the stderr warning jj prints when it refuses to snapshot oversized new files. */
+const REFUSED_SNAPSHOT_HEADER = /^Warning: Refused to snapshot (?:some files|\d+ files?):$/;
+
+/**
+ * One file entry of that warning: a two-space indent, the path (relative to the
+ * command's working directory), and jj's size / configured-cap explanation.
+ */
+const REFUSED_SNAPSHOT_ENTRY = /^ {2}(.+): [^(]*\(\d+ bytes\); the maximum size allowed is /;
+
+/**
+ * Parse the paths jj refused to snapshot out of one command's stderr.
+ *
+ * jj snapshots the working copy before most commands and ignores new files above
+ * `snapshot.max-new-file-size` (1 MiB by default), printing a warning block that
+ * names each refused path relative to the command's working directory. The
+ * recorder lists those files in the turn's card as oversized entries because the
+ * working-copy diff can never contain them.
+ *
+ * The parser is deliberately fail-open: a stderr without the warning yields an
+ * empty list, and the first line that does not have the entry shape ends the
+ * block, so an unrelated warning (or a future jj format change) degrades to
+ * "nothing refused" instead of throwing or inventing a path.
+ *
+ * @param stderr - stderr of one jj command.
+ * @returns refused paths in jj's order, each relative to that command's working directory.
+ */
+export function parseRefusedSnapshotFiles(stderr: string): string[] {
+  const lines = stderr.split(/\r?\n/);
+  const start = lines.findIndex((line) => REFUSED_SNAPSHOT_HEADER.test(line));
+  if (start < 0) return [];
+  const refused: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const match = REFUSED_SNAPSHOT_ENTRY.exec(lines[index]);
+    if (match === null) break;
+    refused.push(match[1]);
+  }
+  return refused;
 }
 
 /**

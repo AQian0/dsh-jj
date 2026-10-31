@@ -68,6 +68,25 @@ export interface TurnDiffOptions extends ChangesReaderOptions {
 }
 
 /**
+ * One working-copy snapshot taken at a turn boundary.
+ *
+ * Snapshotting can rewrite the working-copy commit, so the returned id is what
+ * the turn is actually compared against. jj also refuses to add *new* files
+ * larger than `snapshot.max-new-file-size` (1 MiB by default); those paths are
+ * reported alongside the id because the working-copy diff can never contain
+ * them, and the recorder has to surface them another way.
+ */
+export interface SnapshotCommit {
+  /** The working-copy commit id after jj's snapshot, 40 or 64 lowercase hex digits. */
+  readonly id: string;
+  /**
+   * Absolute paths of new files jj refused to snapshot because they exceed
+   * `snapshot.max-new-file-size`, in jj's order; empty when nothing was refused.
+   */
+  readonly refused: readonly string[];
+}
+
+/**
  * Reads one Jujutsu workspace's turn boundaries.
  *
  * Both methods resolve to `undefined` instead of throwing: recording is a
@@ -75,8 +94,8 @@ export interface TurnDiffOptions extends ChangesReaderOptions {
  * working copy, or a truncated response must never break the turn.
  */
 export interface JjChangesReader {
-  /** Snapshot the working copy and return its commit id for a turn boundary. */
-  readCommit(options: ChangesReaderOptions): Promise<string | undefined>;
+  /** Snapshot the working copy and return its commit id plus any refused oversized new file. */
+  readCommit(options: ChangesReaderOptions): Promise<SnapshotCommit | undefined>;
   /** Diff two snapshot commits into per-file changes. */
   readDiff(options: TurnDiffOptions): Promise<readonly ParsedChange[] | undefined>;
 }

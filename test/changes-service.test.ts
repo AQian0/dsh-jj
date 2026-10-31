@@ -227,6 +227,42 @@ test('merges a built-in event aliased to the jj turn: own wins, extras appended 
   assert.deepEqual(upstream.summaryCalls, [100], 'the newest candidate is defined, so scanning stops');
 });
 
+test('keeps the jj oversized placeholder when the built-in recorder saw the same file', async () => {
+  const recorder = makeFakeRecorder();
+  const upstream = makeFakeUpstream();
+  const oversized: WorkspaceChangedFile = {
+    path: 'big.bin',
+    display: 'big.bin',
+    added: 0,
+    deleted: 0,
+    oversized: true,
+  };
+  recorder.turnSummaries.set(4, summaryOf(4, '/repo', [oversized]));
+  // The Git-based recorder snapshots untracked files of any size, so it would
+  // report real counts; jj refused to snapshot the file, and its placeholder wins.
+  upstream.summaries.set(40, summaryOf(4, '/repo', [file('big.bin', 10, 2)]));
+  recorder.turnDiffs.set('4:0', { kind: 'oversized', path: 'big.bin', display: 'big.bin' });
+  const service = makeBridge({
+    recorder,
+    upstream,
+    observedTurn: () => 4,
+    upstreamSeqs: () => [40],
+  });
+
+  const merged = service.summary('s1', 40);
+  assert.ok(merged !== undefined);
+  assert.deepEqual(merged.files, [oversized], 'the jj entry keeps the oversized marker and zero counts');
+  assert.equal(merged.added, 0);
+  assert.equal(merged.deleted, 0);
+  assert.deepEqual(await service.diff('s1', 40, 0, new AbortController().signal), {
+    kind: 'oversized',
+    path: 'big.bin',
+    display: 'big.bin',
+  });
+  assert.deepEqual(recorder.turnDiffCalls, [{ turn: 4, index: 0 }]);
+  assert.deepEqual(upstream.diffCalls, [], 'the built-in comparison is never asked for the duplicate');
+});
+
 test('deduplicates files whose paths resolve to the same absolute path across cwds', () => {
   const recorder = makeFakeRecorder();
   const upstream = makeFakeUpstream();

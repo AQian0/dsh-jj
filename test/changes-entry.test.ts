@@ -295,6 +295,51 @@ test('jj-native workspace: the changed-files card is served from jj snapshots', 
   assert.deepEqual(diff.hunks?.[0]?.lines, [' one', ' two', '+three', '+four']);
 });
 
+test('jj-native workspace: a new oversized file is listed as an oversized card entry', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-entry-oversized');
+  const repo = await initJjNative(fx.run, fx.path('repo'));
+  writeFileSync(join(repo, 'keep.txt'), 'one\n');
+  await mustRun(fx.run, ['jj', 'describe', '-m', 'init'], repo);
+  await mustRun(fx.run, ['jj', 'new'], repo);
+  const harness = await mountHost(repo, writeJjConfig(fx.root));
+
+  const seq = await runTurn(harness, 1, () => {
+    appendFileSync(join(repo, 'keep.txt'), 'two\n');
+    // Over jj's default `snapshot.max-new-file-size` (1 MiB): jj refuses to snapshot it.
+    writeFileSync(join(repo, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 0x61));
+  });
+  const summary = harness.summary(seq);
+  assert.ok(summary !== undefined);
+  assert.equal(summary.total, 2);
+  assert.equal(summary.added, 1, 'the oversized file contributes no line counts');
+  const big = summary.files.find((file) => file.path === 'big.bin');
+  assert.ok(big !== undefined, 'the file jj refused to snapshot must still be listed');
+  assert.deepEqual(big, { path: 'big.bin', display: 'big.bin', added: 0, deleted: 0, oversized: true });
+  const index = summary.files.findIndex((file) => file.path === 'big.bin');
+  assert.deepEqual(await harness.diff(seq, index), { kind: 'oversized', path: 'big.bin', display: 'big.bin' });
+
+  const keep = summary.files.find((file) => file.path === 'keep.txt');
+  assert.deepEqual(keep, { path: 'keep.txt', display: 'keep.txt', added: 1, deleted: 0 });
+});
+
+test('jj-native workspace: a turn that only creates an oversized file still produces a card', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-entry-oversized-only');
+  const repo = await initJjNative(fx.run, fx.path('repo'));
+  writeFileSync(join(repo, 'keep.txt'), 'one\n');
+  await mustRun(fx.run, ['jj', 'describe', '-m', 'init'], repo);
+  await mustRun(fx.run, ['jj', 'new'], repo);
+  const harness = await mountHost(repo, writeJjConfig(fx.root));
+
+  const seq = await runTurn(harness, 1, () => {
+    writeFileSync(join(repo, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 0x61));
+  });
+  const summary = harness.summary(seq);
+  assert.ok(summary !== undefined, 'the card is recorded even though the working-copy commit did not move');
+  assert.equal(summary.total, 1);
+  assert.deepEqual(summary.files, [{ path: 'big.bin', display: 'big.bin', added: 0, deleted: 0, oversized: true }]);
+  assert.deepEqual(await harness.diff(seq, 0), { kind: 'oversized', path: 'big.bin', display: 'big.bin' });
+});
+
 test('colocated workspace: jj data wins and the built-in Git record is merged without duplicates', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-changes-entry-colocated');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
@@ -313,6 +358,26 @@ test('colocated workspace: jj data wins and the built-in Git record is merged wi
   assert.equal(summary.files[0]?.added, 1);
   assert.equal(summary.added, 1);
   assert.equal(summary.total, 1);
+});
+
+test('colocated workspace: jj keeps the oversized marker even though Git sees the file', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-entry-oversized-colocated');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  writeFileSync(join(repo, 'keep.txt'), 'one\n');
+  await mustRun(fx.run, ['jj', 'describe', '-m', 'init'], repo);
+  await mustRun(fx.run, ['jj', 'new'], repo);
+  const harness = await mountHost(repo, writeJjConfig(fx.root));
+
+  const seq = await runTurn(harness, 1, () => {
+    writeFileSync(join(repo, 'big.txt'), 'x'.repeat(2 * 1024 * 1024));
+  });
+  const summary = harness.summary(seq);
+  assert.ok(summary !== undefined);
+  assert.equal(summary.total, 1);
+  // The built-in Git recorder can see the 2 MiB file and would report counts for
+  // it; the merge keeps the jj entry, so the card consistently says "too large".
+  assert.deepEqual(summary.files, [{ path: 'big.txt', display: 'big.txt', added: 0, deleted: 0, oversized: true }]);
+  assert.deepEqual(await harness.diff(seq, 0), { kind: 'oversized', path: 'big.txt', display: 'big.txt' });
 });
 
 test('plain Git repository: the built-in recorder still serves the summary', async (t) => {

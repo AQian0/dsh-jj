@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { WorkspaceDiffHunk } from '@deepseek-ai/dsh-workspace-changes/types';
 import { TurnChangesRecorder, type ChangesSessionLike } from '../src/changes-recorder.ts';
-import type { JjChangesReader, ParsedChange, ParsedChangeStatus } from '../src/changes-types.ts';
+import type { JjChangesReader, ParsedChange, ParsedChangeStatus, SnapshotCommit } from '../src/changes-types.ts';
 
 /** One Session event appended by the fake Session. */
 interface RecordedEvent {
@@ -59,6 +59,15 @@ interface FakeReader {
   readonly calls: ReaderCalls;
 }
 
+/** One scripted snapshot: a bare commit id (no refusal) or a full snapshot. */
+type ScriptedCommit = string | SnapshotCommit | undefined;
+
+/** Normalize a scripted snapshot: the bare-id shorthand carries no refused file. */
+function normalizeCommit(value: ScriptedCommit): SnapshotCommit | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === 'string' ? { id: value, refused: [] } : value;
+}
+
 /**
  * Build a fake reader driven by a script; running out of scripted steps throws,
  * which makes an unexpected extra read show up as a warning failure.
@@ -67,7 +76,7 @@ interface FakeReader {
  * @returns the reader and the observed call log.
  */
 function makeReader(script: {
-  readonly commits: Step<string | undefined>[];
+  readonly commits: Step<ScriptedCommit>[];
   readonly diffs: Step<readonly ParsedChange[] | undefined>[];
 }): FakeReader {
   const calls: ReaderCalls = { commits: [], diffs: [] };
@@ -76,7 +85,7 @@ function makeReader(script: {
       calls.commits.push({ cwd: options.cwd, signal: options.signal });
       const step = script.commits.shift();
       if (step === undefined) throw new Error('unscripted readCommit');
-      return resolveStep(step);
+      return normalizeCommit(await resolveStep(step));
     },
     async readDiff(options) {
       calls.diffs.push({ cwd: options.cwd, from: options.from, to: options.to });
@@ -140,7 +149,7 @@ interface Harness {
  */
 function makeRecorder(
   script: {
-    readonly commits: Step<string | undefined>[];
+    readonly commits: Step<ScriptedCommit>[];
     readonly diffs: Step<readonly ParsedChange[] | undefined>[];
   },
   bounds: { readonly maxFiles?: number; readonly maxFileBytes?: number; readonly home?: string } = {},
@@ -267,6 +276,102 @@ test('appends nothing when the working-copy commit did not change', async () => 
   assert.equal(harness.reader.calls.commits.length, 2, 'the turn-end commit was still read');
   assert.equal(harness.reader.calls.diffs.length, 0);
   assert.deepEqual(harness.warnings, []);
+});
+
+test('lists a new file jj refused to snapshot as an oversized entry', async () => {
+  const harness = makeRecorder({
+    commits: [{ value: 'base' }, { value: { id: 'end', refused: ['/repo/big.bin'] } }],
+    diffs: [{ value: [parsedFile({ path: 'a.txt', added: 2 })] }],
+  });
+  const session = makeSession('s1');
+  await recordTurn(harness, session);
+  const summary = harness.recorder.summary(session.id, 1);
+  assert.ok(summary !== undefined);
+  assert.deepEqual(
+    summary.files.map((file) => file.path),
+    ['a.txt', 'big.bin'],
+    'the refused file is merged into the display-sorted list',
+  );
+  const index = summary.files.findIndex((file) => file.path === 'big.bin');
+  assert.deepEqual(summary.files[index], {
+    path: 'big.bin',
+    display: 'big.bin',
+    added: 0,
+    deleted: 0,
+    oversized: true,
+  });
+  assert.equal(summary.total, 2);
+  assert.equal(summary.added, 2, 'the oversized file contributes no line counts');
+  assert.equal(summary.deleted, 0);
+  const diff = await harness.recorder.diff(session.id, 1, index, new AbortController().signal);
+  assert.deepEqual(diff, { kind: 'oversized', path: 'big.bin', display: 'big.bin' });
+});
+
+test('records a refused file even though it leaves the working-copy commit untouched', async () => {
+  const harness = makeRecorder({
+    commits: [{ value: 'same' }, { value: { id: 'same', refused: ['/repo/big.bin'] } }],
+    diffs: [],
+  });
+  const session = makeSession('s1');
+  await recordTurn(harness, session);
+  assert.equal(session.events.length, 1, 'something changed even though the commit id did not move');
+  assert.equal(harness.reader.calls.diffs.length, 0, 'there is no diff to read');
+  const summary = harness.recorder.summary(session.id, 1);
+  assert.ok(summary !== undefined);
+  assert.deepEqual(summary.files, [{ path: 'big.bin', display: 'big.bin', added: 0, deleted: 0, oversized: true }]);
+  assert.equal(summary.total, 1);
+});
+
+test('does not list a refused file that already existed at turn start', async () => {
+  const harness = makeRecorder({
+    commits: [
+      { value: { id: 'base', refused: ['/repo/old.bin'] } },
+      { value: { id: 'end', refused: ['/repo/old.bin', '/repo/new.bin'] } },
+    ],
+    diffs: [{ value: [parsedFile({ path: 'a.txt', added: 1 })] }],
+  });
+  const session = makeSession('s1');
+  await recordTurn(harness, session);
+  const summary = harness.recorder.summary(session.id, 1);
+  assert.ok(summary !== undefined);
+  assert.deepEqual(
+    summary.files.map((file) => file.path),
+    ['a.txt', 'new.bin'],
+    'only the refusal that appeared during this turn is recorded',
+  );
+});
+
+test('resolves a refused path through the same display rules as a diff entry', async () => {
+  const harness = makeRecorder({
+    commits: [{ value: 'base' }, { value: { id: 'end', refused: ['/repo/sub/big.bin', '/repo/root.bin'] } }],
+    diffs: [{ value: [parsedFile({ path: 'sub/b.txt', added: 1 })] }],
+  });
+  const session = makeSession('s1');
+  await recordTurn(harness, session, 1, { cwd: '/repo/sub', root: '/repo' });
+  const summary = harness.recorder.summary(session.id, 1);
+  assert.ok(summary !== undefined);
+  assert.deepEqual(
+    summary.files.map((file) => [file.path, file.display]),
+    [
+      ['/repo/root.bin', '../root.bin'],
+      ['b.txt', 'b.txt'],
+      ['big.bin', 'big.bin'],
+    ],
+    'refused files use the working-directory-relative path and display',
+  );
+});
+
+test('does not duplicate a refused path that a diff entry also reports', async () => {
+  const harness = makeRecorder({
+    commits: [{ value: 'base' }, { value: { id: 'end', refused: ['/repo/a.txt'] } }],
+    diffs: [{ value: [parsedFile({ path: 'a.txt', added: 1 })] }],
+  });
+  const session = makeSession('s1');
+  await recordTurn(harness, session);
+  const summary = harness.recorder.summary(session.id, 1);
+  assert.ok(summary !== undefined);
+  assert.deepEqual(summary.files, [{ path: 'a.txt', display: 'a.txt', added: 1, deleted: 0 }]);
+  assert.equal(summary.total, 1, 'the diff entry wins over the defensive refusal entry');
 });
 
 test('appends nothing when the turn ran no tool', async () => {

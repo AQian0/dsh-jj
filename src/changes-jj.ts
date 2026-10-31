@@ -11,6 +11,10 @@
  *
  * - `readCommit` does NOT pass `--ignore-working-copy`: jj must snapshot the
  *   working copy first, so the returned commit id reflects the files on disk.
+ *   That same command's stderr names any new file jj refused to snapshot for
+ *   being larger than `snapshot.max-new-file-size`; {@link readCommit} parses
+ *   those paths so the recorder can list them as oversized instead of losing
+ *   them with the rest of the snapshot.
  * - `readDiff` passes `--ignore-working-copy` to both commands: both commits are
  *   already recorded, no re-snapshot is needed, and skipping it avoids racing an
  *   actively mutated working copy.
@@ -24,8 +28,10 @@
  * @module dsh-jj/changes-jj
  */
 
-import { parseGitFormatDiff, parseNulPaths } from './changes-diff.ts';
-import type { JjChangesReader, ParsedChange } from './changes-types.ts';
+import { resolve } from 'node:path';
+
+import { parseGitFormatDiff, parseNulPaths, parseRefusedSnapshotFiles } from './changes-diff.ts';
+import type { JjChangesReader, ParsedChange, SnapshotCommit } from './changes-types.ts';
 import type { JjRunResult, RunJj, RunJjOptions } from './types.ts';
 
 /** Command limits bound into every command this reader runs. */
@@ -94,6 +100,22 @@ function commandOptions(
 }
 
 /**
+ * Turn the refused paths of one stderr into sorted, deduplicated absolute paths.
+ *
+ * jj prints them relative to the command's working directory (`../repo/big.bin`
+ * for a Session below the repository root), so they are resolved against the
+ * `cwd` the command ran in before the recorder turns them into display paths.
+ *
+ * @param stderr - stderr of the snapshot command.
+ * @param cwd - the working directory the command ran in.
+ * @returns absolute refused paths, sorted for a stable baseline comparison.
+ */
+function refusedPaths(stderr: string, cwd: string): string[] {
+  const resolved = parseRefusedSnapshotFiles(stderr).map((path) => resolve(cwd, path));
+  return [...new Set(resolved)].sort();
+}
+
+/**
  * Create a {@link JjChangesReader} bound to one runner and one set of command limits.
  *
  * @param runJj - injected jj runner; the caller owns the executable name, pager/color flags, and environment.
@@ -102,14 +124,15 @@ function commandOptions(
  */
 export function createJjChangesReader(runJj: RunJj, limits: JjChangesCommandLimits): JjChangesReader {
   return {
-    async readCommit(options): Promise<string | undefined> {
+    async readCommit(options): Promise<SnapshotCommit | undefined> {
       const result = await runChecked(
         runJj,
         commandOptions(limits, options.cwd, ['log', '--no-graph', '-r', '@', '-T', COMMIT_TEMPLATE], options.signal),
       );
       if (result === undefined) return undefined;
       const id = result.stdout.trim();
-      return COMMIT_ID.test(id) ? id.toLowerCase() : undefined;
+      if (!COMMIT_ID.test(id)) return undefined;
+      return { id: id.toLowerCase(), refused: refusedPaths(result.stderr, options.cwd) };
     },
 
     async readDiff(options): Promise<readonly ParsedChange[] | undefined> {
