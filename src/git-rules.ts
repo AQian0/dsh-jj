@@ -11,7 +11,16 @@
 
 import { JJ_EQUIVALENCE, mutateRule, readRule } from './git-equivalence.ts';
 import type { GitSafety, GitSafetySubtype, RuleResult, SubcommandRule } from './git-equivalence.ts';
-import { baseName, nestedCommandStrings, scanArgs, skipPrelude, tokenize } from './git-tokenize.ts';
+import {
+  baseName,
+  MAX_NESTING,
+  nestedCommandStrings,
+  scanArgs,
+  scanPrelude,
+  segmentDirectoryChange,
+  isStaticDirectoryTarget,
+  tokenize,
+} from './git-tokenize.ts';
 import type { RawSegment, Token } from './git-tokenize.ts';
 
 /** True when any of `names` is present in `flags`. */
@@ -57,6 +66,174 @@ const GIT_TERMINAL_FLAGS = new Set([
   '--exec-path',
 ]);
 
+/**
+ * Options that take a **required** value, per Git subcommand.
+ *
+ * Used only to find *flag positions* when deciding whether `-h`/`--help` really
+ * asks for help: an option value that happens to be `-h` (`git commit -a -m -h`)
+ * is a commit message, not a help request. Optional-value options are deliberately
+ * left out (Git only accepts their value attached, so the following token stays a
+ * flag). An empty/unknown table never turns a mutating command into "read": the
+ * help flag is then only honoured as the first argument.
+ */
+const GIT_VALUE_OPTIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  commit: [
+    '-m',
+    '--message',
+    '-F',
+    '--file',
+    '-C',
+    '--reuse-message',
+    '-c',
+    '--reedit-message',
+    '--author',
+    '--date',
+    '--template',
+    '--fixup',
+    '--squash',
+    '--trailer',
+    '--pathspec-from-file',
+  ],
+  checkout: ['-b', '-B', '--orphan', '--conflict', '--pathspec-from-file'],
+  switch: ['-c', '-C', '--orphan', '--conflict'],
+  reset: ['--pathspec-from-file'],
+  restore: ['-s', '--source', '--pathspec-from-file'],
+  revert: ['-m', '--mainline', '--strategy', '-X', '--strategy-option'],
+  stash: ['-m', '--message', '--pathspec-from-file'],
+  merge: ['-m', '--message', '-F', '--file', '-s', '--strategy', '-X', '--strategy-option', '--into-name'],
+  rebase: ['--onto', '--exec', '-x', '-s', '--strategy', '-X', '--strategy-option', '--whitespace'],
+  'cherry-pick': ['-m', '--mainline', '--strategy', '-X', '--strategy-option'],
+  am: ['-p', '--directory', '--whitespace', '-C', '-c'],
+  apply: ['-p', '--directory', '--exclude', '--include', '--whitespace', '-C', '-F'],
+  add: ['--chmod', '--pathspec-from-file'],
+  rm: ['--pathspec-from-file'],
+  worktree: ['-b', '-B', '--reason', '--orphan'],
+  branch: [
+    '-m',
+    '-M',
+    '-c',
+    '-C',
+    '--set-upstream-to',
+    '-u',
+    '--contains',
+    '--no-contains',
+    '--merged',
+    '--no-merged',
+    '--points-at',
+    '--sort',
+    '--format',
+  ],
+  tag: [
+    '-m',
+    '--message',
+    '-F',
+    '--file',
+    '-u',
+    '--local-user',
+    '--format',
+    '--sort',
+    '--contains',
+    '--points-at',
+    '--merged',
+    '--no-merged',
+  ],
+  // `--force-with-lease` takes an optional value (attached only), so it never
+  // consumes the next token.
+  push: ['-o', '--push-option', '--receive-pack', '--exec', '--repo'],
+  fetch: [
+    '-j',
+    '--jobs',
+    '--depth',
+    '--shallow-since',
+    '--shallow-exclude',
+    '--deepen',
+    '--refmap',
+    '--upload-pack',
+    '-o',
+    '--server-option',
+    '--filter',
+    '--negotiation-tip',
+    '--recurse-submodules-default',
+  ],
+  pull: ['-s', '--strategy', '-X', '--strategy-option', '--upload-pack', '--depth', '--refmap'],
+  remote: ['-t', '--track', '-m', '--master'],
+  submodule: ['-b', '--branch', '--name', '--reference', '--depth'],
+  config: [
+    '--get',
+    '--get-all',
+    '--get-regexp',
+    '--get-urlmatch',
+    '--unset',
+    '--unset-all',
+    '--replace-all',
+    '--rename-section',
+    '--remove-section',
+    '--comment',
+    '-f',
+    '--file',
+    '--blob',
+    '--type',
+    '--default',
+  ],
+  'symbolic-ref': ['-m'],
+  notes: ['-m', '--message', '-F', '--file', '-C', '--reuse-message', '-c', '--reedit-message', '--ref'],
+  archive: ['-o', '--output', '--format', '--prefix', '--remote', '--exec'],
+  'update-ref': ['-m', '--message'],
+  'update-index': ['--chmod', '--cacheinfo'],
+  'commit-tree': ['-p', '-m'],
+  'hash-object': ['--path', '-t', '--type'],
+  'commit-graph': ['--object-dir'],
+  'multi-pack-index': ['--object-dir'],
+  'format-patch': ['-o', '--output-directory', '--start-number', '--subject-prefix', '--signature', '--suffix'],
+  'filter-branch': [
+    '--msg-filter',
+    '--env-filter',
+    '--tree-filter',
+    '--index-filter',
+    '--parent-filter',
+    '--commit-filter',
+    '--tag-name-filter',
+    '--subdirectory-filter',
+    '--original',
+  ],
+});
+
+/** Value-taking short options that may be bundled (`-am "msg"`); the value follows. */
+function shortBundleTakesValue(bundle: string, valueFlags: ReadonlySet<string>): boolean {
+  if (bundle.length < 3 || bundle.startsWith('--')) return false;
+  return valueFlags.has(`-${bundle[bundle.length - 1] ?? ''}`);
+}
+
+/**
+ * Whether `-h`/`--help` appears in a real flag position (not as another option's
+ * value, and not after `--`).
+ *
+ * @param subcommand - the Git subcommand (selects the value-option table).
+ * @param rest - arguments after the subcommand (and after Git's global options).
+ */
+function helpRequested(subcommand: string, rest: readonly string[]): boolean {
+  const table = GIT_VALUE_OPTIONS[subcommand];
+  // Unknown option arity: only a leading help flag is trusted. A later one may be
+  // the value of an option this table does not know, and turning a mutating
+  // subcommand into "read" is the unsafe direction.
+  if (table === undefined) return rest[0] === '--help' || rest[0] === '-h';
+  const values = new Set(table);
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] ?? '';
+    if (token === '--') return false; // everything after `--` is a path/revision, not an option
+    if (!token.startsWith('-') || token === '-') continue;
+    const eq = token.indexOf('=');
+    const flag = eq >= 0 ? token.slice(0, eq) : token;
+    if (flag === '--help' || flag === '-h') return true;
+    if (eq < 0 && values.has(flag)) {
+      index += 1;
+      continue;
+    }
+    if (eq < 0 && shortBundleTakesValue(flag, values)) index += 1;
+  }
+  return false;
+}
+
 /** One Git invocation found in a shell command line. */
 export interface GitInvocation {
   /** Normalized Git argv (program plus its arguments; leading wrappers stripped). */
@@ -80,6 +257,8 @@ export interface GitInvocation {
   /** Base-layer extras: finer class, `-C`, `--git-dir`, `--work-tree`. */
   readonly subtype: GitSafetySubtype;
   readonly changeDir?: string;
+  /** Every `-C` target in order: Git applies them left to right (each relative to the previous one). */
+  readonly changeDirs?: readonly string[];
   readonly gitDir?: string;
   readonly workTree?: string;
 }
@@ -92,7 +271,10 @@ export interface ParsedSegment {
   readonly words: readonly string[];
   /** False when the segment contained an unterminated quote or a trailing escape. */
   readonly parsed: boolean;
-  /** Target of a leading `cd <path>` in this segment. */
+  /**
+   * Statically resolvable target of a leading `cd`/`pushd` in this segment
+   * (`cd -P <path>`, `cd -- <path>` and `pushd <path>` included).
+   */
   readonly cdTarget?: string;
   /** Indexes into {@link GitCommandClassification.invocations}. */
   readonly invocationIndexes: readonly number[];
@@ -113,7 +295,26 @@ export interface GitCommandClassification {
  */
 export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Object.freeze({
   // ---- mutate: history / working copy / refs
-  commit: mutateRule('subcommand `commit` creates a Git commit', JJ_EQUIVALENCE.commit),
+  commit: {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `commit` creates a Git commit',
+    equivalence: JJ_EQUIVALENCE.commit,
+    refine: ({ flags }) =>
+      anyFlag(flags, ['--dry-run'])
+        ? {
+            safety: 'read',
+            subtype: 'read-only',
+            reason: 'subcommand `commit --dry-run` only reports what would be committed',
+            equivalence: '',
+          }
+        : {
+            safety: 'mutate',
+            subtype: 'mutating',
+            reason: 'subcommand `commit` creates a Git commit',
+            equivalence: JJ_EQUIVALENCE.commit,
+          },
+  },
   checkout: mutateRule('subcommand `checkout` moves Git HEAD and rewrites the working copy', JJ_EQUIVALENCE.checkout),
   switch: {
     safety: 'mutate',
@@ -179,8 +380,46 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
           };
     },
   },
-  merge: mutateRule('subcommand `merge` creates a Git merge commit', JJ_EQUIVALENCE.merge),
-  rebase: mutateRule('subcommand `rebase` rewrites Git commits and refs', JJ_EQUIVALENCE.rebase),
+  merge: {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `merge` creates a Git merge commit',
+    equivalence: JJ_EQUIVALENCE.merge,
+    refine: ({ flags }) =>
+      anyFlag(flags, ['--dry-run'])
+        ? {
+            safety: 'read',
+            subtype: 'read-only',
+            reason: 'subcommand `merge --dry-run` only reports what would be merged',
+            equivalence: '',
+          }
+        : {
+            safety: 'mutate',
+            subtype: 'mutating',
+            reason: 'subcommand `merge` creates a Git merge commit',
+            equivalence: JJ_EQUIVALENCE.merge,
+          },
+  },
+  rebase: {
+    safety: 'mutate',
+    subtype: 'mutating',
+    reason: 'subcommand `rebase` rewrites Git commits and refs',
+    equivalence: JJ_EQUIVALENCE.rebase,
+    refine: ({ flags }) =>
+      anyFlag(flags, ['--dry-run'])
+        ? {
+            safety: 'read',
+            subtype: 'read-only',
+            reason: 'subcommand `rebase --dry-run` only reports the rebase plan',
+            equivalence: '',
+          }
+        : {
+            safety: 'mutate',
+            subtype: 'mutating',
+            reason: 'subcommand `rebase` rewrites Git commits and refs',
+            equivalence: JJ_EQUIVALENCE.rebase,
+          },
+  },
   'cherry-pick': mutateRule('subcommand `cherry-pick` applies commits onto Git HEAD', JJ_EQUIVALENCE.cherryPick),
   am: mutateRule('subcommand `am` applies mailbox patches as Git commits', JJ_EQUIVALENCE.conflict),
   'merge-file': mutateRule(
@@ -422,6 +661,17 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
           equivalence: JJ_EQUIVALENCE.bookmark,
         };
       }
+      // Read-only selectors win over the positional check: `git branch --contains
+      // HEAD` and `git branch -l 'feat*'` are listings, and the revision/pattern
+      // they take is not a branch name to create.
+      if (anyFlag(flags, readFlags)) {
+        return {
+          safety: 'read',
+          subtype: 'read-only',
+          reason: 'subcommand `branch` only lists branches',
+          equivalence: '',
+        };
+      }
       if (positionals.length >= 1) {
         return {
           safety: 'mutate',
@@ -430,7 +680,7 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
           equivalence: JJ_EQUIVALENCE.branchCreate,
         };
       }
-      if (anyFlag(flags, readFlags) || flags.length === 0) {
+      if (flags.length === 0) {
         return {
           safety: 'read',
           subtype: 'read-only',
@@ -519,8 +769,10 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     subtype: 'mutating',
     reason: "subcommand `fetch` updates Git remote-tracking refs outside jj's import path",
     equivalence: JJ_EQUIVALENCE.fetch,
+    // `git fetch -n` means `--no-tags`, not a dry run (`git push -n` is the one
+    // where `-n` means `--dry-run`); only `--dry-run` skips the ref updates.
     refine: ({ flags }) =>
-      anyFlag(flags, ['-n', '--dry-run'])
+      anyFlag(flags, ['--dry-run'])
         ? {
             safety: 'read',
             subtype: 'read-only',
@@ -921,19 +1173,36 @@ function classifyWords(
   warnings: string[],
 ): GitInvocation | undefined {
   if (!parsed || words.length === 0) return undefined;
-  let index = skipPrelude(words, warnings);
+  const prelude = scanPrelude(words, warnings);
+  let index = prelude.programIndex;
   let lowConfidenceNote: string | undefined;
 
   const program = words[index]?.value ?? '';
   if (!isGitProgram(program)) return undefined;
+  const programIndex = index;
   index += 1;
 
   const globalOptions: string[] = [];
   let subcommand: string | null = null;
-  let changeDir: string | undefined;
+  const changeDirs: string[] = [];
   let gitDir: string | undefined;
   let workTree: string | undefined;
   let terminalFlag: string | undefined;
+
+  // `GIT_DIR=/path git …` retargets the repository exactly like `--git-dir`;
+  // the assignment prefix is exported to the command, so it participates in the
+  // decision when it can be resolved statically.
+  for (const token of words.slice(0, programIndex)) {
+    const assignment = /^(GIT_DIR|GIT_WORK_TREE)=(.*)$/.exec(token.value);
+    if (assignment === null) continue;
+    const value = (assignment[2] ?? '').trim();
+    if (value.length === 0 || /[$`~]/.test(value)) {
+      lowConfidenceNote = `\`${assignment[1]}\` is set from a shell expansion; Git's target repository was not resolved`;
+      continue;
+    }
+    if (assignment[1] === 'GIT_DIR') gitDir = value;
+    else workTree = value;
+  }
 
   while (index < words.length) {
     const token = words[index] ?? { value: '', text: '' };
@@ -959,7 +1228,7 @@ function classifyWords(
     }
     // Attached short-option value: `git -C<path>` (Git accepts both spellings).
     if (eq < 0 && token.value.startsWith('-C') && token.value.length > 2) {
-      changeDir = token.value.slice(2);
+      changeDirs.push(token.value.slice(2));
       continue;
     }
     if (GIT_VALUE_FLAGS.has(flag)) {
@@ -969,8 +1238,11 @@ function classifyWords(
         // Contract §8.2: globalOptions carries the option and its value, e.g. ['-C','sub'].
         if (value !== undefined) globalOptions.push(value);
       }
-      if (flag === '-C') changeDir = value;
-      else if (flag === '--git-dir') {
+      // `-C` is cumulative: Git chdirs once per option, each relative to the
+      // previous directory (`git -C a -C b` means `a/b`).
+      if (flag === '-C') {
+        if (value !== undefined) changeDirs.push(value);
+      } else if (flag === '--git-dir') {
         gitDir = value;
         if (inlineValue === undefined && value !== undefined) {
           lowConfidenceNote =
@@ -982,9 +1254,11 @@ function classifyWords(
     if (GIT_BOOLEAN_FLAGS.has(flag)) continue;
     lowConfidenceNote = `unrecognised Git global option \`${token.value}\``;
   }
+  const changeDir = changeDirs.length > 0 ? changeDirs[changeDirs.length - 1] : undefined;
 
   const extras = {
     ...(changeDir !== undefined ? { changeDir } : {}),
+    ...(changeDirs.length > 1 ? { changeDirs: Object.freeze([...changeDirs]) } : {}),
     ...(gitDir !== undefined ? { gitDir } : {}),
     ...(workTree !== undefined ? { workTree } : {}),
   };
@@ -1010,8 +1284,11 @@ function classifyWords(
   }
 
   const rest = words.slice(index).map((token) => token.value);
-  // `git <subcommand> --help` / `-h` only prints help, even for mutating subcommands.
-  if (rest.includes('--help') || rest.includes('-h')) {
+  // `git <subcommand> --help` / `-h` only prints help, even for mutating
+  // subcommands — but only in a real flag position: `git commit -a -m -h` uses
+  // `-h` as the commit message and really commits, and `git checkout -- --help`
+  // names a path after `--`.
+  if (helpRequested(subcommand, rest)) {
     return {
       argv: ['git', ...globalOptions, subcommand, ...rest],
       raw,
@@ -1096,24 +1373,38 @@ export function classifyGitInvocation(commandLine: string): GitCommandClassifica
       invocationIndexes.push(invocations.length);
       invocations.push(invocation);
     }
-    const head = segment.words[0]?.value;
-    const cdTarget = head === 'cd' && segment.parsed ? segment.words[1]?.value.trim() : undefined;
+    const change = segment.parsed ? segmentDirectoryChange(segment.words) : undefined;
+    if (change?.warning !== undefined) warnings.push(change.warning);
+    const cdTarget = change?.target;
     return {
       raw: segment.raw,
       kind: segment.kind,
       words: segment.words.map((token) => token.value),
       parsed: segment.parsed,
-      ...(cdTarget !== undefined && cdTarget.length > 0 ? { cdTarget } : {}),
+      ...(cdTarget !== undefined && isStaticDirectoryTarget(cdTarget) ? { cdTarget } : {}),
       invocationIndexes,
     };
   };
 
-  for (const segment of outer.segments) {
+  // Shell wrappers are expanded recursively with a depth cap: a wrapper inside a
+  // wrapper (`bash -c 'bash -c "git commit"'`) and a prelude before the wrapper
+  // (`command bash -c …`, `A=1 bash -c …`, `env -S'…'`) all classify their inner
+  // command instead of silently disappearing.
+  const recordTree = (segment: RawSegment, depth: number): void => {
     segments.push(record(segment));
-    for (const inner of nestedCommandStrings(segment)) {
-      for (const nestedSegment of tokenize(inner, 'substitution', 1).segments) segments.push(record(nestedSegment));
+    if (!segment.parsed) return;
+    if (depth >= MAX_NESTING) {
+      warnings.push('Shell wrapper nesting limit reached; deeper wrapped commands were not classified.');
+      return;
     }
-  }
+    for (const inner of nestedCommandStrings(segment, warnings)) {
+      const nested = tokenize(inner, 'substitution', depth + 1);
+      warnings.push(...nested.warnings);
+      for (const nestedSegment of nested.segments) recordTree(nestedSegment, depth + 1);
+    }
+  };
+
+  for (const segment of outer.segments) recordTree(segment, 0);
 
   return {
     invocations: Object.freeze(invocations),

@@ -19,7 +19,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import {
   assertServiceableConfig,
   Config,
@@ -237,6 +237,57 @@ function staticChangeDir(cursor: string, target: string): string | undefined {
   return isAbsolute(target) ? target : safeResolvePath(resolve(cursor, target));
 }
 
+/** One directory a Git invocation may operate on, most explicit first. */
+interface GitTargetDirs {
+  readonly dirs: readonly string[];
+  /** True when `--git-dir`/`--work-tree` (or their env spelling) retarget the repo. */
+  readonly explicit: boolean;
+}
+
+/** Work tree of a Git directory path that ends in `.git` (`<repo>/.git` → `<repo>`). */
+function gitWorkTreeOf(gitDir: string): string | undefined {
+  const base = gitDir
+    .split(/[\\/]/)
+    .filter((part) => part.length > 0)
+    .pop();
+  return base === '.git' ? dirname(gitDir) : undefined;
+}
+
+/**
+ * Directories one Git invocation would operate on.
+ *
+ * `-C` is cumulative (Git chdirs once per option), and `--git-dir`/`--work-tree`
+ * (plus the `GIT_DIR`/`GIT_WORK_TREE` assignment prefix) retarget the repository
+ * the same way, so they take part in the decision instead of being parsed and
+ * ignored. An explicit `--git-dir` is authoritative: a git write aimed at a plain
+ * Git repository from inside a jj workspace is not a jj write. `--work-tree`
+ * without `--git-dir` does not move the repository Git writes to, so the cwd/`-C`
+ * candidate stays in charge.
+ */
+function gitInvocationTargets(cursor: string, invocation: GitInvocation): GitTargetDirs {
+  let base = cursor;
+  const changeDirs = invocation.changeDirs ?? (invocation.changeDir === undefined ? [] : [invocation.changeDir]);
+  for (const target of changeDirs) base = staticChangeDir(base, target) ?? base;
+  const dirs: string[] = [];
+  const add = (dir: string | undefined): void => {
+    if (dir === undefined) return;
+    const canonical = safeResolvePath(dir);
+    if (!dirs.includes(canonical)) dirs.push(canonical);
+  };
+  // Only `--git-dir` (or `GIT_DIR`) changes which repository Git writes to;
+  // `--work-tree` alone still discovers the repository from the cwd/`-C` path, so
+  // it must not override the cwd-derived candidate.
+  if (invocation.gitDir !== undefined) {
+    const resolved = staticChangeDir(base, invocation.gitDir);
+    if (resolved !== undefined) {
+      if (invocation.workTree !== undefined) add(staticChangeDir(base, invocation.workTree));
+      add(gitWorkTreeOf(resolved) ?? resolved);
+    }
+  }
+  if (dirs.length === 0) return { dirs: [base], explicit: false };
+  return { dirs, explicit: true };
+}
+
 /** Reason text for one kind (contract §8.5, verbatim). */
 export function gitConfusionWhy(kind: VcsKind): string {
   return kind === 'jj-native'
@@ -438,21 +489,25 @@ export function evaluateGitCommand(
     for (const invocationIndex of segment.invocationIndexes) {
       const invocation = classification.invocations[invocationIndex];
       if (invocation === undefined) continue;
-      const effective =
-        invocation.changeDir === undefined ? cursor : (staticChangeDir(cursor, invocation.changeDir) ?? cursor);
-      effectiveCwds[invocationIndex] = effective;
+      const targets = gitInvocationTargets(cursor, invocation);
+      effectiveCwds[invocationIndex] = targets.dirs[0] ?? cursor;
       if (!invocation.mutating) continue;
-      const descriptor = sniff(effective);
-      if (descriptor === undefined) continue; // broken/absent metadata: fail open
-      if (!isJjKind(descriptor.kind)) continue;
-      findings.push({
-        invocation,
-        cwd: effective,
-        root: descriptor.root,
-        kind: descriptor.kind,
-        ...(descriptor.workspaceName !== undefined ? { workspaceName: descriptor.workspaceName } : {}),
-        message: buildGitRefusalMessage(invocation, descriptor),
-      });
+      // Any explicitly retargeted repository counts: `--git-dir`/`--work-tree`
+      // can reach a jj workspace from outside it, exactly like `-C` can.
+      for (const dir of targets.dirs) {
+        const descriptor = sniff(dir);
+        if (descriptor === undefined) continue; // broken/absent metadata: fail open
+        if (!isJjKind(descriptor.kind)) continue;
+        findings.push({
+          invocation,
+          cwd: dir,
+          root: descriptor.root,
+          kind: descriptor.kind,
+          ...(descriptor.workspaceName !== undefined ? { workspaceName: descriptor.workspaceName } : {}),
+          message: buildGitRefusalMessage(invocation, descriptor),
+        });
+        break;
+      }
     }
   }
 
@@ -734,11 +789,13 @@ export function installGitConfusionGuard(
   ): string | undefined => {
     if (!resolved.guardTools.includes(execution.name)) return undefined;
     const classification = classifyJjInvocation(commandLine);
-    if (classification.invocations.length === 0) return undefined;
     const resolvedCwd = resolveBaseCwd(execution, args);
     if (resolvedCwd.degraded) return undefined; // fail-open (contract §5.10)
     const baseCwd = resolvedCwd.cwd;
+    // A command the parser could not fully read must be diagnosed even when it
+    // produced no invocation at all (unreadable wrappers, dynamic program names).
     reportParseWarnings(execution, baseCwd, classification.warnings);
+    if (classification.invocations.length === 0) return undefined;
     const baseDescriptor = peek(baseCwd);
     let cursor = safeResolvePath(baseCwd);
 
@@ -828,11 +885,12 @@ export function installGitConfusionGuard(
     if (commandLine === undefined) return undefined;
 
     const classification = classifyGitInvocation(commandLine);
-    if (classification.invocations.length === 0) return undefined;
-
     const resolvedCwd = resolveBaseCwd(execution, args);
     if (resolvedCwd.degraded) return undefined; // fail-open (contract §5.10)
+    // Report unparsable sections even when no invocation was found: a wrapper
+    // whose inner command line cannot be read must not be silently assumed safe.
     reportParseWarnings(execution, resolvedCwd.cwd, classification.warnings);
+    if (classification.invocations.length === 0) return undefined;
     let cursor = safeResolvePath(resolvedCwd.cwd);
 
     for (const segment of classification.segments) {
@@ -840,14 +898,29 @@ export function installGitConfusionGuard(
       for (const invocationIndex of segment.invocationIndexes) {
         const invocation = classification.invocations[invocationIndex];
         if (invocation === undefined) continue;
-        const cwd =
-          invocation.changeDir === undefined ? cursor : (staticChangeDir(cursor, invocation.changeDir) ?? cursor);
-        const descriptor = peek(cwd);
+        const targets = gitInvocationTargets(cursor, invocation);
+        // Prefer a target directory actually owned by jj, so an explicit
+        // `--git-dir`/`--work-tree` retarget is evaluated instead of the shell cwd.
+        let descriptor: GuardDescriptorLike | undefined;
+        let cwd = targets.dirs[0] ?? cursor;
+        for (const candidateDir of targets.dirs) {
+          const candidate = peek(candidateDir);
+          if (candidate === undefined) continue;
+          if (isJjKind(candidate.kind)) {
+            descriptor = candidate;
+            cwd = candidateDir;
+            break;
+          }
+          if (descriptor === undefined) {
+            descriptor = candidate;
+            cwd = candidateDir;
+          }
+        }
         if (descriptor === undefined) continue; // fail-open (contract §8.4)
         if (!isJjKind(descriptor.kind)) {
           // `git` / `none`: no interference. A jj workspace above a nearer Git
           // repository (F6) gets a one-time notice instead.
-          if (descriptor.kind === 'git' && descriptor.jjRoot !== undefined) {
+          if (!targets.explicit && descriptor.kind === 'git' && descriptor.jjRoot !== undefined) {
             emitOnce(`${cwd}|shadowed|${invocation.subcommand ?? ''}`, {
               tool: execution.name,
               cwd,
