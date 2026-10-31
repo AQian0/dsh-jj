@@ -29,7 +29,8 @@
     "paths": {
       "@aqian0/dsh-jj": ["./src/index.ts"],
       "@aqian0/dsh-jj/tools": ["./src/tools.ts"],
-      "@aqian0/dsh-jj/guard": ["./src/guard.ts"]
+      "@aqian0/dsh-jj/guard": ["./src/guard.ts"],
+      "@aqian0/dsh-jj/changes": ["./src/changes.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "vite.config.ts"]

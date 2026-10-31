@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Jujutsu (jj) change recording",
+    "description": "Records each turn's changed files and line counts from Jujutsu working-copy snapshots, feeding the Web changed-files card from jj instead of Git; Sessions outside a jj workspace keep the built-in Git and file-tool recording."
+  }
+}
