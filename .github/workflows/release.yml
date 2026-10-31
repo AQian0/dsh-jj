@@ -142,6 +142,12 @@ jobs:
           const required = [
             'lib/index.js',
             'lib/types/index.d.ts',
+            'lib/tools.js',
+            'lib/types/tools.d.ts',
+            'lib/guard.js',
+            'lib/types/guard.d.ts',
+            'lib/changes.js',
+            'lib/types/changes.d.ts',
             'cordis.patch.yml',
             'icon.svg',
             'locale/en.json',
@@ -150,6 +156,8 @@ jobs:
             'tools/locale/zh.json',
             'guard/locale/en.json',
             'guard/locale/zh.json',
+            'changes/locale/en.json',
+            'changes/locale/zh.json',
           ];
           const missing = required.filter((path) => !packaged.has(path));
           if (missing.length > 0) {
