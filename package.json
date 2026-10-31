@@ -24,8 +24,7 @@
     "tools/locale/*.json",
     "guard/locale/*.json",
     "changes/locale/*.json",
-    "icon.svg",
-    "src/**/*.ts"
+    "icon.svg"
   ],
   "type": "module",
   "main": "lib/index.js",
@@ -35,7 +34,6 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./src/*": "./src/*",
     "./tools": {
       "types": "./lib/types/tools.d.ts",
       "default": "./lib/tools.js"
@@ -64,7 +62,8 @@
     "./guard/icon": "./icon.svg",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./changes/locale/*.json": "./changes/locale/*.json"
+    "./changes/locale/*.json": "./changes/locale/*.json",
+    "./changes/icon": "./icon.svg"
   },
   "publishConfig": {
     "access": "public"

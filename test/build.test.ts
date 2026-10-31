@@ -104,8 +104,8 @@ function packageTargetPath(target: string): string {
 /**
  * Assert one `exports` target exists.
  *
- * Object targets are checked recursively. Wildcard targets (`./locale/*.json`,
- * `./src/*`) are checked as directory patterns: the static prefix must resolve to
+ * Object targets are checked recursively. Wildcard targets (`./locale/*.json`)
+ * are checked as directory patterns: the static prefix must resolve to
  * a directory and at least one entry must match the suffix — never one literal file.
  */
 function assertExportTarget(specifier: string, target: unknown): void {
@@ -144,6 +144,34 @@ function assertFilesEntry(entry: string): void {
   assert.ok(existsSync(join(packageDir, basePath)), `files entry ${entry} does not resolve to a shipped path`);
 }
 
+/** Collect every string target from one `exports` value, recursively. */
+function exportTargets(target: unknown, collected: string[] = []): string[] {
+  if (typeof target === 'string') collected.push(packageTargetPath(target));
+  else if (target !== null && typeof target === 'object') {
+    for (const nested of Object.values(target as Record<string, unknown>)) exportTargets(nested, collected);
+  }
+  return collected;
+}
+
+/**
+ * Whether one `files` glob covers one package-relative path.
+ *
+ * `**` matches across directory separators, `*` stays inside one segment. Static
+ * exports targets are checked against this so a target cannot silently drop out
+ * of the tarball just because `files` changed (A5-F4).
+ */
+function filesPatternCovers(pattern: string, target: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const regex = escaped
+    .replace(/\*\*\//g, '(?:.*/)?')
+    .replace(/\*\*/g, '.*')
+    .replace(/\*/g, '[^/]*');
+  return new RegExp(`^${regex}$`).test(target);
+}
+
+/** Targets npm always includes regardless of `files` (package identity documents). */
+const IMPLICIT_TARBALL_FILES = new Set(['package.json']);
+
 test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', async () => {
   const result = await execFileAsync(tscCommand(), ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
   assert.equal(String(result.stderr).trim(), '', `tsc stderr: ${String(result.stderr)}`);
@@ -161,14 +189,22 @@ test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', 
 });
 
 test('pure modules stay free of runtime @deepseek-ai imports', () => {
+  // Every import form the compiler can emit: static import/re-export, side-effect
+  // import, dynamic import(), and require(). A `from '…'`-only check let the last
+  // three forms slip through (A5-F2).
+  const runtimeImportPatterns = [
+    /\bfrom\s*['"]@deepseek-ai\//,
+    /\bimport\s*['"]@deepseek-ai\//,
+    /\bimport\s*\(\s*['"]@deepseek-ai\//,
+    /\brequire\s*\(\s*['"]@deepseek-ai\//,
+  ];
   const modules = sourceModuleNames();
   for (const name of PURE_MODULES) {
     assert.ok(modules.includes(name), `pure module src/${name}.ts is missing from ${modules.join(', ')}`);
     const source = readFileSync(join(packageDir, 'lib', `${name}.js`), 'utf8');
-    assert.ok(
-      !/from\s*['"]@deepseek-ai\//.test(source),
-      `lib/${name}.js must not import a DSH package at runtime (single or double quotes)`,
-    );
+    for (const pattern of runtimeImportPatterns) {
+      assert.ok(!pattern.test(source), `lib/${name}.js must not import a DSH package at runtime (matched ${pattern})`);
+    }
   }
 });
 
@@ -213,6 +249,74 @@ test('the published package manifest points only at shipped artifacts', () => {
     assert.ok(files.includes(entry), `package.json files is missing ${entry}`);
   }
   for (const entry of files) assertFilesEntry(entry);
+
+  // Every static exports target must be covered by a `files` pattern: a shipped
+  // subpath whose file is not in the tarball is a broken public API (A5-F4).
+  for (const target of Object.entries(exportsMap).flatMap(([, value]) => exportTargets(value))) {
+    if (target.includes('*') || IMPLICIT_TARBALL_FILES.has(target)) continue;
+    assert.ok(
+      files.some((pattern) => filesPatternCovers(pattern, target)),
+      `exports target ${target} is not covered by any files pattern (the tarball would omit it)`,
+    );
+  }
+  // Raw sources cannot be imported from node_modules (Node disables type stripping
+  // there), so they are neither an exports subpath nor runtime weight (A5-F5).
+  assert.equal('./src/*' in exportsMap, false, 'exports must not advertise the unusable ./src/* source subpath');
+  assert.equal(
+    files.some((entry) => entry.startsWith('src/')),
+    false,
+    'the tarball must not ship raw TypeScript sources that cannot be loaded from node_modules',
+  );
+});
+
+test('every bundle entry ships its locale metadata and icon', () => {
+  // The host resolves `<entry>/locale/<lang>.json` and `<entry>/icon` for each
+  // bundle row; a missing export makes that row degrade (no icon/locale) even
+  // though the files are in the tarball (A5-F1).
+  const manifest = readPackageManifest();
+  const exportsMap = manifest.exports ?? {};
+  const entries = [
+    { specifier: '.', locale: './locale/*.json', icon: './icon' },
+    { specifier: './tools', locale: './tools/locale/*.json', icon: './tools/icon' },
+    { specifier: './guard', locale: './guard/locale/*.json', icon: './guard/icon' },
+    { specifier: './changes', locale: './changes/locale/*.json', icon: './changes/icon' },
+  ] as const;
+  for (const entry of entries) {
+    assert.ok(entry.locale in exportsMap, `${entry.specifier} must export ${entry.locale}`);
+    assert.ok(entry.icon in exportsMap, `${entry.specifier} must export ${entry.icon} (the host reads <entry>/icon)`);
+    assert.equal(exportsMap[entry.icon], './icon.svg', `${entry.icon} must resolve to the shared icon`);
+    assertExportTarget(entry.icon, exportsMap[entry.icon]);
+    assertExportTarget(entry.locale, exportsMap[entry.locale]);
+  }
+});
+
+test('the release workflow validates every published entry and locale', () => {
+  // The release tarball gate is a hard-coded list; when it drifts from the real
+  // tarball a missing entry/locale would ship unrecoverably (A5-F4). Pin the list
+  // the workflow asserts, and keep raw sources out of it.
+  const workflow = readFileSync(join(packageDir, '.github', 'workflows', 'release.yml'), 'utf8');
+  const required = [
+    'lib/index.js',
+    'lib/types/index.d.ts',
+    'lib/tools.js',
+    'lib/types/tools.d.ts',
+    'lib/guard.js',
+    'lib/types/guard.d.ts',
+    'lib/changes.js',
+    'lib/types/changes.d.ts',
+    'cordis.patch.yml',
+    'icon.svg',
+    'locale/en.json',
+    'locale/zh.json',
+    'tools/locale/en.json',
+    'tools/locale/zh.json',
+    'guard/locale/en.json',
+    'guard/locale/zh.json',
+    'changes/locale/en.json',
+    'changes/locale/zh.json',
+  ];
+  for (const path of required) assert.ok(workflow.includes(`'${path}'`), `release.yml must validate the ${path} entry`);
+  assert.doesNotMatch(workflow, /'src\//, 'release.yml must not expect raw TypeScript sources in the tarball');
 });
 
 test('DSH peer ranges admit later 0.2.x releases instead of pinning one runtime', () => {
@@ -583,4 +687,21 @@ test('bundle patch carries the jj-aware project-root row and the change-recordin
   assert.match(patch, /name: '@deepseek-ai\/dsh-agent-instructions'/);
   assert.match(patch, /maxBytes: 65536/, 'the composed maxBytes value must be restated (whole-config replacement)');
   assert.match(patch, /projectRootMarkers: \['\.git', '\.jj'\]/, 'jj must be a project-root marker');
+
+  // The checks above only prove that some matching lines exist. The host's patch
+  // algorithm is additive, so a SECOND `workspace-changes` row (or a later
+  // `disabled: false`) would re-enable the Git-only provider while every
+  // string-presence assertion still passes (A5-F3). Pin the composed semantics.
+  assert.equal(
+    (patch.match(/^- id: workspace-changes$/gm) ?? []).length,
+    1,
+    'the patch must disable the built-in workspace-changes row exactly once',
+  );
+  assert.doesNotMatch(patch, /disabled:\s*false/, 'no patch row may re-enable a disabled row');
+  const insertedIds = [...patch.matchAll(/^ {4}- id: (jj-[a-z]+)$/gm)].map((match) => match[1]);
+  assert.deepEqual(
+    [...insertedIds].sort(),
+    ['jj-changes', 'jj-guard', 'jj-runtime', 'jj-tools'],
+    'the four jj bundle rows must be inserted exactly once each',
+  );
 });
