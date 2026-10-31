@@ -282,3 +282,28 @@ test('detection does not snapshot the working copy (op log unchanged)', async (t
   );
   assert.equal(after.stdout, before.stdout, 'detection must not create a jj operation');
 });
+
+test('a symlinked subdirectory cwd is detected like its real path (sniff starts at realpath)', async (t) => {
+  // Regression (A2-F2): `sniffVcsSync` walked `dirname()` of the caller's spelling,
+  // so a cwd that *is* a symlink to a directory below the workspace root never saw
+  // the ancestor `.jj` and detect() skipped the jj CLI authority probe entirely.
+  const fx = makeFixture(t, 'dsh-jj-detect-symlink-cwd');
+  await assertToolchain(fx.run, fx.root);
+  const native = await initJjNative(fx.run, fx.path('native'));
+  const deep = fx.path('native/sub/deep');
+  const link = join(fx.root, 'deep-link');
+  symlinkSync(deep, link, 'dir');
+
+  const sniff = sniffVcsSync(link);
+  assert.equal(sniff.kind, 'jj-native');
+  assertSamePath(sniff.cwd, deep);
+  assertSamePath(sniff.jjRoot, native);
+
+  const descriptor = await detectVcs(link, fx.run);
+  assert.equal(descriptor.kind, 'jj-native');
+  assertSamePath(descriptor.root, native);
+  assert.equal(descriptor.verified, true, 'the CLI authority probe runs for the symlinked cwd');
+  const direct = await detectVcs(deep, fx.run);
+  assert.equal(descriptor.kind, direct.kind);
+  assertSamePath(descriptor.root, direct.root);
+});

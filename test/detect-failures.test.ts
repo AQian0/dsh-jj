@@ -273,3 +273,44 @@ test('M6: an empty workspace list keeps the sniffed root but lowers confidence t
   assert.equal(descriptor.workspaceName, undefined);
   assert.ok(descriptor.notices.some((entry) => entry.code === 'jj-metadata-incomplete'));
 });
+
+test('A2-F9: a sniff-only classification never claims to be verified', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-fail-verified');
+  const plain = fx.path('plain');
+  mkdirSync(plain, { recursive: true });
+
+  // Both CLIs missing leaves only the filesystem sniff: `none` is unverified even
+  // though it is the correct classification (the JSDoc contract on `verified`).
+  const jjMissing = intercept(fx.run, (argv) => argv[0] === 'jj', { errorCode: 'ENOENT' });
+  const gitMissing = intercept(jjMissing.wrapped, (argv) => argv[0] === 'git', { errorCode: 'ENOENT' });
+  const sniffOnly = await detectVcs(plain, gitMissing.wrapped);
+  assert.equal(sniffOnly.kind, 'none');
+  assert.equal(sniffOnly.gitAvailable, false);
+  assert.equal(sniffOnly.verified, false, 'a sniff-only `none` must not claim verification');
+  assert.ok(sniffOnly.notices.some((entry) => entry.code === 'git-cli-missing'));
+
+  // The sniff may classify a nearer Git marker, but without the Git CLI that is
+  // still sniff evidence only.
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const nested = fx.path('colo/nested-git');
+  mkdirSync(nested, { recursive: true });
+  const gitInit = await fx.run(['git', 'init', '--quiet'], { cwd: nested });
+  assert.equal(gitInit.exitCode, 0, 'nested git setup');
+  const nestedSniffOnly = await detectVcs(
+    nested,
+    intercept(fx.run, (argv) => argv[0] === 'git', { errorCode: 'ENOENT' }).wrapped,
+  );
+  assert.equal(nestedSniffOnly.kind, 'git');
+  assert.equal(nestedSniffOnly.gitAvailable, false);
+  assert.equal(nestedSniffOnly.verified, false, 'the nearer Git marker alone is not CLI evidence');
+
+  // A successful Git probe ("not a repository") is CLI evidence, so it verifies.
+  const confirmed = await detectVcs(plain, fx.run);
+  assert.equal(confirmed.kind, 'none');
+  assert.equal(confirmed.verified, true, 'a successful Git probe confirms the absence of a repository');
+
+  // `colo` keeps the outer Git repository from shadowing the jj workspace even
+  // with no CLI available; ensure the setup itself is still classified as jj.
+  const coloDescriptor = await detectVcs(colo, fx.run);
+  assert.equal(coloDescriptor.kind, 'jj-colocated');
+});
