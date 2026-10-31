@@ -54,6 +54,8 @@ function badInput(message: string, argv: readonly string[] = []): JjError {
 
 const OPERATION_ID_RE = /^[0-9a-f]{4,128}$/;
 const BOOKMARK_NAME_RE = /^[^\s@]+$/;
+/** Bookmark names safe to embed verbatim in a jj revset (`bookmarks(exact:…)` / `::name`). */
+const SAFE_BOOKMARK_RE = /^[A-Za-z0-9_./-]+$/;
 
 /** Result of `status()`. */
 export interface JjStatusResult {
@@ -124,11 +126,23 @@ export interface JjFetchResult {
 
 /** Options for {@link JjOperations.handoff}. */
 export interface JjHandoffOptions {
-  /** Explicit integration revset (a user-named revision or bookmark); omit for automatic resolution. */
+  /**
+   * Explicit integration revset (a user-named revision or bookmark); omit for
+   * automatic resolution. It must share real history with this workspace: a
+   * destination that only shares jj's empty root commit is refused (the detected
+   * stack would otherwise include shared commits).
+   */
   readonly destination?: string;
-  /** Bottom-most change of this workspace's stack; omit to detect it above the destination. */
+  /**
+   * Bottom-most change of this workspace's stack; omit to detect it above the
+   * destination. It must be a root of `roots(::@ ~ ::destination)`.
+   */
   readonly firstChange?: string;
-  /** Local bookmark to move to the rebased tip (only a bookmark this session owns). */
+  /**
+   * Local bookmark to move to the rebased tip (only a bookmark this session owns).
+   * An existing bookmark is moved only when it points inside the rebased stack; a
+   * bookmark on shared history is reported as `bookmarkSkipped` instead.
+   */
   readonly bookmark?: string;
   /** Run `jj git fetch` first (default true; a repository without remotes is fine). */
   readonly fetch?: boolean;
@@ -157,11 +171,22 @@ export interface JjHandoffResult {
   readonly destinationCommitId: string;
   /** Bottom-most change of the stack (empty when nothing was integrated). */
   readonly firstChangeId: string;
-  /** The stack from `firstChangeId` up to and including `@`, newest first. */
+  /**
+   * The stack from `firstChangeId` up to and including `@`, newest first.
+   *
+   * Bounded by `maxLogLimit`; when the listing may be truncated the `message`
+   * carries an explicit note instead of implying the whole stack was reported.
+   */
   readonly stack: readonly JjChangeRecord[];
   readonly rebased: boolean;
+  /** True when the stack already sits directly on the destination and no rebase was needed. */
   readonly alreadyIntegrated: boolean;
-  /** True when the stack's base is the destination after this call. */
+  /**
+   * True when the stack's base is the destination after this call.
+   *
+   * False when the workspace is behind the destination (the destination already
+   * contains `@`): there is no stack above it to rebase and nothing was changed.
+   */
   readonly onTarget: boolean;
   /** Change ids of disconnected stacks when auto-detection was ambiguous. */
   readonly ambiguousRoots: readonly string[];
@@ -187,6 +212,23 @@ function canonicalPath(path: string): string {
     return realpathSync(absolute);
   } catch {
     return absolute;
+  }
+}
+
+/**
+ * Decode one `jj workspace list` field printed with the `json(...)` template
+ * function (the JSON string literal that `json()` renders).
+ *
+ * Returns `undefined` for a malformed field so one unparsable line is skipped
+ * instead of failing every workspace operation.
+ */
+function parseWorkspaceField(field: string | undefined): string | undefined {
+  if (field === undefined) return undefined;
+  try {
+    const value: unknown = JSON.parse(field);
+    return typeof value === 'string' ? value : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -219,6 +261,22 @@ function readChangeRecord(stdout: string, argv: readonly string[]): JjChangeReco
   } catch (error) {
     contractParseFailure(error);
   }
+}
+
+/**
+ * Format one `jj op log` timestamp.
+ *
+ * jj 0.46 serializes `json(self).time` as an object (`{ start, end }`), so the old
+ * `String(record.time)` produced the useless literal `[object Object]`. The model
+ * needs one parseable instant, so the operation's start time is reported; a plain
+ * string shape (other jj builds) is passed through unchanged.
+ */
+function operationTime(record: Record<string, unknown>): string {
+  const value = record['time'];
+  if (typeof value === 'string') return value;
+  const time = asRecord(value);
+  const start = time?.['start'];
+  return typeof start === 'string' ? start : '';
 }
 
 /** Parse every JSON record of a multi-revision read; failures become `JjError`. */
@@ -301,7 +359,7 @@ export class JjOperations {
     return { text: bounded.text, truncated: bounded.truncated };
   }
 
-  /** `jj new [-m <message>] [<parent>…]` then read back `@`. */
+  /** `jj new [-m <message>] [-- <parent>…]` then read back `@`. */
   async newChange(
     cwd: string,
     parents: readonly string[],
@@ -310,13 +368,39 @@ export class JjOperations {
   ): Promise<JjChangeRecord> {
     const argv = ['new'];
     if (message !== undefined && message.length > 0) argv.push('-m', message);
-    argv.push(...parents);
+    // Model-supplied revsets are positional arguments, not options: `--` keeps a
+    // value such as `--help` from being parsed by clap (which exits 0 without
+    // creating a change, i.e. a silent no-op reported as success).
+    if (parents.length > 0) argv.push('--', ...parents);
     await this.run(cwd, argv, signal);
     return await this.readAt(cwd, signal);
   }
 
-  /** `jj describe -r <revset> -m <message>` then read the revision back (light template). */
+  /**
+   * `jj describe -r <revset> -m <message>` then read the described revision back.
+   *
+   * The revset must resolve to exactly one revision: `jj describe -r 'main..@'`
+   * would rewrite the description of every selected change while the read-back only
+   * reports one of them, which silently changes history the caller did not name.
+   *
+   * @param cwd - workspace directory.
+   * @param revset - revset that must resolve to a single revision.
+   * @param message - new description.
+   * @param signal - cancellation signal.
+   * @throws JjError `JJ_BAD_INPUT` when the revset selects zero or several revisions.
+   */
   async describeChange(cwd: string, revset: string, message: string, signal?: AbortSignal): Promise<JjChangeRecord> {
+    const selected = await this.readCommitIds(cwd, revset, signal, 2);
+    if (selected.length === 0) {
+      throw badInput(
+        `jj_describe revset ${JSON.stringify(revset)} does not resolve to a change in this repository; pass exactly one revision such as @ or a change id.`,
+      );
+    }
+    if (selected.length > 1) {
+      throw badInput(
+        `jj_describe revset ${JSON.stringify(revset)} selects more than one revision; jj would rewrite every one of them. Pass exactly one revision such as @ or a change id.`,
+      );
+    }
     const argv = ['describe', '-r', revset, '-m', message];
     await this.run(cwd, argv, signal);
     return await this.readAt(cwd, signal, revset);
@@ -550,7 +634,7 @@ export class JjOperations {
         id,
         shortId: id.slice(0, 12),
         description: String(record['description'] ?? ''),
-        time: String(record['time'] ?? ''),
+        time: operationTime(record),
         user: `${String(record['username'] ?? '')}@${String(record['hostname'] ?? '')}`,
         workspaceName:
           record['workspace_name'] === null || record['workspace_name'] === undefined
@@ -576,11 +660,15 @@ export class JjOperations {
     if (path.trim().length === 0 || path.startsWith('-')) {
       throw badInput('path must be a non-empty path that does not start with "-".');
     }
+    // The trimmed path is the one that is validated and spawned: passing the raw
+    // value (` /root/x `) made jj fail with "Cannot access <cwd>/ <path>" and the
+    // error was then mis-classified as a broken repository.
+    const trimmedPath = path.trim();
     // Always pass an explicit name: the created workspace is then resolved by exact
     // name instead of jj's list order, so callers (the tools layer records session
     // ownership) can never register a different workspace by mistake.
-    const requestedName = name !== undefined && name.length > 0 ? name : basename(path.trim());
-    const argv = ['workspace', 'add', path];
+    const requestedName = name !== undefined && name.length > 0 ? name : basename(trimmedPath);
+    const argv = ['workspace', 'add', trimmedPath];
     if (requestedName.length > 0) argv.push('--name', requestedName);
     for (const parent of parents) argv.push('-r', parent);
     if (message !== undefined && message.length > 0) argv.push('-m', message);
@@ -588,7 +676,7 @@ export class JjOperations {
     await this.run(cwd, argv, signal);
 
     const workspaces = await this.workspaceList(cwd, signal);
-    const requestedRoot = canonicalPath(resolve(cwd, path.trim()));
+    const requestedRoot = canonicalPath(resolve(cwd, trimmedPath));
     const created =
       workspaces.find((workspace) => workspace.name === requestedName) ??
       workspaces.find((workspace) => canonicalPath(workspace.root) === requestedRoot);
@@ -603,19 +691,29 @@ export class JjOperations {
     return { path: created.root, name: created.name, change };
   }
 
-  /** `jj workspace list -T 'name ++ "\t" ++ root ++ "\n"'`; roots are absolute. */
+  /**
+   * `jj workspace list -T '<JSON name>\t<JSON root>\n'`; roots are absolute.
+   *
+   * Both fields are JSON-encoded because jj 0.46 decorates names that need quoting
+   * (`my session` → `"my session"`) when the template prints the bare `name`, which
+   * made `workspaceAdd` return a quoted name and the session-ownership comparison in
+   * `jj_workspace_cleanup` fail. JSON also keeps names containing a literal tab
+   * parseable (the tab is escaped inside the JSON string, not printed raw).
+   */
   async workspaceList(cwd: string, signal?: AbortSignal): Promise<readonly { name: string; root: string }[]> {
     const argv = ['workspace', 'list', '--ignore-working-copy', '-T', TPL_WORKSPACE_LIST_TAB];
     const result = await this.run(cwd, argv, signal);
     const workspaces: { name: string; root: string }[] = [];
     for (const line of result.stdout.split('\n')) {
       if (line.trim().length === 0) continue;
-      const [name, root] = line.split('\t');
+      const fields = line.split('\t');
+      const name = parseWorkspaceField(fields[0]);
+      const root = parseWorkspaceField(fields[1]);
       if (name === undefined || root === undefined) continue;
       // jj lists non-current workspaces relative to the current directory; every
       // caller needs a usable absolute path (the cleanup tool moves the session there).
-      const absoluteRoot = isAbsolute(root.trim()) ? root.trim() : resolve(cwd, root.trim());
-      workspaces.push({ name: name.trim(), root: absoluteRoot });
+      const absoluteRoot = isAbsolute(root) ? root : resolve(cwd, root);
+      workspaces.push({ name, root: absoluteRoot });
     }
     return workspaces;
   }
@@ -689,6 +787,10 @@ export class JjOperations {
    *   hand-off passes the tip commit id of the change it just read). When supplied,
    *   the read-back `jj bookmark list` is skipped: a zero exit from
    *   `jj bookmark set` guarantees the bookmark points at that revision.
+   * @param existingTarget - the bookmark's current target commit id, or `null` when
+   *   the caller already listed the bookmarks and knows it does not exist. When
+   *   supplied, the pre-set `jj bookmark list` is skipped as well (the hand-off lists
+   *   once to check ownership before moving anything).
    */
   async bookmarkSet(
     cwd: string,
@@ -697,12 +799,16 @@ export class JjOperations {
     allowBackwards: boolean,
     signal?: AbortSignal,
     knownTargetCommitId?: string,
+    existingTarget?: string | null,
   ): Promise<{ name: string; target: string; moved: boolean }> {
     if (!BOOKMARK_NAME_RE.test(name) || name.includes('@')) {
       throw badInput("bookmark names must be non-empty and must not contain whitespace or '@'.");
     }
-    const before = await this.bookmarkList(cwd, false, signal);
-    const existing = before.find((bookmark) => bookmark.name === name);
+    let existing = existingTarget !== null;
+    if (existingTarget === undefined) {
+      const before = await this.bookmarkList(cwd, false, signal);
+      existing = before.find((bookmark) => bookmark.name === name) !== undefined;
+    }
     const argv = ['bookmark', 'set', name, '-r', revset];
     if (allowBackwards) argv.push('--allow-backwards');
     await this.run(cwd, argv, signal);
@@ -711,7 +817,7 @@ export class JjOperations {
       const after = await this.bookmarkList(cwd, false, signal);
       target = after.find((bookmark) => bookmark.name === name)?.target ?? '';
     }
-    return { name, target, moved: existing !== undefined };
+    return { name, target, moved: existing };
   }
 
   /**
@@ -893,6 +999,16 @@ export class JjOperations {
    * as `needsCommit` so the model commits with `jj_commit` first instead of the
    * change being folded into the rebase.
    *
+   * Safety invariants (A2 audit):
+   * - the destination must share real history with the workspace (a destination
+   *   unrelated except for jj's empty root commit is refused, because
+   *   `roots(::@ ~ ::target)` would then name shared commits and a source-mode
+   *   rebase would rewrite them);
+   * - a destination that resolves to `@` is a model mistake and is rejected;
+   * - when every ancestor of `@` is already contained in the destination the
+   *   workspace is *behind* it: the result reports `onTarget: false` and nothing is
+   *   rebased instead of claiming a verified integration.
+   *
    * @param cwd - workspace directory.
    * @param options - destination/firstChange/bookmark/fetch options.
    * @param signal - cancellation signal.
@@ -939,6 +1055,17 @@ export class JjOperations {
       };
     }
 
+    // A bookmark request is validated before the fetch/rebase: jj rejects invalid
+    // names (whitespace, '@', leading '-') and used to fail *after* the rebase had
+    // already rewritten the workspace, so the model saw an error for work that had
+    // actually been done.
+    const requestedBookmark = options.bookmark?.trim();
+    if (requestedBookmark !== undefined && requestedBookmark.length > 0) {
+      if (!BOOKMARK_NAME_RE.test(requestedBookmark) || requestedBookmark.includes('@')) {
+        throw badInput("bookmark names must be non-empty and must not contain whitespace or '@'.");
+      }
+    }
+
     const fetchResult: JjFetchResult =
       options.fetch === false
         ? { status: 'skipped', message: 'jj git fetch was disabled for this call.' }
@@ -951,6 +1078,15 @@ export class JjOperations {
       },
       signal,
     );
+    // The destination must be a *base* the stack can sit on, never `@` itself:
+    // `roots(::@ ~ ::@)` is empty, which used to be reported as a verified
+    // "already integrated" hand-off while nothing had been verified at all.
+    if (target.change.changeId === workingCopy.changeId) {
+      throw badInput(
+        `jj_handoff destination ${JSON.stringify(target.revset)} resolves to this workspace's own working copy @: @ is not an integration base. Pass the revision the stack should sit on (for example a local bookmark), or omit destination to let jj_handoff resolve the target with fallbacks.`,
+      );
+    }
+
     const base: JjHandoffResult = {
       fetch: fetchResult,
       destination: target.revset,
@@ -971,13 +1107,19 @@ export class JjOperations {
     const roots = await this.stackRoots(cwd, target.revset, signal);
     const explicitFirst = options.firstChange?.trim();
     if (roots.length === 0) {
-      const bookmarkOutcome = await this.moveRequestedBookmark(cwd, options.bookmark, [], [], signal);
+      // `roots(::@ ~ ::target)` is empty only when every ancestor of `@` is already
+      // an ancestor of the destination: the workspace is *behind* the target (the
+      // target already contains `@`), not stacked on it. Reporting
+      // `alreadyIntegrated`/`onTarget` here was a false verified success, and a
+      // rebase of the (empty) stack would have been the wrong update anyway.
       return {
         ...base,
-        alreadyIntegrated: true,
-        onTarget: true,
-        message: `This workspace has no changes above ${target.revset}: the stack is already integrated, nothing to rebase.`,
-        ...bookmarkOutcome,
+        message: `This workspace is behind ${target.revset}: the destination already contains this workspace's changes, so there is no stack above it to rebase and nothing was changed. Inspect the history with jj_log; moving the workspace onto the destination is a separate decision the user must confirm.`,
+        ...(requestedBookmark !== undefined && requestedBookmark.length > 0
+          ? {
+              bookmarkSkipped: `Bookmark ${requestedBookmark} was not moved because the workspace is behind the destination and nothing was rebased.`,
+            }
+          : {}),
       };
     }
 
@@ -993,6 +1135,10 @@ export class JjOperations {
       // change or `@` would move only part of the work (or the empty working copy)
       // and report a false "verified" success while the session's commits stay behind.
       if (!roots.some((root) => root.changeId === ancestor.changeId)) {
+        // An unrelated destination makes `roots` name shared history rather than this
+        // workspace's commits; explain that instead of recommending a foreign change
+        // (following such a recommendation was how the audit rewrote `main`).
+        await this.assertDestinationCoversBase(cwd, target.revset, signal);
         throw badInput(
           `jj_handoff firstChange ${JSON.stringify(explicitFirst)} is not the bottom of this workspace's stack above ${target.revset}. Pass one of: ${roots.map((change) => `${change.changeId} (${change.description || 'no description'})`).join(', ')}, or omit firstChange to let jj_handoff pick the single stack automatically.`,
         );
@@ -1012,7 +1158,14 @@ export class JjOperations {
     if (parentCommitId !== undefined && parentCommitId === target.change.commitId) {
       const stack = await this.stackFrom(cwd, first.changeId, signal);
       const conflicts = this.conflictsIn(stack);
-      const bookmarkOutcome = await this.moveRequestedBookmark(cwd, options.bookmark, stack, conflicts, signal);
+      const bookmarkOutcome = await this.moveRequestedBookmark(
+        cwd,
+        options.bookmark,
+        stack,
+        conflicts,
+        signal,
+        first.changeId,
+      );
       return {
         ...base,
         firstChangeId: first.changeId,
@@ -1020,17 +1173,31 @@ export class JjOperations {
         alreadyIntegrated: true,
         onTarget: true,
         conflicts,
-        message: `The stack is already based directly on ${target.revset}; no rebase was needed.`,
+        message: `The stack is already based directly on ${target.revset}; no rebase was needed.${this.stackTruncationNote(stack)}`,
         ...bookmarkOutcome,
       };
     }
+
+    // Fail closed before any rewrite when the destination does not extend the
+    // history this workspace was based on: `roots()` above would then name shared
+    // commits (the pre-session history just above the empty root commit) and a
+    // source-mode rebase would rewrite trunk history (A2-F1).
+    await this.assertStackNotShared(cwd, first.changeId, requestedBookmark, signal);
+    await this.assertDestinationCoversBase(cwd, target.revset, signal);
 
     const message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
     const stack = await this.stackFrom(cwd, first.changeId, signal);
     const conflicts = this.conflictsIn(stack);
     const rebasedParentCommitId = await this.parentCommitId(cwd, first.changeId, signal);
     const onTarget = rebasedParentCommitId !== undefined && rebasedParentCommitId === target.change.commitId;
-    const bookmarkOutcome = await this.moveRequestedBookmark(cwd, options.bookmark, stack, conflicts, signal);
+    const bookmarkOutcome = await this.moveRequestedBookmark(
+      cwd,
+      options.bookmark,
+      stack,
+      conflicts,
+      signal,
+      first.changeId,
+    );
 
     return {
       ...base,
@@ -1039,9 +1206,19 @@ export class JjOperations {
       rebased: true,
       onTarget,
       conflicts,
-      message,
+      message: `${message}${this.stackTruncationNote(stack)}`,
       ...bookmarkOutcome,
     };
+  }
+
+  /**
+   * Model-facing note when the reported hand-off stack may be cut off by
+   * `maxLogLimit` (A2-F10): the `stack` array is bounded by the configured log
+   * limit, so a very large stack would otherwise be reported as complete.
+   */
+  private stackTruncationNote(stack: readonly JjChangeRecord[]): string {
+    if (stack.length < this.config.maxLogLimit) return '';
+    return ` The stack listing is capped at maxLogLimit=${this.config.maxLogLimit} changes, so changes below that cap are not listed; inspect the full stack with jj_log.`;
   }
 
   /**
@@ -1049,6 +1226,18 @@ export class JjOperations {
    *
    * Keeping this in one place means the already-integrated paths report the same
    * bookmark outcome as a fresh rebase instead of silently dropping the request.
+   *
+   * A bookmark that already exists is only moved when it points inside the stack
+   * being integrated (`firstChangeId::@`): a bookmark on shared history (for example
+   * the shared trunk `main`) must not be dragged to the session tip by a model
+   * mistake (A2-F4). Such a request is reported as `bookmarkSkipped`, not as failure.
+   *
+   * @param cwd - workspace directory.
+   * @param requested - bookmark name requested by the caller, when any.
+   * @param stack - the integrated stack (newest first).
+   * @param conflicts - conflicted changes in the stack.
+   * @param signal - cancellation signal.
+   * @param firstChangeId - bottom-most change of the stack, used for the ownership check.
    */
   private async moveRequestedBookmark(
     cwd: string,
@@ -1056,6 +1245,7 @@ export class JjOperations {
     stack: readonly JjChangeRecord[],
     conflicts: readonly JjHandoffConflict[],
     signal?: AbortSignal,
+    firstChangeId?: string,
   ): Promise<{ bookmark?: JjHandoffBookmark; bookmarkSkipped?: string }> {
     const name = requested?.trim();
     if (name === undefined || name.length === 0) return {};
@@ -1068,12 +1258,115 @@ export class JjOperations {
     if (tip === undefined) {
       return { bookmarkSkipped: 'The stack has no content change to point a bookmark at.' };
     }
-    return { bookmark: await this.bookmarkSet(cwd, name, tip.changeId, false, signal, tip.commitId) };
+    try {
+      const bookmarks = await this.bookmarkList(cwd, false, signal);
+      const existing = bookmarks.find((bookmark) => bookmark.name === name && bookmark.remote === null);
+      if (existing !== undefined && existing.target.length > 0 && firstChangeId !== undefined) {
+        const inside = await this.readCommitIds(cwd, `(${existing.target}) & ((${firstChangeId})::@)`, signal, 1);
+        if (inside.length === 0) {
+          return {
+            bookmarkSkipped: `Bookmark ${name} points at ${existing.target.slice(0, 12)}, which is outside this workspace's stack, so it looks like shared history: jj_handoff does not move it. Report the rebased stack instead; the user can move that bookmark explicitly if it really belongs to this session.`,
+          };
+        }
+      }
+      return {
+        bookmark: await this.bookmarkSet(
+          cwd,
+          name,
+          tip.changeId,
+          false,
+          signal,
+          tip.commitId,
+          existing === undefined ? null : existing.target,
+        ),
+      };
+    } catch (error) {
+      // The rebase already happened: a failed bookmark move must not turn the whole
+      // hand-off into an error, because retrying would claim the (already applied)
+      // rebase failed. Report the bookmark problem next to the successful result.
+      if (error instanceof JjError && (error.code === 'JJ_ABORTED' || error.code === 'JJ_TIMEOUT')) throw error;
+      const detail =
+        error instanceof JjError
+          ? error.detail.stderr.trim() || error.message
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      return {
+        bookmarkSkipped: `Bookmark ${name} was not moved: ${bound(detail, 512).text} The rebase result above is still valid; fix the bookmark name or move it manually.`,
+      };
+    }
   }
 
   /** Bottom-most change(s) of this workspace's stack above `target` (`roots(::@ ~ ::target)`). */
   private async stackRoots(cwd: string, target: string, signal?: AbortSignal): Promise<readonly JjChangeRecord[]> {
     return await this.log(cwd, `roots(::@ ~ ::(${target}))`, 32, signal);
+  }
+
+  /**
+   * Refuse to source-mode rebase a selection that contains shared (bookmarked) history.
+   *
+   * jj has no per-workspace ownership metadata, so the only durable signal for
+   * "commit already published / owned by another workspace or the user" is a local
+   * bookmark: rewriting its history is what broke shared trunks (A2-F1). A bookmark
+   * explicitly passed as the hand-off's `bookmark` is the one exception — it is the
+   * session's own pointer and the hand-off is about to move it — and only when it
+   * points strictly inside the stack being moved (a bookmark pointing at shared
+   * history is not moved, F4).
+   *
+   * @param cwd - workspace directory.
+   * @param first - bottom-most change of the stack about to be moved.
+   * @param requestedBookmark - bookmark the caller asked to move, when any.
+   * @param signal - cancellation signal.
+   * @throws JjError `JJ_BAD_INPUT` when the moving set contains other bookmarked commits.
+   */
+  private async assertStackNotShared(
+    cwd: string,
+    first: string,
+    requestedBookmark: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const movingSet = `((${first})::@)`;
+    const offenders = await this.readCommitIds(cwd, `${movingSet} & ::bookmarks()`, signal, 1);
+    if (offenders.length === 0) return;
+    const requested = requestedBookmark?.trim();
+    if (requested !== undefined && requested.length > 0 && SAFE_BOOKMARK_RE.test(requested)) {
+      const exact = `bookmarks(exact:${JSON.stringify(requested)})`;
+      // Only a bookmark that points *above* the stack bottom is owned by the stack;
+      // one pointing at or below the bottom would smuggle shared history into it.
+      const owned = await this.readCommitIds(cwd, `(${exact}) & (${movingSet} ~ (${first}))`, signal, 1);
+      if (owned.length > 0) {
+        const others = await this.readCommitIds(cwd, `${movingSet} & (::((bookmarks()) ~ (${exact})))`, signal, 1);
+        if (others.length === 0) return;
+      }
+    }
+    const hint = await this.localBookmarkNames(cwd, signal);
+    throw badInput(
+      `jj_handoff refuses to rebase ${JSON.stringify(first)}::@: the selection contains commits that are reachable from local bookmarks, i.e. shared/stable history this workspace does not own, so a source-mode rebase would rewrite it. Local bookmarks: ${hint.length > 0 ? hint.join(', ') : 'none'}. Pass firstChange with the bottom-most change id this session created, pass the session's own bookmark as the bookmark option, or ask the user which revision to integrate onto.`,
+    );
+  }
+
+  /**
+   * Refuse a destination whose history does not extend this workspace's base.
+   *
+   * `roots(::@ ~ ::target)` names only this workspace's own commits when `target`
+   * already contains the shared history the workspace was based on. With an
+   * unrelated destination (only jj's empty root commit in common) the roots instead
+   * name the *shared* commits directly above the root commit, and `jj rebase -s`
+   * would rewrite them — the A2-F1 data-loss shape. This is fail-closed: the model
+   * must pick a destination this workspace's history extends (or ask the user).
+   *
+   * @param cwd - workspace directory.
+   * @param target - resolved destination revset.
+   * @param signal - cancellation signal.
+   * @throws JjError `JJ_BAD_INPUT` when the destination shares no history beyond the root commit.
+   */
+  private async assertDestinationCoversBase(cwd: string, target: string, signal?: AbortSignal): Promise<void> {
+    const shared = await this.readCommitIds(cwd, `((::@ & ::(${target})) ~ root())`, signal, 1);
+    if (shared.length > 0) return;
+    const hint = await this.localBookmarkNames(cwd, signal);
+    throw badInput(
+      `jj_handoff cannot integrate onto ${JSON.stringify(target)}: it shares no history with this workspace except jj's empty root commit, so the stack above it would include changes from the shared history rather than only this workspace's own commits, and a source-mode rebase could rewrite them. Local bookmarks: ${hint.length > 0 ? hint.join(', ') : 'none'}. Pass a destination this workspace's history extends (the bookmark or branch it was based on), or ask the user which revision to integrate onto; moving this workspace's own commits onto an unrelated revision needs an explicit jj_rebase decision, which jj_handoff must not guess.`,
+    );
   }
 
   /** The stack from `first` up to and including `@`, newest first. */
@@ -1093,10 +1386,28 @@ export class JjOperations {
    * pay for the `self.diff()` of every parent (expensive on large commits). Missing
    * revisions report `[]`; every other error is rethrown (same contract as
    * {@link tryReadAt}).
+   *
+   * @param cwd - workspace directory.
+   * @param revset - revisions to read.
+   * @param signal - cancellation signal.
+   * @param limit - optional maximum number of commit ids to read (existence probes).
    */
-  private async readCommitIds(cwd: string, revset: string, signal?: AbortSignal): Promise<readonly string[]> {
+  private async readCommitIds(
+    cwd: string,
+    revset: string,
+    signal?: AbortSignal,
+    limit?: number,
+  ): Promise<readonly string[]> {
     try {
-      const argv = ['log', '-r', revset, '--no-graph', '-T', TPL_COMMIT_IDS];
+      const argv = [
+        'log',
+        '-r',
+        revset,
+        '--no-graph',
+        ...(limit !== undefined ? ['--limit', String(limit)] : []),
+        '-T',
+        TPL_COMMIT_IDS,
+      ];
       const result = await this.run(cwd, argv, signal);
       return result.stdout
         .split('\n')

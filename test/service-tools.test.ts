@@ -1292,3 +1292,264 @@ test('tools: a failed session-cwd resolution is fail-closed instead of guessing 
   assert.ok(status2 !== undefined);
   await assert.rejects(() => status2.execute({}, fakeExec({ id: 'agent-no-wd' })), /no workingDirectory service/);
 });
+
+// ---------------------------------------------------------------------------
+// A2 audit regressions: hand-off destination safety, workspace names, op log time.
+// ---------------------------------------------------------------------------
+
+test('operation layer: jj_handoff refuses a destination unrelated to the workspace instead of rewriting shared history', async (t) => {
+  const { fx, repo, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-unrelated');
+  // `side` only shares jj's empty root commit with `main`, like the audit repro:
+  // `roots(::@ ~ ::side)` would name the shared `main` commit, not session work.
+  await mustRun(fx.run, ['jj', 'new', 'root()', '-m', 'other: side'], repo);
+  await writeFixtureFile(fx, repo, 'side.txt', 'side');
+  await commitWorkingCopy(fx, repo, 'other: side');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'side', '-r', '@-'], repo);
+  await mustRun(fx.run, ['jj', 'new', 'main'], repo);
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await writeFixtureFile(fx, ws, 'two.txt', 'two');
+  await commitWorkingCopy(fx, ws, 'feat: two');
+  const sessionBottom = (await operations.log(ws, 'main..@', 10))
+    .filter((change) => change.description.length > 0)
+    .at(-1);
+  assert.ok(sessionBottom !== undefined);
+  const mainBefore = (await mustRun(fx.run, ['jj', 'log', '-r', 'main', '--no-graph', '-T', 'commit_id'], repo)).stdout;
+
+  // Without firstChange the shared `chore: base` commit would be rebased.
+  await assert.rejects(
+    () => operations.handoff(ws, { destination: 'side', fetch: false }),
+    /refuses to rebase/,
+    'shared history must never be moved',
+  );
+  // An explicit firstChange cannot smuggle an unrelated destination either.
+  await assert.rejects(
+    () => operations.handoff(ws, { destination: 'side', firstChange: sessionBottom.changeId, fetch: false }),
+    /shares no history/,
+  );
+  const mainAfter = (await mustRun(fx.run, ['jj', 'log', '-r', 'main', '--no-graph', '-T', 'commit_id'], repo)).stdout;
+  assert.equal(mainAfter, mainBefore, 'the shared main commit was not rewritten');
+  assert.ok(!calls.some((argv) => argv.includes('rebase')), 'no rebase is spawned for an unrelated destination');
+  const sessionDescriptions = (await operations.log(ws, 'main..@', 10)).map((change) => change.description);
+  assert.deepEqual(
+    sessionDescriptions.filter((description) => description.length > 0),
+    ['feat: two', 'feat: one'],
+    'the session stack is untouched after the refused hand-off',
+  );
+});
+
+test('operation layer: jj_handoff reports a workspace that is behind the destination instead of claiming success', async (t) => {
+  const { fx, repo, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-behind');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  const sessionAt = (await operations.log(ws, '@', 1))[0];
+  assert.ok(sessionAt !== undefined);
+  // Another process integrates the session's working-copy change into main, so
+  // the destination (main) already contains `@`: the workspace is behind it.
+  await mustRun(fx.run, ['jj', 'new', sessionAt.changeId, '-m', 'chore: integrate session'], repo);
+  await writeFixtureFile(fx, repo, 'integrated.txt', 'x');
+  await commitWorkingCopy(fx, repo, 'chore: integrate session');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const before = (await operations.log(ws, '@', 1))[0];
+  assert.ok(before !== undefined);
+
+  const result = await operations.handoff(ws, { fetch: false });
+  assert.equal(result.destinationSource, 'main');
+  assert.equal(result.rebased, false);
+  assert.equal(result.alreadyIntegrated, false, 'a workspace behind the destination is not integrated');
+  assert.equal(result.onTarget, false, 'the stack does not sit on the destination');
+  assert.deepEqual([...result.stack], []);
+  assert.match(result.message, /behind/);
+  assert.ok(!calls.some((argv) => argv.includes('rebase')), 'nothing is rebased for a behind workspace');
+  const after = (await operations.log(ws, '@', 1))[0];
+  assert.equal(after?.changeId, before.changeId, 'the workspace working copy is untouched');
+});
+
+test('operation layer: jj_handoff rejects a destination that resolves to the working copy itself', async (t) => {
+  const { fx, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-at-destination');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await assert.rejects(
+    () => operations.handoff(ws, { destination: '@', fetch: false }),
+    /own working copy @/,
+    'the working copy is not an integration base',
+  );
+  assert.ok(!calls.some((argv) => argv.includes('rebase')));
+});
+
+test('operation layer: jj_handoff moves a session bookmark that points into the stack it rebases', async (t) => {
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-owned-bookmark');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await writeFixtureFile(fx, ws, 'two.txt', 'two');
+  await commitWorkingCopy(fx, ws, 'feat: two');
+  // The session bookmarked its own stack tip; the shared-history guard must let the
+  // owned bookmark move with it instead of treating it as foreign history.
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'feature', '-r', '@-'], ws);
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+
+  const result = await operations.handoff(ws, { bookmark: 'feature', fetch: false });
+  assert.equal(result.rebased, true);
+  assert.equal(result.onTarget, true);
+  assert.equal(result.bookmark?.name, 'feature');
+  assert.equal(result.bookmark?.moved, true);
+  const rebasedTip = result.stack.find((change) => change.description === 'feat: two');
+  assert.ok(rebasedTip !== undefined);
+  assert.equal(result.bookmark?.target, rebasedTip.commitId, 'the bookmark follows the rebased stack tip');
+});
+
+test('operation layer: jj_handoff validates a bookmark name before rebasing and reports later failures without losing the result', async (t) => {
+  const { fx, repo, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-bookmark-errors');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  // Make the hand-off rebase-worthy: the shared main advances.
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+
+  // An invalid name is rejected before the fetch/rebase: nothing was rewritten yet.
+  await assert.rejects(() => operations.handoff(ws, { bookmark: 'main@origin', fetch: false }), /must not contain/);
+  assert.ok(!calls.some((argv) => argv.includes('rebase')), 'no rebase runs before the bookmark validation');
+
+  // jj itself rejects this name after the rebase: the rebase result must survive
+  // as a bookmarkSkipped note instead of turning the whole hand-off into an error.
+  const result = await operations.handoff(ws, { bookmark: '--allow-backwards', fetch: false });
+  assert.equal(result.rebased, true);
+  assert.equal(result.bookmark, undefined);
+  assert.match(result.bookmarkSkipped ?? '', /was not moved/);
+});
+
+test('operation layer: revset-shaped operation inputs cannot be parsed as options or batch-rewrite history', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-op-input-shape');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  const atBefore = (await operations.status(repo)).change.changeId;
+
+  // A parent such as `--help` must be treated as a revset (and fail), not let jj
+  // print help, exit 0, and report the untouched working copy as a new change.
+  await assert.rejects(() => operations.newChange(repo, ['--help'], 'feat: never created'), /revset/i);
+  assert.equal((await operations.status(repo)).change.changeId, atBefore, 'the working copy was not replaced');
+
+  // A multi-revision revset must be refused instead of describing every change.
+  await writeFixtureFile(fx, repo, 'one.txt', 'one');
+  await commitWorkingCopy(fx, repo, 'feat: one');
+  await writeFixtureFile(fx, repo, 'two.txt', 'two');
+  await commitWorkingCopy(fx, repo, 'feat: two');
+  await assert.rejects(() => operations.describeChange(repo, '::@', 'chore: batch rewrite'), /more than one revision/);
+  const descriptions = (await operations.log(repo, '@ | @-', 5)).map((change) => change.description);
+  assert.deepEqual(descriptions, ['', 'feat: two'], 'no description was rewritten');
+  assert.ok(!calls.some((argv) => argv.includes('describe')), 'no describe ran for a multi-revision revset');
+});
+
+test('operation layer: jj_op_log returns a parseable operation timestamp (json time is an object in jj 0.46)', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const fx = makeFixture(t, 'dsh-jj-oplog-time');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+
+  const operationsList = await operations.opLog(repo, 3, undefined);
+  assert.ok(operationsList.length > 0);
+  for (const operation of operationsList) {
+    assert.notEqual(operation.time, '[object Object]', 'the time must not stringify the jj object');
+    assert.ok(operation.time.length > 0);
+    assert.equal(Number.isNaN(Date.parse(operation.time)), false, `the time must parse: ${operation.time}`);
+  }
+
+  // The tool output schema still accepts the parseable string.
+  fx.cwd = repo;
+  const tool = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get('jj_op_log')!;
+  const value = (await tool.execute({ limit: 2 }, fakeExec())) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+});
+
+test('operation layer: workspaceAdd returns the bare name for names with spaces and trims the path', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-workspace-name');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  const spacedPath = join(fx.root, 'ws spaced');
+  const created = await operations.workspaceAdd(repo, spacedPath, 'my session', [], undefined, undefined);
+  assert.equal(created.name, 'my session', 'jj quote-decoration must not leak into the name');
+  assert.equal(created.path, realpath(spacedPath));
+  const listed = await operations.workspaceList(repo);
+  assert.ok(listed.some((workspace) => workspace.name === 'my session'));
+
+  // The default name is the basename; surrounding whitespace must not reach jj.
+  const defaultPath = join(fx.root, 'My Project ws');
+  const defaulted = await operations.workspaceAdd(repo, `  ${defaultPath}  `, undefined, [], undefined, undefined);
+  assert.equal(defaulted.name, 'My Project ws');
+  assert.equal(defaulted.path, realpath(defaultPath));
+});
+
+test('jj_workspace_cleanup: a session-created workspace whose name contains spaces is cleaned up end to end', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-cleanup-spaced');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const moved: string[] = [];
+  const workingDirectory = {
+    ensure: async () => fx.cwd as string,
+    set: async (_agent: unknown, path: string) => {
+      moved.push(path);
+      return path;
+    },
+  };
+  const definitions = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}), workingDirectory)),
+  );
+  const agent = { id: 'spaced-cleanup-agent' };
+  fx.cwd = repo;
+  const created = (await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: join(fx.root, 'My Session ws') }, fakeExec(agent))) as {
+    readonly name: string;
+    readonly path: string;
+  };
+  assert.equal(created.name, 'My Session ws', 'the default name is the basename, unquoted');
+  fx.cwd = created.path;
+  const value = (await definitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent))) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(value['forgotten'], true);
+  assert.equal(value['workspaceName'], 'My Session ws');
+  assert.deepEqual(moved, [realpath(repo)]);
+});
+
+test('operation layer: jj_handoff does not move a bookmark that points at shared history', async (t) => {
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-shared-bookmark');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  // The shared trunk advances while the session works; `main` must stay where it is.
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const mainBefore = (await mustRun(fx.run, ['jj', 'log', '-r', 'main', '--no-graph', '-T', 'commit_id'], repo)).stdout;
+
+  const result = await operations.handoff(ws, { bookmark: 'main', fetch: false });
+  assert.equal(result.rebased, true);
+  assert.equal(result.bookmark, undefined, 'a shared bookmark is not moved by a hand-off');
+  assert.match(result.bookmarkSkipped ?? '', /outside this workspace's stack/);
+  const mainAfter = (await mustRun(fx.run, ['jj', 'log', '-r', 'main', '--no-graph', '-T', 'commit_id'], repo)).stdout;
+  assert.equal(mainAfter, mainBefore, 'the shared main bookmark was not moved');
+});

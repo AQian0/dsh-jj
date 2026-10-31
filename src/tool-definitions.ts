@@ -732,12 +732,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_handoff',
       description:
-        "Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace's whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.",
+        "Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace's whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. It refuses a destination that shares no real history with this workspace (only jj's empty root commit) and it never rewrites shared history; a workspace that is behind the destination is reported (onTarget: false) without a rebase. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.",
       parameters: {
         destination: {
           type: 'string',
           description:
-            'jj revset to integrate onto (only when the user named a revision/bookmark). Omit for automatic resolution: the configured rebaseTarget (default trunk()), then local main/master; a local-only repository without a remote is handled.',
+            "jj revset to integrate onto (only when the user named a revision/bookmark). It must be part of this workspace history or share real history with it: a revision that only shares jj's empty root is rejected. Omit for automatic resolution: the configured rebaseTarget (default trunk()), then local main/master; a local-only repository without a remote is handled.",
         },
         firstChange: {
           type: 'string',
@@ -747,7 +747,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         bookmark: {
           type: 'string',
           description:
-            "Local bookmark to move to the rebased tip. Pass it only when this session owns the bookmark; never move another session's bookmark.",
+            "Local bookmark to move to the rebased tip. Existing bookmarks only move when they already point into the stack being rebased; a bookmark on shared history is reported as bookmarkSkipped instead of being moved. Pass it only when this session owns the bookmark; never move another session's bookmark.",
         },
         fetch: {
           type: 'boolean',

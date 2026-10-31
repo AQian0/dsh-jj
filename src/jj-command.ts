@@ -119,7 +119,10 @@ export function classifyJjFailure(result: JjRunResult, aborted: boolean): JjErro
   if (/Failed to parse revset|doesn't exist|no such revision|Revision .* doesn't exist/i.test(stderr))
     return 'JJ_BAD_REVSET';
   if (result.exitCode === 2) return 'JJ_BAD_INPUT';
-  if (/Cannot access/i.test(stderr)) return 'JJ_REPO_BROKEN';
+  // `Cannot access <path>` is also how jj reports an unusable *user-supplied path*
+  // (`jj workspace add /root/x`, `/proc/...`) — only an inaccessible `.jj`/`.git`
+  // location means the repository metadata itself is broken (A2-F8).
+  if (/Cannot access[^\n]*(?:\.jj|\.git)(?:[/\\]|\b)/i.test(stderr)) return 'JJ_REPO_BROKEN';
   return 'JJ_COMMAND_FAILED';
 }
 

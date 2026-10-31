@@ -10,6 +10,7 @@
  * @module dsh-jj/jj-service
  */
 
+import { resolve } from 'node:path';
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { assertServiceableConfig, Config, resolveConfig, type JjPluginConfig } from './config.ts';
 import { detectVcs } from './detect.ts';
@@ -204,6 +205,12 @@ export class JjService extends Service {
 }
 
 function resolveKey(cwd: string): string {
-  // path.resolve without realpath: the guard's sync path cannot do I/O.
-  return cwd.startsWith('/') ? cwd.replace(/\/+$/, '') || '/' : cwd;
+  // path.resolve without realpath: the guard's sync path must stay I/O-free, but a
+  // *relative* cwd must still be normalized against `process.cwd()`. Returning it
+  // verbatim keyed `repo` in two different directories to one cache entry, so after
+  // a `chdir` the guard/`detect()` returned the other directory's descriptor.
+  // Symlink spellings remain separate keys (intentional: `realpath` is I/O and the
+  // async detection path canonicalizes the descriptor itself); that only costs one
+  // extra probe per spelling, never a wrong descriptor.
+  return resolve(cwd);
 }

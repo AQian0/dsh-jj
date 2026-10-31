@@ -18,7 +18,7 @@ import { resolveConfig } from '../src/config.ts';
 import { createCommandRunJj, JjError } from '../src/jj-command.ts';
 import { JjOperations, JjService } from '../src/service.ts';
 import type { JjRunResult, RunJjOptions } from '../src/types.ts';
-import { assertToolchain, initJjColocated, makeFixture, makeTempRoot, mustRun } from './helpers/fixtures.ts';
+import { assertToolchain, initJjColocated, makeFixture, makeTempRoot, mustRun, realpath } from './helpers/fixtures.ts';
 
 /** A `jj`/`git` run result shaped like the contract runner returns. */
 type RunOutcome = JjRunResult;
@@ -368,4 +368,31 @@ test('JjService: the detect cache is pruned to a bounded size', async (t) => {
   assert.equal(service.peek(dirs[0]), undefined, 'the oldest descriptor goes first');
   assert.notEqual(service.peek(dirs[cap]), undefined, 'the newest descriptor stays cached');
   await dispose();
+});
+
+test('JjService: cache keys normalize a relative cwd against process.cwd()', async (t) => {
+  // Regression: `resolveKey` returned a relative path verbatim, so `detect('repo')`
+  // after a `chdir` hit the first directory's cached descriptor (cross-talk).
+  const first = makeTempRoot('dsh-jj-service-relative-a');
+  const second = makeTempRoot('dsh-jj-service-relative-b');
+  t.after(() => first.cleanup());
+  t.after(() => second.cleanup());
+  mkdirSync(join(first.dir, 'repo'));
+  mkdirSync(join(second.dir, 'repo'));
+  const subprocess = immediateSubprocess('jj 0.46.0\n');
+  const { ctx, dispose } = serviceContext(subprocess);
+  const service = new JjService(ctx, { detectCacheTtlMs: 60_000, timeoutMs: 5_000, graceMs: 50 });
+  const original = process.cwd();
+  try {
+    process.chdir(first.dir);
+    const a = await service.detect('repo');
+    process.chdir(second.dir);
+    const b = await service.detect('repo');
+    assert.notEqual(b, a, 'the two relative spellings address different directories');
+    assert.equal(b.cwd, realpath(join(second.dir, 'repo')));
+    assert.equal(service.peek('repo')?.cwd, realpath(join(second.dir, 'repo')), 'peek resolves the same way');
+  } finally {
+    process.chdir(original);
+    await dispose();
+  }
 });
