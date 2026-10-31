@@ -96,9 +96,9 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `test/**/*.test.ts`                                            | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
 | `test/multi-session.test.ts`                                   | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
 | `test/service.test.ts`                                         | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                            |
-| `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 0.46 输出 + 真实夹具)                                                                                                                            |
+| `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 0.46 输出 + 真实夹具 + 拒绝快照警告解析)                                                                                                         |
 | `test/changes-jj.test.ts`                                      | `changes-jj` 读取器测试(真实 jj-native/colocated 夹具 + fake runner 失败形态)                                                                                                           |
-| `test/changes-recorder.test.ts`                                | `changes-recorder` 状态机测试(fake reader:轮次、失败、上限、binary、oversized、forget/dispose)                                                                                          |
+| `test/changes-recorder.test.ts`                                | `changes-recorder` 状态机测试(fake reader:轮次、失败、上限、binary、oversized、拒绝快照的新文件、forget/dispose)                                                                        |
 | `test/changes-service.test.ts`                                 | `changes-service` 合并/路由测试(fake recorder + upstream)                                                                                                                               |
 | `test/changes-entry.test.ts`                                   | `jj-changes` 入口端到端测试(真实 Cordis + 真实 jj/git 夹具:jj-native 卡片、colocated 合并、纯 Git 回退、三种模式)                                                                       |
 | `test/jj-command.test.ts`                                      | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试                                                                                                                         |
@@ -187,6 +187,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       并可能拖垮 profile),也不要直接改内置包的内部状态。
     - 记录路径固定为「turn 开始读 `@` commit id(允许 jj 快照)→ turn 结束再读一次 → `jj diff --from A --to B`
       解析」。turn 结束的 `readCommit` 必须在 `readDiff` 之前;`--ignore-working-copy` 只用于 `readDiff`。
+    - `readCommit` 同时解析快照命令 stderr 里的 `Refused to snapshot some files:` 警告:超过
+      `snapshot.max-new-file-size`(默认 1 MiB)的新文件不会被快照进 `@`,commit id 也可能不变。轮结束时新出现的
+      拒绝路径要以 `oversized: true`(0 行数、无对比内容)并入摘要,轮开始就已被拒绝的路径必须排除,「只有超大
+      文件」的回合也要记录。解析在 `changes-diff.ts`(纯函数),`changes-jj.ts` 按命令 cwd 把路径解析为绝对路径。
     - 一切失败 fail-open:reader 返回 `undefined`、recorder 不写事件、合并服务退回内置 summary,任何路径都不得
       抛进宿主或阻断 turn。合并按绝对路径去重、jj 数据优先,`total` 在超出两边 `maxFiles` 时是近似值(已在
       `changes-service.ts` JSDoc 说明)。
