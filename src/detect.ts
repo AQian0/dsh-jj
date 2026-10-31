@@ -189,7 +189,12 @@ function deviceOf(path: string): number | undefined {
  * @returns sniffed layout with depths, pointer targets, and diagnostics.
  */
 export function sniffVcsSync(cwd: string, options: SniffOptions = {}): VcsSniff {
-  const start = resolve(cwd);
+  // Canonicalize the start before walking `dirname()`: the caller's spelling can be
+  // a symlink (macOS `/var`, a linked alias, a model-supplied workdir). Lexically
+  // walking the symlinked spelling never visits the real path's `.jj`/`.git` and
+  // classified the repository as `none`/`git` (A2-F2); `realpathSync` falls back to
+  // the resolved absolute path when the directory does not exist.
+  const start = canonicalPath(cwd);
   const diagnostics: VcsNotice[] = [];
   const maxDepth = options.maxDepth ?? Number.POSITIVE_INFINITY;
   const startDevice = deviceOf(start);
@@ -701,7 +706,9 @@ export async function detectVcs(
       ...(gitRoot !== undefined ? { gitRoot } : {}),
       ...(gitDir !== undefined ? { gitDir } : {}),
       ...(gitVersion !== undefined ? { gitVersion } : {}),
-      verified: true,
+      // CLI evidence only: a `none` classification that never got to run Git is
+      // merely the sniff result, so it must not claim to be verified (A2-F9).
+      verified: gitRoot !== undefined || (gitAvailable && !gitProbeFailed),
       confidence:
         kind === 'none'
           ? gitAvailable && !gitProbeFailed
@@ -740,7 +747,9 @@ export async function detectVcs(
       ...(gitRoot !== undefined ? { gitRoot } : {}),
       ...(gitDir !== undefined ? { gitDir } : {}),
       ...(gitVersion !== undefined ? { gitVersion } : {}),
-      verified: true,
+      // The nearer Git marker comes from the sniff; without a successful Git CLI
+      // resolution this classification is sniff-only and therefore unverified.
+      verified: gitRoot !== undefined,
       confidence: gitRoot !== undefined ? 'high' : 'medium',
       confirmedBy,
       jjAvailable: false,
