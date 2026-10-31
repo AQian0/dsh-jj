@@ -29,7 +29,11 @@
  *   counts or comparison. A path the turn-start snapshot also refused is not this
  *   turn's change and stays out of the summary;
  * - one Session's snapshot/diff/append work is serialized on a promise chain so
- *   concurrent turns, session disposal, and plugin disposal cannot interleave.
+ *   concurrent turns, session disposal, and plugin disposal cannot interleave;
+ * - the queued turn-start snapshot is exposed through
+ *   {@link TurnChangesRecorder.settled} so the Host entry can keep the first
+ *   tool write of a turn behind the baseline snapshot (the built-in recorder
+ *   does the same from its `tools/pre-execute` hook).
  *
  * @module dsh-jj/changes-recorder
  */
@@ -253,6 +257,26 @@ export class TurnChangesRecorder {
     const turnState = state?.turn;
     if (state === undefined || turnState === undefined || turnState.turn !== turn) return;
     void this.recordTurn(state, turnState, session);
+  }
+
+  /**
+   * Resolves once the work queued for one Session so far has settled.
+   *
+   * The Host entry awaits this from `tools/pre-execute`: a tool write that ran
+   * before the turn-start snapshot would be folded into the baseline and
+   * disappear from the turn's summary, so the first mutation must wait for the
+   * queued baseline read (the built-in recorder has the same barrier).
+   *
+   * The returned promise never rejects (queued failures are swallowed by the
+   * queue) and resolves immediately for an unknown Session, so the barrier is
+   * bounded by the reader's own command timeout and cannot break a turn.
+   *
+   * @param sessionId - the Session whose queue is awaited.
+   * @returns a promise that settles after the queued work ran.
+   */
+  settled(sessionId: string): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    return this.sessions.get(sessionId)?.chain ?? Promise.resolve();
   }
 
   /**

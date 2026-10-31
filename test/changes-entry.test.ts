@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 // Type-only: loads the `workspaceChanges` Context augmentation and the service types.
 import type {} from '@deepseek-ai/dsh-workspace-changes/types';
@@ -62,13 +62,39 @@ interface FakeSubprocess {
   spawn(spec: SpawnSpec): SpawnHandle;
 }
 
+/** Latency hooks that script the subprocess timings a test needs. */
+interface FakeSubprocessHooks {
+  /** Delay every Git spawn by this many milliseconds (slows the built-in recorder). */
+  readonly delayGitMs?: number;
+  /** Delay the first jj working-copy snapshot (`jj log -r @`) spawn by this many milliseconds. */
+  readonly delayFirstSnapshotMs?: number;
+  /** Collect every spawned argv here (used to prove `off` starts no jj process). */
+  readonly spawns?: string[];
+}
+
+/** Whether argv[0] is the Git executable (the built-in recorder's subprocess calls). */
+function isGitProgram(program: string | undefined): boolean {
+  return program !== undefined && basename(program) === 'git';
+}
+
+/** Whether one spawn is the working-copy snapshot command `readCommit` runs. */
+function isSnapshotSpawn(spec: SpawnSpec): boolean {
+  const argv = spec.argv;
+  return argv.includes('log') && argv.includes('--no-graph') && argv.includes('@');
+}
+
 /**
  * Build the fake subprocess capability over `node:child_process`.
  *
  * @param env - extra environment entries layered over `process.env` for every spawn.
+ * @param hooks - optional timing delays used by the race/ordering tests.
  * @returns a capability object with `resolveExecutable` and `spawn`.
  */
-function createFakeSubprocess(env: Readonly<Record<string, string>> = {}): FakeSubprocess {
+function createFakeSubprocess(
+  env: Readonly<Record<string, string>> = {},
+  hooks: FakeSubprocessHooks = {},
+): FakeSubprocess {
+  let snapshotDelayed = false;
   return {
     async resolveExecutable(name: string): Promise<string> {
       const found = spawnSync('sh', ['-c', `command -v ${JSON.stringify(name)}`], { encoding: 'utf8' });
@@ -78,29 +104,48 @@ function createFakeSubprocess(env: Readonly<Record<string, string>> = {}): FakeS
     },
     spawn(spec: SpawnSpec): SpawnHandle {
       const [command, ...args] = spec.argv;
-      const child = spawn(command as string, args, {
-        cwd: spec.cwd,
-        env: { ...process.env, ...env, ...spec.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      hooks.spawns?.push(spec.argv.join(' '));
       let stdout = '';
       let stderr = '';
-      child.stdout?.setEncoding('utf8');
-      child.stderr?.setEncoding('utf8');
-      child.stdout?.on('data', (chunk: string) => {
-        stdout += chunk;
+      let child: ReturnType<typeof spawn> | undefined;
+      let terminated = false;
+      let resolveDone: (outcome: { readonly exitCode: number | null; readonly signal: string | null }) => void = () =>
+        undefined;
+      const done = new Promise<{ readonly exitCode: number | null; readonly signal: string | null }>((resolve) => {
+        resolveDone = resolve;
       });
-      child.stderr?.on('data', (chunk: string) => {
-        stderr += chunk;
-      });
-      const done = new Promise<{ exitCode: number | null; signal: string | null }>((resolve) => {
-        child.on('error', () => resolve({ exitCode: null, signal: null }));
-        child.on('close', (code, signal) => resolve({ exitCode: code, signal }));
-      });
-      if (spec.signal !== undefined) {
-        if (spec.signal.aborted) child.kill('SIGKILL');
-        else spec.signal.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
+      const launch = (): void => {
+        const { stdin } = spec.stdio;
+        child = spawn(command as string, args, {
+          cwd: spec.cwd,
+          env: { ...process.env, ...env, ...spec.env },
+          stdio: [typeof stdin === 'object' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        });
+        if (typeof stdin === 'object') child.stdin?.end(stdin.data);
+        child.stdout?.setEncoding('utf8');
+        child.stderr?.setEncoding('utf8');
+        child.stdout?.on('data', (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr?.on('data', (chunk: string) => {
+          stderr += chunk;
+        });
+        child.on('error', () => resolveDone({ exitCode: null, signal: null }));
+        child.on('close', (code, signal) => resolveDone({ exitCode: code, signal }));
+        if (terminated) child.kill('SIGKILL');
+        if (spec.signal !== undefined) {
+          if (spec.signal.aborted) child.kill('SIGKILL');
+          else spec.signal.addEventListener('abort', () => child?.kill('SIGKILL'), { once: true });
+        }
+      };
+      let delayMs = 0;
+      if (hooks.delayGitMs !== undefined && isGitProgram(command)) delayMs = hooks.delayGitMs;
+      else if (!snapshotDelayed && hooks.delayFirstSnapshotMs !== undefined && isSnapshotSpawn(spec)) {
+        snapshotDelayed = true;
+        delayMs = hooks.delayFirstSnapshotMs;
       }
+      if (delayMs > 0) setTimeout(launch, delayMs);
+      else launch();
       return {
         done,
         collected: {
@@ -108,7 +153,8 @@ function createFakeSubprocess(env: Readonly<Record<string, string>> = {}): FakeS
           stderr: { readFrom: () => ({ text: stderr, lossy: false }) },
         },
         terminate: () => {
-          child.kill('SIGKILL');
+          terminated = true;
+          child?.kill('SIGKILL');
         },
         waitForExit: async () => true,
       };
@@ -160,6 +206,8 @@ interface HostHarness {
   send(type: string, data: unknown): void;
   /** Workspace-change events appended by any recorder, in sequence order. */
   readonly changeEvents: ReadonlyArray<{ readonly seq: number; readonly turn?: number }>;
+  /** Every subprocess argv this entry spawned since mount. */
+  readonly spawns: readonly string[];
   /** The Host service the deliverables rows would inject. */
   summary(seq: number): WorkspaceSummaryLike | undefined;
   diff(seq: number, index: number): Promise<WorkspaceDiffLike | undefined>;
@@ -175,6 +223,16 @@ async function dispatch(ctx: Context, name: string, payload: unknown): Promise<v
   await (ctx as unknown as { parallel(name: string, ...args: unknown[]): Promise<void> }).parallel(name, payload);
 }
 
+/** Dispatch one event serially, awaiting each listener in registration order (the real Host's dispatch). */
+async function dispatchSerial(ctx: Context, name: string, payload: unknown): Promise<void> {
+  await (ctx as unknown as { serial(name: string, ...args: unknown[]): Promise<void> }).serial(name, payload);
+}
+
+/** Compose one waterfall event through its listeners and the final `next` callback. */
+async function waterfall(ctx: Context, name: string, ...args: unknown[]): Promise<unknown> {
+  return (ctx as unknown as { waterfall(name: string, ...args: unknown[]): unknown }).waterfall(name, ...args);
+}
+
 /** Emit one event synchronously. */
 function emit(ctx: Context, name: string, ...args: unknown[]): void {
   (ctx as unknown as { emit(name: string, ...args: unknown[]): void }).emit(name, ...args);
@@ -186,12 +244,19 @@ function emit(ctx: Context, name: string, ...args: unknown[]): void {
  * @param cwd - Session working directory.
  * @param jjConfig - path to a hermetic `jj` config (identity for snapshot commits).
  * @param config - entry configuration.
+ * @param hooks - optional subprocess latency hooks used by the race/ordering tests.
  * @returns the harness driving the Session and reading the Host service.
  */
-async function mountHost(cwd: string, jjConfig: string, config: ChangesConfig = {}): Promise<HostHarness> {
+async function mountHost(
+  cwd: string,
+  jjConfig: string,
+  config: ChangesConfig = {},
+  hooks: FakeSubprocessHooks = {},
+): Promise<HostHarness> {
   const entry = await import('../src/changes.ts');
   const ctx = new Context();
-  provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: jjConfig }));
+  const spawns: string[] = [];
+  provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: jjConfig }, { ...hooks, spawns }));
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
   provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
   await entry.apply(ctx, config);
@@ -220,6 +285,9 @@ async function mountHost(cwd: string, jjConfig: string, config: ChangesConfig = 
     get changeEvents() {
       return events.filter((event) => event.type === 'workspace/changes');
     },
+    get spawns() {
+      return spawns;
+    },
     summary(changeSeq: number) {
       return service?.summary(session.id, changeSeq);
     },
@@ -239,6 +307,53 @@ function turnOf(data: unknown): number | undefined {
 /** Wait for the recorder's queued snapshots and diffs to settle. */
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 300));
+}
+
+/** Let Cordis fibers start/refuse (plugin activation and inject gating). */
+async function tick(milliseconds = 50): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Simulate one Host file-tool mutation through the seams the built-in recorder
+ * captures: `tools/pre-execute` registers the recorder for the execution, then
+ * `fs/write-intent` captures the pre-image right before the write happens.
+ *
+ * @param harness - mounted Host harness.
+ * @param path - absolute path the file tool targets.
+ * @param mutate - the filesystem write the tool performs after the intent.
+ */
+async function simulateFileToolCapture(harness: HostHarness, path: string, mutate: () => void): Promise<void> {
+  const exec = { agent: { session: harness.session }, callId: `call-${basename(path)}` };
+  await waterfall(harness.ctx, 'tools/pre-execute', exec, async () => ({ kind: 'allow' }));
+  await waterfall(harness.ctx, 'fs/write-intent', path, exec, async () => ({ kind: 'write' }));
+  mutate();
+}
+
+/**
+ * Build a colocated fixture with one tracked file and one gitignored file.
+ *
+ * @param t - test context owning the temporary root.
+ * @param label - temporary-root label.
+ * @returns the repository path and its fixture.
+ */
+async function makeMergeFixture(
+  t: Parameters<typeof makeFixture>[0],
+  label: string,
+): Promise<{ readonly fixture: ReturnType<typeof makeFixture>; readonly repo: string }> {
+  const fixture = makeFixture(t, label);
+  const repo = await initJjColocated(fixture.run, fixture.path('repo'));
+  writeFileSync(join(repo, '.gitignore'), 'ignored.txt\n');
+  writeFileSync(join(repo, 'tracked.txt'), 'one\n');
+  writeFileSync(join(repo, 'ignored.txt'), 'old\n');
+  await mustRun(fixture.run, ['jj', 'describe', '-m', 'init'], repo);
+  await mustRun(fixture.run, ['jj', 'new'], repo);
+  return { fixture, repo };
+}
+
+/** The paths a served summary lists. */
+function summaryPaths(summary: WorkspaceSummaryLike | undefined): string[] {
+  return summary?.files.map((file) => file.path) ?? [];
 }
 
 /**
@@ -380,6 +495,106 @@ test('colocated workspace: jj keeps the oversized marker even though Git sees th
   assert.deepEqual(await harness.diff(seq, 0), { kind: 'oversized', path: 'big.txt', display: 'big.txt' });
 });
 
+test('colocated workspace: the Host last event (serial dispatch) carries the merged view', async (t) => {
+  const { fixture, repo } = await makeMergeFixture(t, 'dsh-jj-changes-entry-merge-serial');
+  const harness = await mountHost(repo, writeJjConfig(fixture.root));
+
+  harness.send('turn/start', { turn: 1 });
+  await settle();
+  // A file-tool write of a gitignored file reaches the card only through the
+  // built-in recorder's capture path; the tracked edit is visible to both.
+  await simulateFileToolCapture(harness, join(repo, 'ignored.txt'), () => {
+    appendFileSync(join(repo, 'ignored.txt'), 'ignored\n');
+  });
+  appendFileSync(join(repo, 'tracked.txt'), 'two\n');
+  harness.send('tool/result', { turn: 1, step: 1 });
+  // The real Host dispatches `agent/turn-stopping` with `dispatch.serial`:
+  // listeners run in registration order, so the built-in recorder appends first
+  // and the jj recorder appends last. The card asks for that last sequence.
+  await dispatchSerial(harness.ctx, 'agent/turn-stopping', { agent: { session: harness.session }, turn: 1 });
+  harness.send('turn/end', { turn: 1 });
+  await settle();
+
+  const events = harness.changeEvents.filter((event) => event.turn === 1);
+  assert.equal(events.length, 2, 'both recorders announce the turn');
+  const last = events.at(-1);
+  assert.ok(last !== undefined);
+  const summary = harness.summary(last.seq);
+  assert.ok(summary !== undefined, 'the last event sequence must resolve to a merged summary');
+  assert.deepEqual(
+    summaryPaths(summary).sort(),
+    ['ignored.txt', 'tracked.txt'],
+    'the built-in-only capture and the jj change are both listed on the last sequence',
+  );
+  assert.deepEqual(harness.summary(events[0]!.seq), summary, 'either sequence serves the same merged view');
+  assert.deepEqual(
+    summary.files.find((file) => file.path === 'ignored.txt'),
+    { path: 'ignored.txt', display: 'ignored.txt', added: 1, deleted: 0 },
+  );
+  assert.deepEqual(
+    summary.files.find((file) => file.path === 'tracked.txt'),
+    { path: 'tracked.txt', display: 'tracked.txt', added: 1, deleted: 0 },
+    'jj data wins for a file both recorders saw',
+  );
+  const ignoredIndex = summary.files.findIndex((file) => file.path === 'ignored.txt');
+  const diff = await harness.diff(last.seq, ignoredIndex);
+  assert.equal(diff?.kind, 'text', 'the merged comparison routes the built-in-only file to the built-in recorder');
+});
+
+test('colocated workspace: the merged view is served when the built-in recorder appends last', async (t) => {
+  const { fixture, repo } = await makeMergeFixture(t, 'dsh-jj-changes-entry-merge-parallel');
+  // Delay every Git spawn: the built-in recorder's Git snapshots take far longer
+  // than the jj commands, so under a concurrent Host dispatch the jj recorder
+  // appends first and the built-in recorder appends last.
+  const harness = await mountHost(repo, writeJjConfig(fixture.root), {}, { delayGitMs: 200 });
+
+  harness.send('turn/start', { turn: 1 });
+  await settle();
+  await simulateFileToolCapture(harness, join(repo, 'ignored.txt'), () => {
+    appendFileSync(join(repo, 'ignored.txt'), 'ignored\n');
+  });
+  appendFileSync(join(repo, 'tracked.txt'), 'two\n');
+  harness.send('tool/result', { turn: 1, step: 1 });
+  await dispatch(harness.ctx, 'agent/turn-stopping', { agent: { session: harness.session }, turn: 1 });
+  harness.send('turn/end', { turn: 1 });
+  await settle();
+
+  const events = harness.changeEvents.filter((event) => event.turn === 1);
+  assert.equal(events.length, 2, 'both recorders announce the turn');
+  const last = events.at(-1);
+  assert.ok(last !== undefined);
+  const summary = harness.summary(last.seq);
+  assert.ok(summary !== undefined);
+  assert.deepEqual(summaryPaths(summary).sort(), ['ignored.txt', 'tracked.txt']);
+  assert.deepEqual(harness.summary(events[0]!.seq), summary, 'the earlier sequence serves the same merged view too');
+});
+
+test('jj-native workspace: the first tool write waits for the turn-start snapshot', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-entry-snapshot-barrier');
+  const repo = await initJjNative(fx.run, fx.path('repo'));
+  writeFileSync(join(repo, 'keep.txt'), 'one\n');
+  await mustRun(fx.run, ['jj', 'describe', '-m', 'init'], repo);
+  await mustRun(fx.run, ['jj', 'new'], repo);
+  // The turn-start snapshot takes 400 ms (a cold cache / large workspace). A tool
+  // write that overtook it would be folded into the baseline and disappear.
+  const harness = await mountHost(repo, writeJjConfig(fx.root), {}, { delayFirstSnapshotMs: 400 });
+
+  harness.send('turn/start', { turn: 1 });
+  const exec = { agent: { session: harness.session }, callId: 'call-1' };
+  await waterfall(harness.ctx, 'tools/pre-execute', exec, async () => ({ kind: 'allow' }));
+  writeFileSync(join(repo, 'raced.txt'), 'hello\n');
+  harness.send('tool/result', { turn: 1, step: 1 });
+  await dispatchSerial(harness.ctx, 'agent/turn-stopping', { agent: { session: harness.session }, turn: 1 });
+  harness.send('turn/end', { turn: 1 });
+  await settle();
+
+  const events = harness.changeEvents.filter((event) => event.turn === 1);
+  assert.equal(events.length, 1, 'the write lands after the baseline, so the turn has a card');
+  const summary = harness.summary(events[0]!.seq);
+  assert.deepEqual(summaryPaths(summary), ['raced.txt'], 'the first tool write is not folded into the baseline');
+  assert.deepEqual(summary?.files[0], { path: 'raced.txt', display: 'raced.txt', added: 1, deleted: 0 });
+});
+
 test('plain Git repository: the built-in recorder still serves the summary', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-changes-entry-git');
   const repo = await initGit(fx.run, fx.path('repo'));
@@ -399,8 +614,8 @@ test('plain Git repository: the built-in recorder still serves the summary', asy
   assert.equal(summary.added, 1);
 });
 
-test('workspaceChanges: off leaves the service unprovided', async (t) => {
-  const fx = makeTempRoot('dsh-jj-changes-entry-off');
+test('workspaceChanges: off keeps an inject: [workspaceChanges] row active', async (t) => {
+  const fx = makeTempRoot('dsh-jj-changes-entry-off-inject');
   t.after(() => fx.cleanup());
   const entry = await import('../src/changes.ts');
   const ctx = new Context();
@@ -408,7 +623,86 @@ test('workspaceChanges: off leaves the service unprovided', async (t) => {
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
   provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
   await entry.apply(ctx, { workspaceChanges: 'off' });
-  assert.equal(ctx.get('workspaceChanges', false), undefined, 'mode off must not provide the service');
+
+  // The Host's deliverables row declares `inject: ['workspaceChanges']`; Cordis
+  // keeps such a plugin pending until the service exists. The off-mode empty
+  // service must satisfy that inject (present/open routes + file-reference prompt).
+  let applied = 0;
+  (ctx as unknown as { plugin(plugin: unknown): unknown }).plugin({
+    name: 'deliverables-inject-probe',
+    inject: ['workspaceChanges'],
+    apply: () => {
+      applied += 1;
+    },
+  });
+  await tick();
+  assert.equal(applied, 1, 'the inject-satisfied deliverables row activates with the off-mode service');
+
+  // Negative control: the same row stays pending without any provider, which is
+  // exactly the defect the read-only service avoids.
+  const bare = new Context();
+  let bareApplied = 0;
+  (bare as unknown as { plugin(plugin: unknown): unknown }).plugin({
+    name: 'deliverables-inject-probe',
+    inject: ['workspaceChanges'],
+    apply: () => {
+      bareApplied += 1;
+    },
+  });
+  await tick();
+  assert.equal(bareApplied, 0, 'without a provider the deliverables row would stay pending');
+  (ctx as unknown as { scope?: { dispose?: () => void } }).scope?.dispose?.();
+});
+
+test('workspaceChanges: off serves an empty service without recording', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-changes-entry-off');
+  // A real jj-native workspace: if the off branch had registered a recorder or a
+  // Session listener, `turn/start` would start a baseline snapshot command.
+  const repo = await initJjNative(fx.run, fx.path('repo'));
+  writeFileSync(join(repo, 'keep.txt'), 'one\n');
+  await mustRun(fx.run, ['jj', 'describe', '-m', 'init'], repo);
+  await mustRun(fx.run, ['jj', 'new'], repo);
+  const harness = await mountHost(repo, writeJjConfig(fx.root), { workspaceChanges: 'off' });
+  const service = harness.ctx.get('workspaceChanges', false) as WorkspaceChangesLike | undefined;
+  assert.ok(service !== undefined, 'mode off still provides the read-only service the deliverables row injects');
+  assert.equal(service.summary(harness.session.id, 1), undefined);
+  assert.equal(await service.diff(harness.session.id, 1, 0, new AbortController().signal), undefined);
+
+  harness.send('turn/start', { turn: 1 });
+  await tick();
+  writeFileSync(join(repo, 'created.txt'), 'hello\n');
+  harness.send('tool/result', { turn: 1, step: 1 });
+  await dispatchSerial(harness.ctx, 'agent/turn-stopping', { agent: { session: harness.session }, turn: 1 });
+  harness.send('turn/end', { turn: 1 });
+  await tick();
+  assert.deepEqual(harness.changeEvents, [], 'off must not append workspace/changes events');
+  assert.deepEqual(harness.spawns, [], 'off must not create a recorder/reader or spawn any jj or git process');
+});
+
+test('workspaceChanges: off leaves an existing provider in place', async (t) => {
+  const fx = makeTempRoot('dsh-jj-changes-entry-off-existing');
+  t.after(() => fx.cleanup());
+  const entry = await import('../src/changes.ts');
+  const ctx = new Context();
+  /** Warnings this row reported (the default logger buffer drops warn-level records). */
+  const logs: unknown[] = [];
+  (ctx as unknown as { logger: { exporter(exporter: unknown): void } }).logger.exporter({
+    levels: { default: 3 },
+    export: (message: unknown) => logs.push(message),
+  });
+  provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
+  provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
+  provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
+  const existing = { summary: () => undefined, diff: async () => undefined };
+  provide(ctx, 'workspaceChanges', existing);
+  await entry.apply(ctx, { workspaceChanges: 'off' });
+  assert.equal(
+    ctx.get('workspaceChanges', false),
+    existing,
+    'the other provider keeps ownership; no duplicate provide',
+  );
+  assert.match(JSON.stringify(logs), /another plugin already provides/, 'the row warns instead of replacing it');
+  (ctx as unknown as { scope?: { dispose?: () => void } }).scope?.dispose?.();
 });
 
 test('workspaceChanges: builtin provides the unmodified built-in service', async (t) => {

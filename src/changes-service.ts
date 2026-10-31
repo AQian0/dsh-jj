@@ -10,12 +10,18 @@
  * For every other Session it is a transparent facade over the built-in service.
  *
  * Two event streams reach the Host: `workspace/changes` events appended by the
- * jj recorder and events appended by the built-in recorder. A summary request
- * carries only the announcing sequence, so the bridge uses
- * {@link BridgeOptions.observedTurn} to map either stream's sequence back to its
- * turn and then looks up both recorders for that turn:
+ * jj recorder and events appended by the built-in recorder. The Host's card uses
+ * the LAST event of a turn, and on a serial Host dispatch the jj recorder is
+ * registered after the built-in one, so that last sequence is normally a jj
+ * sequence even in a colocated workspace. A request must therefore merge both
+ * recorders regardless of which stream announced the requested sequence:
  *
- * - the jj recorder's last summary for the turn (it owns the durable paths);
+ * - when the sequence is one of the jj recorder's own events, its turn comes
+ *   from that record's summary; otherwise the bridge maps the sequence back to
+ *   its turn through {@link BridgeOptions.observedTurn};
+ * - the jj recorder's summary for the turn (it owns the durable paths; the
+ *   requested jj sequence's own record is used when there is one, so the served
+ *   view is stable for that sequence even if the turn recorded more than once);
  * - the newest built-in summary for the turn, taken from the candidate sequences
  *   {@link BridgeOptions.upstreamSeqs} reports (the built-in recorder replaces a
  *   turn's earlier event with a later one, so a stale sequence must not win).
@@ -31,6 +37,10 @@
  * The bridge is recomputed on every call (no mutable cache): a late-arriving
  * event may change which built-in sequence is newest, and the summary and the
  * comparison must always agree on the merged order for the same inputs.
+ *
+ * The module also owns the read-only placeholder the entry serves when
+ * `workspaceChanges` is `off` ({@link createEmptyChangesService}): it satisfies
+ * the deliverables row's `inject` without announcing any change data.
  *
  * Pure module: no I/O and no `@deepseek-ai/*` runtime import.
  *
@@ -77,7 +87,7 @@ export interface BridgeOptions {
   readonly upstream: ChangesServiceLike | undefined;
   /** Maps any `workspace/changes` sequence of a Session to its turn, for either recorder's events. */
   readonly observedTurn: (sessionId: string, seq: number) => number | undefined;
-  /** Candidate built-in sequences announced for one turn, oldest first. */
+  /** Candidate `workspace/changes` sequences announced for one turn, oldest first; either recorder's. */
   readonly upstreamSeqs: (sessionId: string, turn: number) => readonly number[];
   /** Maximum files carried by one merged summary; `total` still reports the complete count. */
   readonly maxFiles: number;
@@ -112,6 +122,18 @@ interface MergeView {
   readonly upstreamOnlyDeleted: number;
 }
 
+/** The two sides one sequence request merges, plus the jj sequence it named (if any). */
+interface ResolvedView {
+  /** The requested sequence, when it is one of the jj recorder's own events. */
+  readonly ownSeq: number | undefined;
+  /** The turn the request belongs to. */
+  readonly turn: number;
+  /** The jj summary to merge, when this recorder recorded the turn. */
+  readonly own: WorkspaceChangesSummary | undefined;
+  /** The newest built-in summary announced for the same turn. */
+  readonly base: UpstreamSummary | undefined;
+}
+
 /**
  * Create the merged `workspaceChanges` service the Host provides in the parent
  * scope.
@@ -131,17 +153,35 @@ export function createChangesService(options: BridgeOptions): ChangesServiceLike
   };
 }
 
+/**
+ * Create the read-only placeholder service served by `workspaceChanges: 'off'`.
+ *
+ * The Host's deliverables row injects `workspaceChanges`, and Cordis keeps an
+ * inject-unsatisfied plugin pending. Leaving the service unprovided for `off`
+ * would therefore also remove the present/open routes and the file-reference
+ * prompt, although the user only asked to turn the changed-files card off. This
+ * service satisfies the inject and never announces data: with no
+ * `workspace/changes` event appended, no card is rendered, while every lookup
+ * resolves to `undefined`.
+ *
+ * @returns a service whose summary and comparison are always undefined.
+ */
+export function createEmptyChangesService(): ChangesServiceLike {
+  return {
+    summary: () => undefined,
+    async diff() {
+      return undefined;
+    },
+  };
+}
+
 /** Resolve one summary request across both recorders. */
 function summaryOf(options: BridgeOptions, sessionId: string, seq: number): WorkspaceChangesSummary | undefined {
-  const own = options.recorder.summary(sessionId, seq);
-  if (own !== undefined) return own;
-  const turn = options.observedTurn(sessionId, seq);
-  if (turn === undefined) return options.upstream?.summary(sessionId, seq);
-  const ownTurn = options.recorder.summaryForTurn(sessionId, turn);
-  const base = newestUpstreamSummary(options, sessionId, turn);
-  if (ownTurn === undefined) return base?.summary;
-  if (base === undefined) return ownTurn;
-  return mergeSummary(ownTurn, base, options.maxFiles);
+  const view = resolveView(options, sessionId, seq);
+  if (view === undefined) return options.upstream?.summary(sessionId, seq);
+  if (view.own === undefined) return view.base?.summary;
+  if (view.base === undefined) return view.own;
+  return mergeSummary(view.own, view.base, options.maxFiles);
 }
 
 /** Resolve one comparison request across both recorders. */
@@ -152,23 +192,59 @@ async function diffOf(
   index: number,
   signal: AbortSignal,
 ): Promise<WorkspaceFileDiff | undefined> {
-  const own = await options.recorder.diff(sessionId, seq, index, signal);
-  if (own !== undefined) return own;
-  const turn = options.observedTurn(sessionId, seq);
-  if (turn === undefined) return options.upstream?.diff(sessionId, seq, index, signal);
-  const ownTurn = options.recorder.summaryForTurn(sessionId, turn);
-  const base = newestUpstreamSummary(options, sessionId, turn);
-  const entry = mergeView(ownTurn, base).all[index];
+  const view = resolveView(options, sessionId, seq);
+  if (view === undefined) return options.upstream?.diff(sessionId, seq, index, signal);
+  const entry = mergeView(view.own, view.base).all[index];
   if (entry !== undefined) {
     const resolved =
       entry.entry.source === 'own'
-        ? await options.recorder.diffForTurn(sessionId, turn, entry.entry.index, signal)
+        ? view.ownSeq === undefined
+          ? await options.recorder.diffForTurn(sessionId, view.turn, entry.entry.index, signal)
+          : await options.recorder.diff(sessionId, view.ownSeq, entry.entry.index, signal)
         : await options.upstream?.diff(sessionId, entry.entry.seq, entry.entry.index, signal);
     if (resolved !== undefined) return resolved;
   }
   // An out-of-range or unresolvable index falls back to the announcing sequence,
   // which lets the built-in recorder answer for events this bridge cannot map.
   return options.upstream?.diff(sessionId, seq, index, signal);
+}
+
+/**
+ * Resolve both sides of the merged view for one requested sequence.
+ *
+ * A sequence this recorder announced maps to its turn through the recorded
+ * summary itself, so the merge does not depend on the Host having observed the
+ * event yet. Every other sequence maps through
+ * {@link BridgeOptions.observedTurn}. A sequence that is neither one of this
+ * recorder's events nor observed by the Host yields `undefined`, which tells the
+ * callers to delegate to the built-in service verbatim.
+ *
+ * The summary and the comparison resolve through this one function so they
+ * always build the same merged file order for the same sequence.
+ *
+ * @param options - bridge options carrying both sides and the lookups.
+ * @param sessionId - the Session that appended the event.
+ * @param seq - the requested `workspace/changes` sequence.
+ * @returns the resolved view, or undefined for a sequence the bridge cannot map.
+ */
+function resolveView(options: BridgeOptions, sessionId: string, seq: number): ResolvedView | undefined {
+  const ownSeqSummary = options.recorder.summary(sessionId, seq);
+  if (ownSeqSummary !== undefined) {
+    return {
+      ownSeq: seq,
+      turn: ownSeqSummary.turn,
+      own: ownSeqSummary,
+      base: newestUpstreamSummary(options, sessionId, ownSeqSummary.turn),
+    };
+  }
+  const turn = options.observedTurn(sessionId, seq);
+  if (turn === undefined) return undefined;
+  return {
+    ownSeq: undefined,
+    turn,
+    own: options.recorder.summaryForTurn(sessionId, turn),
+    base: newestUpstreamSummary(options, sessionId, turn),
+  };
 }
 
 /**
