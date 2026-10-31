@@ -8,7 +8,7 @@
  * @module dsh-jj/tool-entry
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { resolveConfig, warnMisplacedConfig, type JjPluginConfig } from './config.ts';
+import { assertServiceableConfig, resolveConfig, warnMisplacedConfig, type JjPluginConfig } from './config.ts';
 import { jjToolDefinitions } from './tool-definitions.ts';
 import type { JjToolService, JjToolsHost } from './tool-shared.ts';
 
@@ -114,6 +114,10 @@ export const inject = ['tools', 'jj', 'workingDirectory'] as const;
  * @param config - partial plugin configuration.
  */
 export function apply(ctx: Context, config: JjPluginConfig = {}): void {
+  // Validate before installing anything: an invalid profile config must fail at boot,
+  // like the runtime/guard entries, instead of surfacing at tool-call time (for example
+  // `maxLogLimit: 0` silently clamping jj_log to one entry).
+  assertServiceableConfig(resolveConfig(config));
   // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
   // Warn (never fail) so a key placed on the wrong bundle row is visible.
   warnMisplacedConfig(hostLogger(ctx), config, 'tools');

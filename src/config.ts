@@ -74,6 +74,44 @@ export type ResolvedJjConfig = Schemastery.TypeT<typeof Config>;
 /** Schema defaults: the single source of truth for every resolved default value. */
 const SCHEMA_DEFAULTS: ResolvedJjConfig = Config({});
 
+/**
+ * Structural equality for the scalar/array configuration values this schema allows.
+ *
+ * Values are strings, numbers, booleans, and arrays of strings, so a shallow
+ * recursive comparison is enough and no dependency is needed. Plain `Object.is`
+ * covers scalars; arrays are compared element by element.
+ */
+function sameConfigValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((value, index) => sameConfigValue(value, right[index]));
+  }
+  return false;
+}
+
+/**
+ * Whether the caller explicitly configured `key`.
+ *
+ * Cordis validates every row's config with {@link Config} before `apply` runs
+ * (`ctx.plugin(...)` → `Fiber` → schemastery standard-schema validation), so
+ * `apply` receives the schema-normalized config with every default already
+ * filled in. An `undefined` check therefore cannot tell "explicitly configured"
+ * from "schema default": a value equal to the schema default is treated as not
+ * configured.
+ *
+ * Known limitation: a user who explicitly writes the default value (for example
+ * `commitStyle: 'auto'` on the wrong row) gets no misplacement warning. The
+ * effective value is the intended one either way, so only a diagnostic is lost.
+ *
+ * @param config - raw (partial) plugin config for one entry row.
+ * @param key - configuration key from {@link CONFIG_OWNERSHIP}.
+ */
+function isExplicitlyConfigured(config: JjPluginConfig, key: keyof ResolvedJjConfig): boolean {
+  const value = config[key];
+  if (value === undefined) return false;
+  return !sameConfigValue(value, SCHEMA_DEFAULTS[key]);
+}
+
 /** Hard upper bound accepted for timer-valued keys (mirrors DSH MAX_TIMER_DELAY_MS). */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -123,10 +161,37 @@ export const CONFIG_OWNERSHIP: Readonly<Record<keyof ResolvedJjConfig, ConfigOwn
 });
 
 /**
+ * Bundle rows that also read a key whose documented primary owner is another row.
+ *
+ * {@link CONFIG_OWNERSHIP} keeps exactly one primary row per key (that is what the
+ * README documents and what the "belongs to …" warning names). Keys consumed by more
+ * than one row list the additional rows here so putting the key on any reading row is
+ * not reported as a mistake. `defaultCwd` is read by the tools row (`cwdFor`) and by
+ * the guard row (its agent-less cwd fallback), so it is valid on either row.
+ */
+export const CONFIG_SHARED_OWNERSHIP: Readonly<Partial<Record<keyof ResolvedJjConfig, readonly ConfigOwner[]>>> =
+  Object.freeze({
+    defaultCwd: Object.freeze(['tools', 'guard'] as const),
+  });
+
+/**
+ * Every bundle row that reads one configuration key, primary owner first.
+ *
+ * @param key - configuration key from {@link CONFIG_OWNERSHIP}.
+ * @returns the reading rows (never empty; the primary owner is always first).
+ */
+export function configKeyOwners(key: keyof ResolvedJjConfig): readonly ConfigOwner[] {
+  return CONFIG_SHARED_OWNERSHIP[key] ?? [CONFIG_OWNERSHIP[key]];
+}
+
+/**
  * Keys a row was configured with but does not read.
  *
- * Only explicitly supplied keys count: an `undefined` value is never a configuration
- * mistake. The result is sorted so warnings and tests are deterministic.
+ * "Configured" means explicitly supplied by the user, not merely present after
+ * Cordis applied the schema defaults: see {@link isExplicitlyConfigured} for the
+ * default-value heuristic and its one limitation. Keys read by more than one row
+ * are matched through {@link configKeyOwners}. The result is sorted so warnings
+ * and tests are deterministic.
  *
  * @param config - raw (partial) plugin config for one entry row.
  * @param owner - the row whose `apply` is validating the config.
@@ -135,37 +200,89 @@ export const CONFIG_OWNERSHIP: Readonly<Record<keyof ResolvedJjConfig, ConfigOwn
 export function misplacedConfigKeys(config: JjPluginConfig, owner: ConfigOwner): (keyof ResolvedJjConfig)[] {
   const misplaced: (keyof ResolvedJjConfig)[] = [];
   for (const key of Object.keys(CONFIG_OWNERSHIP) as (keyof ResolvedJjConfig)[]) {
-    if (config[key] === undefined) continue;
-    if (CONFIG_OWNERSHIP[key] !== owner) misplaced.push(key);
+    if (!isExplicitlyConfigured(config, key)) continue;
+    if (!configKeyOwners(key).includes(owner)) misplaced.push(key);
   }
   return misplaced.sort();
 }
 
 /**
- * Warn once per key that belongs to another bundle row.
+ * Keys present in a row config that dsh-jj does not define.
+ *
+ * schemastery keeps unknown keys in the validated config (it does not close the
+ * object) and {@link resolveConfig} then ignores them, so a misspelled key would
+ * otherwise be dropped without feedback. Sorted for deterministic warnings.
+ *
+ * @param config - raw (partial) plugin config for one entry row.
+ * @returns unknown keys with a non-`undefined` value, sorted.
+ */
+export function unknownConfigKeys(config: JjPluginConfig): string[] {
+  const known = new Set<string>(Object.keys(CONFIG_OWNERSHIP));
+  const record = config as Record<string, unknown>;
+  return Object.keys(record)
+    .filter((key) => !known.has(key) && record[key] !== undefined)
+    .sort();
+}
+
+/**
+ * Extract the `warn` method from a host logger.
+ *
+ * Cordis's `ctx.logger` is a **callable** object (`typeof logger === 'function'`,
+ * created by `createCallable`), while tests and embedders pass plain `{ warn }`
+ * objects. Accept both shapes; anything without a callable `warn` is ignored.
+ *
+ * @param logger - host logger of either shape.
+ * @returns a bound one-argument warning sink, or `undefined`.
+ */
+function loggerWarn(logger: unknown): ((message: string) => void) | undefined {
+  if (logger === null || (typeof logger !== 'object' && typeof logger !== 'function')) return undefined;
+  const warn = (logger as { warn?: unknown }).warn;
+  if (typeof warn !== 'function') return undefined;
+  return (message: string) => (warn as (message: string) => void).call(logger, message);
+}
+
+/**
+ * Emit one warning through an already-extracted sink.
+ *
+ * Observability must never block startup: a throwing logger is contained.
+ */
+function emitWarning(warn: (message: string) => void, message: string): void {
+  try {
+    warn(message);
+  } catch {
+    // A failing logger must not break plugin startup.
+  }
+}
+
+/** Model-facing row list for a warning ("the jj-guard row" / "the jj-tools / jj-guard rows"). */
+function ownerRowsText(owners: readonly ConfigOwner[]): string {
+  const rows = owners.map((owner) => CONFIG_OWNER_ENTRY[owner]);
+  return rows.length === 1 ? `the ${rows[0]} row` : `the ${rows.join(' / ')} rows`;
+}
+
+/**
+ * Warn once per key that belongs to another bundle row, and once per unknown key.
  *
  * Observability must never block startup: a missing, malformed, or throwing logger is
- * ignored. The text names both the key and the row that would read it.
+ * ignored, and a callable Cordis logger is supported. The text names both the key and
+ * the row(s) that would read it.
  *
- * @param logger - host logger (usually `{ warn }`); anything else is a no-op.
+ * @param logger - host logger (plain `{ warn }` object or callable `ctx.logger`); anything else is a no-op.
  * @param config - raw (partial) plugin config for one entry row.
  * @param owner - the row whose `apply` is validating the config.
  */
 export function warnMisplacedConfig(logger: unknown, config: JjPluginConfig, owner: ConfigOwner): void {
-  const misplaced = misplacedConfigKeys(config, owner);
-  if (misplaced.length === 0) return;
-  const record = typeof logger === 'object' && logger !== null ? (logger as Record<string, unknown>) : undefined;
-  const warn = record?.['warn'];
-  if (typeof warn !== 'function') return;
-  for (const key of misplaced) {
-    const message =
-      `dsh-jj: \`${key}\` belongs to the ${CONFIG_OWNER_ENTRY[CONFIG_OWNERSHIP[key]]} row; ` +
-      `this row (${CONFIG_OWNER_ENTRY[owner]}) ignores it`;
-    try {
-      (warn as (message: string) => void).call(logger, message);
-    } catch {
-      // A failing logger must not break plugin startup.
-    }
+  const warn = loggerWarn(logger);
+  if (warn === undefined) return;
+  const self = CONFIG_OWNER_ENTRY[owner];
+  for (const key of misplacedConfigKeys(config, owner)) {
+    emitWarning(
+      warn,
+      `dsh-jj: \`${key}\` belongs to ${ownerRowsText(configKeyOwners(key))}; this row (${self}) ignores it`,
+    );
+  }
+  for (const key of unknownConfigKeys(config)) {
+    emitWarning(warn, `dsh-jj: \`${key}\` is not a known dsh-jj configuration key; this row (${self}) ignores it`);
   }
 }
 

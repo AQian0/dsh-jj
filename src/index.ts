@@ -211,47 +211,79 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
     }
     return sessions;
   };
-  const promptContext = resolved.preferJjContext
-    ? installJjPromptContext(
-        { get: typeof get === 'function' ? get.bind(ctx) : undefined },
-        {
-          peek: (cwd) => {
-            try {
-              const service = get?.call(ctx, 'jj') as
-                | {
-                    peek?: (cwd: string) =>
-                      | {
-                          kind: VcsKind;
-                          root: string;
-                          workspaceName?: string;
-                          jjRepoPath?: string;
-                        }
-                      | undefined;
-                  }
-                | undefined;
-              return service?.peek?.(cwd);
-            } catch {
-              return undefined;
-            }
-          },
-          // Commit-description handling (policy 2026-10-30): inherit the repository's
-          // description style by default, ask the user when history cannot decide, and
-          // prefer a stack of small commits; a configured preset/custom style wins.
-          commitGuidance: resolved.commitGuidance,
-          commitStyle: resolved.commitStyle,
-          commitStyleCustom: resolved.commitStyleCustom,
-          preferSplitCommits: resolved.preferSplitCommits,
-          // Multi-session handling (policy 2026-10-30): when a parallel top-level session
-          // shares the project, ask this session to isolate in its own jj workspace and to
-          // rebase the finished stack onto `rebaseTarget`.
-          multiSessionGuidance: resolved.multiSessionGuidance,
-          rebaseTarget: resolved.rebaseTarget,
-          liveRootSessions,
+  /**
+   * Install the session prompt context, reading `systemPrompt` through the host view.
+   *
+   * Split out of {@link apply} so it can run whenever the `systemPrompt` service
+   * becomes available instead of only during `apply`.
+   */
+  const installPromptContext = (): (() => void) => {
+    if (!resolved.preferJjContext) return () => {};
+    return installJjPromptContext(
+      { get: typeof get === 'function' ? get.bind(ctx) : undefined },
+      {
+        peek: (cwd) => {
+          try {
+            const service = get?.call(ctx, 'jj') as
+              | {
+                  peek?: (cwd: string) =>
+                    | {
+                        kind: VcsKind;
+                        root: string;
+                        workspaceName?: string;
+                        jjRepoPath?: string;
+                      }
+                    | undefined;
+                }
+              | undefined;
+            return service?.peek?.(cwd);
+          } catch {
+            return undefined;
+          }
         },
-      )
-    : () => {};
+        // Commit-description handling (policy 2026-10-30): inherit the repository's
+        // description style by default, ask the user when history cannot decide, and
+        // prefer a stack of small commits; a configured preset/custom style wins.
+        commitGuidance: resolved.commitGuidance,
+        commitStyle: resolved.commitStyle,
+        commitStyleCustom: resolved.commitStyleCustom,
+        preferSplitCommits: resolved.preferSplitCommits,
+        // Multi-session handling (policy 2026-10-30): when a parallel top-level session
+        // shares the project, ask this session to isolate in its own jj workspace and to
+        // rebase the finished stack onto `rebaseTarget`.
+        multiSessionGuidance: resolved.multiSessionGuidance,
+        rebaseTarget: resolved.rebaseTarget,
+        liveRootSessions,
+      },
+    );
+  };
+  // The service set of a profile is not ordered: the Cordis loader boots every bundle
+  // row concurrently and a row only waits for the services it declares in `inject`.
+  // Reading `systemPrompt` once during `apply` would silently skip the jj session
+  // context whenever the system-prompt provider finishes later. When the service is
+  // already available the context is registered synchronously (exactly as before);
+  // when it is not, a child fiber registered through `ctx.inject` installs it as soon
+  // as the service appears (and re-registers after a service reload), disposing with
+  // this row. `inject` is deliberately NOT added to the row's static inject list:
+  // profiles without `systemPrompt` must keep booting (the context is optional).
+  const systemPromptAvailable = (): boolean => {
+    const service = readService<{ context?: unknown }>('systemPrompt');
+    return typeof service?.context === 'function';
+  };
+  const inject = (ctx as unknown as { inject?: (names: readonly string[], callback: () => () => void) => unknown })
+    .inject;
   const effect = (ctx as unknown as { effect?: (body: () => () => void, label?: string) => unknown }).effect;
-  if (typeof effect === 'function') effect.call(ctx, () => () => promptContext(), 'dsh-jj: jj prompt context');
+  if (systemPromptAvailable() || typeof inject !== 'function') {
+    // Available now, or no child-fiber support (bare test doubles): the original eager
+    // registration. A missing systemPrompt makes `installJjPromptContext` a no-op.
+    if (typeof effect === 'function') effect.call(ctx, installPromptContext, 'dsh-jj: jj prompt context');
+  } else {
+    try {
+      inject.call(ctx, ['systemPrompt'], installPromptContext);
+    } catch {
+      if (typeof effect === 'function') effect.call(ctx, installPromptContext, 'dsh-jj: jj prompt context');
+    }
+  }
 }
 
 export {
