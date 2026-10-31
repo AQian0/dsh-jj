@@ -129,42 +129,44 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
   轮开始前就存在的超大文件不算本轮改动。
 - 记录是尽力而为的旁路：jj 快照/对比失败（工作副本 stale、`jj` 缺失、输出被截断）时该轮不写卡片数据，绝不会影响回合本身；此时会退回内置记录器的结果。
 
-相关配置写在 `jj-changes` 行（见下方配置表）。`workspaceChanges: builtin` 可以临时退回内置实现，`workspaceChanges: off` 则完全不提供该服务（卡片关闭）。
+相关配置写在 `jj-changes` 行（见下方配置表）。`workspaceChanges: builtin` 可以临时退回内置实现；`workspaceChanges: off` 关闭 jj 记录与卡片数据，但仍提供一个只读空服务（不产生卡片数据），以免连带禁用 Web 端 deliverables/present 相关路由与文件引用提示词。
 
 ## 配置
 
 所有配置键均可选，写在 profile 中对应 bundle 行的 `config` 里：
 
-| 键                                | 默认                              | 说明                                                                                                             |
-| --------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `jjCommand` / `gitCommand`        | `jj` / `git`                      | 可执行文件名；`gitCommand` 只用于探测和提示                                                                      |
-| `timeoutMs` / `graceMs`           | `30000` / `3000`                  | 子进程超时，以及超时后强制结束前的宽限时间                                                                       |
-| `maxOutputBytes`                  | `262144`                          | 单个输出流（stdout / stderr）的上限                                                                              |
-| `detectCacheTtlMs`                | `10000`                           | 仓库检测结果的缓存时长                                                                                           |
-| `guardMutatingGit`                | `warn`                            | jj 仓库内会改写状态的 git 命令：`warn`（放行并提示）/ `deny`（拒绝）/ `off`                                      |
-| `guardGitInJjNative`              | `warn`                            | jj-native 仓库内只读 git 的处置：`warn`（提示）/ `deny`（拒绝）/ `off`（不提示）                                 |
-| `guardJjRepositoryWide`           | `warn`                            | `jj undo` / `jj op restore` 等仓库级 jj 操作的处置                                                               |
-| `guardTools`                      | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名                                                                                  |
-| `guardCreateWorktree`             | `true`                            | 在**归属 jj** 的仓库里拒绝 `create_worktree`，引导用 `jj workspace add`（嵌套的独立 Git 仓库按最近仓库归属放行） |
-| `readOnlyGitNotice`               | `true`                            | colocated 仓库内只读 git 命令是否附「优先用 jj」提示                                                             |
-| `preferJjContext`                 | `true`                            | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引                                  |
-| `multiSessionGuidance`            | `auto`                            | 多会话并行指引：`auto` / `always` / `off`                                                                        |
-| `rebaseTarget`                    | `trunk()`                         | 收尾集成的首选目标 revset，不能为空；解析不到真实提交时回退到本地 `main` / `master`                              |
-| `commitGuidance`                  | `true`                            | 是否注入提交描述风格与拆分提交指引（需 `preferJjContext` 开启）                                                  |
-| `commitStyle`                     | `auto`                            | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom`                        |
-| `commitStyleCustom`               | `''`                              | `commitStyle: custom` 时的风格规则（该模式下必填）                                                               |
-| `preferSplitCommits`              | `true`                            | 是否注入「按独立步骤拆成小提交」的指引                                                                           |
-| `commitStyleSampleLimit`          | `30`                              | `jj_commit_style` 最多沿用的非空描述条数                                                                         |
-| `defaultLogLimit` / `maxLogLimit` | `30` / `200`                      | `jj_log` 的默认与最大返回条数                                                                                    |
-| `defaultCwd`                      | `''`                              | 工具没有 `workdir` 时的回退目录（空 = 进程 cwd）                                                                 |
+| 键                                | 默认                              | 说明                                                                                                                                 |
+| --------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `jjCommand` / `gitCommand`        | `jj` / `git`                      | 可执行文件名；`gitCommand` 只用于探测和提示                                                                                          |
+| `timeoutMs` / `graceMs`           | `30000` / `3000`                  | 子进程超时，以及超时后强制结束前的宽限时间                                                                                           |
+| `maxOutputBytes`                  | `262144`                          | 单个输出流（stdout / stderr）的上限                                                                                                  |
+| `detectCacheTtlMs`                | `10000`                           | 仓库检测结果的缓存时长                                                                                                               |
+| `guardMutatingGit`                | `warn`                            | jj 仓库内会改写状态的 git 命令：`warn`（放行并提示）/ `deny`（拒绝）/ `off`                                                          |
+| `guardGitInJjNative`              | `warn`                            | jj-native 仓库内只读 git 的处置：`warn`（提示）/ `deny`（拒绝）/ `off`（不提示）                                                     |
+| `guardJjRepositoryWide`           | `warn`                            | `jj undo` / `jj op restore` / `jj operation restore`（canonical 拼写）以及 `jj squash --into <非 @ revision>` 等仓库级 jj 操作的处置 |
+| `guardTools`                      | `bash` / `pwsh` / `terminal_send` | 参与上述守卫判定的 shell 工具名                                                                                                      |
+| `guardCreateWorktree`             | `true`                            | 在**归属 jj** 的仓库里拒绝 `create_worktree`，引导用 `jj workspace add`（嵌套的独立 Git 仓库按最近仓库归属放行）                     |
+| `readOnlyGitNotice`               | `true`                            | colocated 仓库内只读 git 命令是否附「优先用 jj」提示                                                                                 |
+| `preferJjContext`                 | `true`                            | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引                                                      |
+| `multiSessionGuidance`            | `auto`                            | 多会话并行指引：`auto` / `always` / `off`                                                                                            |
+| `rebaseTarget`                    | `trunk()`                         | 收尾集成的首选目标 revset，不能为空；解析不到真实提交时回退到本地 `main` / `master`                                                  |
+| `commitGuidance`                  | `true`                            | 是否注入提交描述风格与拆分提交指引（需 `preferJjContext` 开启）                                                                      |
+| `commitStyle`                     | `auto`                            | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom`                                            |
+| `commitStyleCustom`               | `''`                              | `commitStyle: custom` 时的风格规则（该模式下必填）                                                                                   |
+| `preferSplitCommits`              | `true`                            | 是否注入「按独立步骤拆成小提交」的指引                                                                                               |
+| `commitStyleSampleLimit`          | `30`                              | `jj_commit_style` 最多沿用的非空描述条数                                                                                             |
+| `defaultLogLimit` / `maxLogLimit` | `30` / `200`                      | `jj_log` 的默认与最大返回条数                                                                                                        |
+| `defaultCwd`                      | `''`                              | 无 agent 调用或无法解析会话目录时的回退目录（`jj-tools` 与 `jj-guard` 两行读取；空 = 进程 cwd）                                      |
 
 > `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `commitStyleSampleLimit` /
 > `multiSessionGuidance` / `rebaseTarget` / `preferJjContext` / `jjCommand` / `gitCommand` / `timeoutMs` / `graceMs` /
 > `maxOutputBytes` / `detectCacheTtlMs` 由 `jj-runtime` 行读取（超时、截断与命令名经 `ctx.jj` 作用于全部工具）；
-> `guard*` 开头的键和 `readOnlyGitNotice` 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` / `defaultCwd`
-> 由 `jj-tools` 行读取。
+> `guard*` 开头的键和 `readOnlyGitNotice` 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` 由 `jj-tools`
+> 行读取，`defaultCwd` 由 `jj-tools` 与 `jj-guard` 两行读取。
 >
-> 把某个键写到不读取它的入口行时，该行启动时只输出一条 `logger.warn` 提示并忽略它，不会阻断启动。
+> 把某个键写到不读取它的入口行时，该行启动时输出一条 `logger.warn` 提示并忽略它，不会阻断启动。判定「显式配置」的
+> 依据是该键的值与 schema 默认值不同，因此把键显式写成默认值（如 `commitStyle: auto`）不会告警；拼错/未知键也会
+> 在每行启动时 `warn`（仅提示，不阻断）。
 
 `jj-changes` 行有自己的一组配置（变更卡片）。这些键写在 `jj-changes` 行的 `config` 里；写到其它入口行不会被读取：
 
@@ -176,13 +178,13 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
     maxFiles: 500
 ```
 
-| 键                 | 默认               | 说明                                                                                              |
-| ------------------ | ------------------ | ------------------------------------------------------------------------------------------------- |
-| `workspaceChanges` | `auto`             | `auto`：jj 会话用 jj 数据、其余会话用内置记录并合并；`builtin`：只用内置实现；`off`：不提供该服务 |
-| `maxFiles`         | `500`              | 单轮摘要最多列出的文件数；`total` 仍是完整数量                                                    |
-| `maxFileBytes`     | `2097152`（2 MiB） | 单个文件 diff 的展示上限；超过时卡片列出文件与行数，但不提供逐行对比（显示「过大」）              |
-| `outputMaxBytes`   | `8388608`（8 MiB） | 单轮 `jj diff` 输出的保留上限；超过则该轮放弃 jj 记录（退回内置记录）                             |
-| `diffTimeoutMs`    | `100`              | 内置记录器的行对比超时（仅在合并视图里回退到内置数据时使用）                                      |
+| 键                 | 默认               | 说明                                                                                                                            |
+| ------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `workspaceChanges` | `auto`             | `auto`：jj 会话用 jj 数据、其余会话用内置记录并合并；`builtin`：只用内置实现；`off`：关闭 jj 记录与卡片数据（仍提供只读空服务） |
+| `maxFiles`         | `500`              | 单轮摘要最多列出的文件数；`total` 仍是完整数量                                                                                  |
+| `maxFileBytes`     | `2097152`（2 MiB） | 单个文件 diff 的展示上限；超过时卡片列出文件与行数，但不提供逐行对比（显示「过大」）                                            |
+| `outputMaxBytes`   | `8388608`（8 MiB） | 单轮 `jj diff` 输出的保留上限；超过则该轮放弃 jj 记录（退回内置记录）                                                           |
+| `diffTimeoutMs`    | `100`              | 内置记录器的行对比超时（仅在合并视图里回退到内置数据时使用）                                                                    |
 
 > `jj-changes` 依赖 DSH 的 `@deepseek-ai/dsh-workspace-changes`（deliverables bundle 的一部分）。headless profile 没有该 bundle 时该行自动降级（只输出一条 warning，不阻断启动）。
 
@@ -190,9 +192,9 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 
 - **只支持 jj 仓库**：jj 未安装或目录不是 jj workspace 时，`jj_*` 工具会报错并给出处理建议，不会退回 git。
 - **平台支持**：当前仅在 macOS / Linux 验证；测试依赖 POSIX 工具链（`/bin/sh`、`bash -c`、`chmod` 等）。Windows 未验证也不支持，`guardTools` 默认包含 `pwsh` 只是工具名匹配，不代表 Windows 可用。
-- **guard 是启发式**：只做静态命令分类。无法静态求值的 shell 形式（git alias、shell function、wrapper script、`eval`、`$VAR`、`find -exec` 等）按 fail-open 放行，并可能附一次性提示；heredoc 正文按数据忽略，因此写在脚本/文档内容里的命令不会被分析。
+- **guard 是启发式**：只做静态命令分类。嵌套/前导 shell wrapper（`bash -c 'bash -c …'`、`command` / `env` / `nohup` / `timeout` 等前缀、`bash -c --`、`env -S'…'`、`exec -a`）会被递归展开，可静态解析的 `cp` 类目录切换（`cd -P` / `cd --` / `pushd`、git 的累积 `-C`）也会跟随；仍无法静态求值的形态（外部 wrapper script、`bash <<< …` 这类 stdin 脚本、git alias、`eval`、`$VAR`、`find -exec` 等）按 fail-open 放行并附一次性提示；heredoc 正文按数据忽略，因此写在脚本/文档内容里的命令不会被分析。
 - **仓库归属按最近者判断**：jj workspace 内嵌套的独立 Git 仓库（最近的 `.git` 比 `.jj` 更深）按普通 Git 仓库处理——`git` 命令与 `create_worktree` 都不会被 jj guard 拦截；只有祖先 jj 的目录才受 guard 约束。
-- **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`。
+- **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`。`-R/--repository` 写在 subcommand 前后都按同一规则处理（jj 全局选项两种位置都接受）。
 - **描述风格靠推断**：风格判定只看描述首行，历史太少或风格混杂时会请求你选择；Angular 与 Conventional Commits 语法相同，自动识别统一报 `conventional`，需要严格规则时可配置 `commitStyle: angular`。
 - **多会话检测限于本进程**：只能看到同一 DSH 进程内的顶层会话，多个 `dsh` CLI 进程之间互不可见；跨进程并行请配置 `multiSessionGuidance: always`。
 - **子代理不受多会话指引覆盖**：子代理与父会话共享工作副本，父会话继续运行时两者可能同时写文件；需要严格隔离时，由父会话为子任务指定独立 workspace。
