@@ -9,6 +9,7 @@
 - **jj 原生工具**：提供 17 个 `jj_*` 工具，覆盖状态查看、提交、撤销、workspace、bookmark 与收尾集成。
 - **提交习惯**：默认沿用仓库最近的提交描述风格，风格不明确时先询问你；同时引导模型分步骤小步提交。
 - **会话上下文**：在 jj 仓库里自动提示模型优先用 jj；检测到并行会话时，引导模型先隔离 workspace，收尾时用 `jj_handoff` 完成集成。
+- **变更卡片（行数与文件列表）**：Web 端每轮回复末尾的「已编辑 N 个文件 +X −Y」默认改用 jj 的工作副本快照计算，jj-native 仓库与 linked workspace 也能正确显示；不在 jj workspace 的会话继续沿用内置的 Git 快照 / 文件工具捕获记录。
 - **项目根识别**：让 `agent-instructions` 把 `.jj` 也当作项目根（headless / CLI profile 生效）。
 - **不回退 git**：jj 不可用或目录不是 jj 仓库时明确报错，不会静默改用 git。
 
@@ -26,7 +27,7 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 **从本地目录安装**：需要 Node.js 24.11+ 与 pnpm 12.16.1。先在仓库根目录执行 `pnpm install`（首次需要网络）安装构建工具链，再执行 `pnpm run build` 生成 `lib/`（构建产物，不入库），然后把本仓库的绝对路径作为 spec 安装。Web GUI 在「设置 → 插件管理」中操作，Agent 侧用 `plugin_manager` 的 `install_bundle`。
 
-安装后会自动启用 `jj-runtime`、`jj-tools`、`jj-guard` 三个入口，并给 `agent-instructions` 加上 `.jj` 项目根标记（headless / CLI profile 生效；Web profile 见「已知限制」）；可以在插件管理页面或 `list_plugins` 中确认。
+安装后会自动启用 `jj-runtime`、`jj-tools`、`jj-guard`、`jj-changes` 四个入口，并把 Web app 内置的、只认 Git 的 `workspace-changes` 行禁用（由 `jj-changes` 接管 `workspaceChanges` 服务，见「变更卡片」）；同时给 `agent-instructions` 加上 `.jj` 项目根标记（headless / CLI profile 生效；Web profile 见「已知限制」）。可以在插件管理页面或 `list_plugins` 中确认。
 
 ## 使用
 
@@ -114,6 +115,19 @@ Use the jj equivalent instead:
 
 非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj，不会回退到 git。
 
+### 变更卡片（行数与文件列表）
+
+Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏还能打开逐文件 diff）由 DSH 的 `workspaceChanges` 服务提供。DSH 内置实现只从 Git 工作树快照统计，因此在 jj 下有三种典型失真：jj-native 仓库（没有根 `.git`）读不到任何改动；linked workspace / 工作副本过期时 Git 视图并不是 jj 的 `@`；通过 `jj` 命令产生的改动（rebase、squash、undo 等）可能落在 Git 视角之外。
+
+`jj-changes` 行接管该服务后：
+
+- 每一轮开始时记录 jj 工作副本提交（`@`）的 commit id，轮结束时再次快照并 `jj diff --from <开始> --to <结束>`，因此**卡片里的文件列表与 ±行数直接来自 jj 的工作副本差异**，jj-native 仓库、colocated 仓库、linked workspace 一致。
+- 不在 jj workspace 的会话（普通 Git 仓库、非仓库目录）仍由 DSH 内置记录器处理：Git 快照与文件工具捕获照旧，行为与未安装本插件时一致。内置记录器跑在隔离的 Cordis service scope 里，所以两者可以共存。
+- 同一轮里两边都记到的文件按绝对路径去重，优先采用 jj 的行数；内置记录器额外捕获到、jj 没覆盖的文件（如文件工具写到 workspace 外的文件）会追加进列表。
+- 记录是尽力而为的旁路：jj 快照/对比失败（工作副本 stale、`jj` 缺失、输出被截断）时该轮不写卡片数据，绝不会影响回合本身；此时会退回内置记录器的结果。
+
+相关配置写在 `jj-changes` 行（见下方配置表）。`workspaceChanges: builtin` 可以临时退回内置实现，`workspaceChanges: off` 则完全不提供该服务（卡片关闭）。
+
 ## 配置
 
 所有配置键均可选，写在 profile 中对应 bundle 行的 `config` 里：
@@ -149,6 +163,26 @@ Use the jj equivalent instead:
 >
 > 把某个键写到不读取它的入口行时，该行启动时只输出一条 `logger.warn` 提示并忽略它，不会阻断启动。
 
+`jj-changes` 行有自己的一组配置（变更卡片）。这些键写在 `jj-changes` 行的 `config` 里；写到其它入口行不会被读取：
+
+```yaml
+- id: jj-changes
+  name: '@aqian0/dsh-jj/changes'
+  config:
+    workspaceChanges: auto # auto | builtin | off
+    maxFiles: 500
+```
+
+| 键                 | 默认               | 说明                                                                                              |
+| ------------------ | ------------------ | ------------------------------------------------------------------------------------------------- |
+| `workspaceChanges` | `auto`             | `auto`：jj 会话用 jj 数据、其余会话用内置记录并合并；`builtin`：只用内置实现；`off`：不提供该服务 |
+| `maxFiles`         | `500`              | 单轮摘要最多列出的文件数；`total` 仍是完整数量                                                    |
+| `maxFileBytes`     | `2097152`（2 MiB） | 单个文件 diff 的展示上限；超过时卡片列出文件与行数，但不提供逐行对比（显示「过大」）              |
+| `outputMaxBytes`   | `8388608`（8 MiB） | 单轮 `jj diff` 输出的保留上限；超过则该轮放弃 jj 记录（退回内置记录）                             |
+| `diffTimeoutMs`    | `100`              | 内置记录器的行对比超时（仅在合并视图里回退到内置数据时使用）                                      |
+
+> `jj-changes` 依赖 DSH 的 `@deepseek-ai/dsh-workspace-changes`（deliverables bundle 的一部分）。headless profile 没有该 bundle 时该行自动降级（只输出一条 warning，不阻断启动）。
+
 ## 已知限制
 
 - **只支持 jj 仓库**：jj 未安装或目录不是 jj workspace 时，`jj_*` 工具会报错并给出处理建议，不会退回 git。
@@ -163,6 +197,8 @@ Use the jj equivalent instead:
 - **`.jj` 项目根标记仅部分 profile 生效**：Web profile 在 bundle 层禁用了该行，headless / CLI profile 才会把 `.jj` 当作项目根。
 - **jj-native 下项目级 skill 定位可能不准**：项目级 skill 根按最近的 `.git` 祖先查找（上游硬编码）；jj-native 仓库没有 `.git` 时会退回当前会话目录，通常只有会话正好位于仓库根时才符合预期。
 - **不自动推送**：`jj_handoff` 只保证本地集成到目标，推送仍需你执行 `jj git push --bookmark <name>`。
+- **变更卡片来自 jj 快照**：jj 默认不追踪超过 `snapshot.max-new-file-size`（默认 1 MiB）的新文件，这类新文件不会出现在 jj 侧的行数统计里；colocated 仓库里内置记录器可能从 Git 视角补上，jj-native 仓库则看不到——需要时调大该 jj 配置。shell 命令写到 jj workspace 之外的文件只在文件工具捕获能覆盖时出现。多文件超 `maxFiles` 时，合并视图的 `total` 与总行数是近似值（内置记录器对超出自身上限的文件不再保留行数明细）。
+- **变更卡片只在有工具调用的回合出现**：与 DSH 内置记录器一致，纯聊天不产生「已编辑」卡片；被中断或失败的 jj 快照只影响该轮卡片，不影响回合。
 
 ## 开发
 
