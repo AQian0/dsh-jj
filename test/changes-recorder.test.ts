@@ -465,6 +465,49 @@ test('stopping resolves only after the queued event exists', async () => {
   assert.equal(session.events.length, 1);
 });
 
+test('settled waits for the in-flight turn-start snapshot', async () => {
+  const gate = deferred<string | undefined>();
+  const harness = makeRecorder({
+    commits: [{ wait: gate.promise }, { value: 'base' }],
+    diffs: [],
+  });
+  const session = makeSession('s1');
+  harness.recorder.startTurn(session, { turn: 1, cwd: '/repo', root: '/repo' });
+
+  let drained = false;
+  const waiting = harness.recorder.settled(session.id).then(() => {
+    drained = true;
+  });
+  await settle();
+  assert.equal(drained, false, 'the baseline snapshot is still queued');
+  assert.equal(harness.reader.calls.commits.length, 1, 'the baseline read is in flight');
+
+  gate.resolve('base');
+  await waiting;
+  assert.equal(drained, true, 'the barrier opens once the baseline settled');
+});
+
+test('settled resolves for a Session without queued work and after dispose', async () => {
+  const harness = makeRecorder({ commits: [], diffs: [] });
+  await harness.recorder.settled('never-seen');
+  assert.deepEqual(harness.warnings, []);
+
+  const session = makeSession('s1');
+  harness.recorder.startTurn(session, { turn: 1, cwd: '/repo', root: '/repo' });
+  harness.recorder.dispose();
+  await harness.recorder.settled(session.id);
+  assert.deepEqual(harness.warnings, [], 'a cancelled baseline settles silently');
+});
+
+test('settled resolves after a failed baseline snapshot instead of rejecting', async () => {
+  const harness = makeRecorder({ commits: [{ error: new Error('jj log failed') }], diffs: [] });
+  const session = makeSession('s1');
+  harness.recorder.startTurn(session, { turn: 1, cwd: '/repo', root: '/repo' });
+  await harness.recorder.settled(session.id);
+  assert.equal(harness.warnings.length, 1, 'the failure is reported once through warn');
+  assert.match(harness.warnings[0] as string, /jj log failed/);
+});
+
 test('end() records when stopping was never called and never appends twice', async () => {
   const harness = makeRecorder({
     commits: [{ value: 'base' }, { value: 'end' }],

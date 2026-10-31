@@ -15,7 +15,12 @@ import type {
   WorkspaceFileDiff,
 } from '@deepseek-ai/dsh-workspace-changes/types';
 import type { TurnChangesRecorder } from '../src/changes-recorder.ts';
-import { createChangesService, type BridgeOptions, type ChangesServiceLike } from '../src/changes-service.ts';
+import {
+  createChangesService,
+  createEmptyChangesService,
+  type BridgeOptions,
+  type ChangesServiceLike,
+} from '../src/changes-service.ts';
 
 /** One listed changed file with display defaulting to the path. */
 function file(path: string, added = 1, deleted = 0, display = path): WorkspaceChangedFile {
@@ -180,20 +185,79 @@ test('returns undefined when neither recorder knows the sequence', () => {
   assert.equal(makeBridge({ recorder, upstream }).summary('s1', 31), undefined);
 });
 
-test("serves the jj recorder's own event without asking the upstream service", () => {
+test("merges the built-in summary when the Host asks for the jj recorder's own sequence", () => {
+  // The Host's card uses the LAST workspace/changes sequence of a turn, and the
+  // jj recorder appends last on a serial Host dispatch. Answering that sequence
+  // with the jj-only summary would silently drop the built-in recorder's files
+  // (gitignored captures, files outside the workspace).
   const recorder = makeFakeRecorder();
-  const own = summaryOf(2, '/repo', [file('a.txt', 3)]);
+  const upstream = makeFakeUpstream();
+  const own = summaryOf(2, '/repo', [file('a.txt', 3), file('b.txt', 1)]);
+  const base = summaryOf(2, '/repo', [file('a.txt', 9), file('c.txt', 4, 1)]);
   recorder.summaries.set(5, own);
+  upstream.summaries.set(4, base);
   let observed = 0;
   const service = makeBridge({
     recorder,
+    upstream,
     observedTurn: () => {
       observed += 1;
       return undefined;
     },
+    upstreamSeqs: () => [4, 5],
   });
-  assert.equal(service.summary('s1', 5), own);
-  assert.equal(observed, 0);
+
+  const merged = service.summary('s1', 5);
+  assert.ok(merged !== undefined);
+  assert.deepEqual(
+    merged.files.map((entry) => entry.path),
+    ['a.txt', 'b.txt', 'c.txt'],
+    'the jj files stay, the built-in-only file is appended',
+  );
+  assert.deepEqual(merged.files[0], file('a.txt', 3), 'jj data wins for a file both recorders saw');
+  assert.deepEqual(merged.files[2], file('c.txt', 4, 1), 'the built-in-only entry is copied as-is');
+  assert.equal(merged.turn, 2);
+  assert.equal(merged.cwd, '/repo');
+  assert.equal(merged.total, 3);
+  assert.equal(merged.added, 8);
+  assert.equal(merged.deleted, 1);
+  assert.equal(observed, 0, 'the turn comes from the jj record itself, not from a Host lookup');
+  assert.deepEqual(upstream.summaryCalls, [5, 4], 'jj sequences are skipped until a built-in summary appears');
+});
+
+test('serves the same merged view for either recorder sequence of one turn', () => {
+  const recorder = makeFakeRecorder();
+  const upstream = makeFakeUpstream();
+  const own = summaryOf(2, '/repo', [file('a.txt', 3)]);
+  recorder.summaries.set(5, own);
+  recorder.turnSummaries.set(2, own);
+  upstream.summaries.set(4, summaryOf(2, '/repo', [file('a.txt', 9), file('z.txt', 1)]));
+  const service = makeBridge({
+    recorder,
+    upstream,
+    observedTurn: (_sessionId, seq) => (seq === 4 ? 2 : undefined),
+    upstreamSeqs: () => [4, 5],
+  });
+
+  const fromOwn = service.summary('s1', 5);
+  const fromUpstream = service.summary('s1', 4);
+  assert.ok(fromOwn !== undefined && fromUpstream !== undefined);
+  assert.deepEqual(fromOwn, fromUpstream);
+  assert.deepEqual(
+    fromOwn.files.map((entry) => entry.path),
+    ['a.txt', 'z.txt'],
+  );
+});
+
+test('serves the jj record alone when its turn has no built-in summary', () => {
+  const recorder = makeFakeRecorder();
+  const upstream = makeFakeUpstream();
+  const own = summaryOf(6, '/repo', [file('a.txt')]);
+  recorder.summaries.set(8, own);
+  const service = makeBridge({ recorder, upstream, upstreamSeqs: () => [8] });
+
+  assert.equal(service.summary('s1', 8), own);
+  assert.deepEqual(upstream.summaryCalls, [8], 'the undefined built-in candidate is skipped');
 });
 
 test('merges a built-in event aliased to the jj turn: own wins, extras appended and sorted', () => {
@@ -429,24 +493,78 @@ test('resolves undefined when the index cannot be routed and no upstream service
   assert.equal(await service.diff('s1', 99, 4, new AbortController().signal), undefined);
 });
 
-test("returns the jj recorder's diff for its own sequence without a merge", async () => {
+test("routes comparisons of the merged view requested by the jj recorder's own sequence", async () => {
   const recorder = makeFakeRecorder();
   const upstream = makeFakeUpstream();
+  recorder.summaries.set(5, summaryOf(2, '/repo', [file('a.txt'), file('b.txt')]));
+  upstream.summaries.set(4, summaryOf(2, '/repo', [file('b.txt'), file('z.txt')]));
   const ownDiff = textDiff('a.txt');
+  const upstreamDiff = textDiff('z.txt');
   recorder.seqDiffs.set('5:0', ownDiff);
-  let observed = 0;
+  upstream.diffs.set('4:1', upstreamDiff);
+  const signal = new AbortController().signal;
   const service = makeBridge({
     recorder,
     upstream,
-    observedTurn: () => {
-      observed += 1;
-      return undefined;
-    },
+    observedTurn: () => undefined,
+    upstreamSeqs: () => [4, 5],
   });
 
-  assert.equal(await service.diff('s1', 5, 0, new AbortController().signal), ownDiff);
-  assert.equal(observed, 0);
-  assert.deepEqual(upstream.diffCalls, []);
+  assert.deepEqual(
+    service.summary('s1', 5)?.files.map((entry) => entry.path),
+    ['a.txt', 'b.txt', 'z.txt'],
+    'the merged order is the one the summary served for this sequence',
+  );
+  assert.equal(
+    await service.diff('s1', 5, 0, signal),
+    ownDiff,
+    'a jj file is served from the requested jj sequence, not from the turn alias',
+  );
+  assert.deepEqual(recorder.seqDiffCalls, [{ seq: 5, index: 0 }]);
+  assert.equal(
+    await service.diff('s1', 5, 2, signal),
+    upstreamDiff,
+    'the built-in-only file keeps its own sequence and local index',
+  );
+  assert.deepEqual(upstream.diffCalls, [{ seq: 4, index: 1 }]);
+  assert.deepEqual(recorder.turnDiffCalls, []);
+});
+
+test('caps the merged view served for the jj sequence and keeps the diff index aligned', async () => {
+  const recorder = makeFakeRecorder();
+  const upstream = makeFakeUpstream();
+  recorder.summaries.set(5, summaryOf(2, '/repo', [file('a.txt'), file('b.txt')]));
+  upstream.summaries.set(4, summaryOf(2, '/repo', [file('c.txt'), file('d.txt')]));
+  const upstreamDiff = textDiff('c.txt');
+  upstream.diffs.set('4:0', upstreamDiff);
+  const service = makeBridge({
+    recorder,
+    upstream,
+    upstreamSeqs: () => [4, 5],
+    maxFiles: 3,
+  });
+
+  const merged = service.summary('s1', 5);
+  assert.ok(merged !== undefined);
+  assert.deepEqual(
+    merged.files.map((entry) => entry.path),
+    ['a.txt', 'b.txt', 'c.txt'],
+  );
+  assert.equal(merged.total, 4, 'the cap only truncates the listed files');
+  assert.equal(
+    await service.diff('s1', 5, 2, new AbortController().signal),
+    upstreamDiff,
+    'the last kept file still routes to its uncapped local index',
+  );
+  assert.deepEqual(upstream.diffCalls, [{ seq: 4, index: 0 }]);
+});
+
+test('the off-mode placeholder satisfies the contract but serves no data', async () => {
+  const placeholder = createEmptyChangesService();
+  const contract: Pick<WorkspaceChanges, 'summary' | 'diff'> = placeholder;
+  assert.equal(typeof contract.summary, 'function');
+  assert.equal(placeholder.summary('s1', 1), undefined);
+  assert.equal(await placeholder.diff('s1', 1, 0, new AbortController().signal), undefined);
 });
 
 test('the service structurally satisfies the workspaceChanges contract', () => {

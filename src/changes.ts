@@ -20,14 +20,17 @@
  *   the built-in recorder still contributes file-tool captures it alone saw.
  * - **`builtin`**: keep the built-in behavior exactly (no jj recording). Use it
  *   to compare behavior or as an escape hatch.
- * - **`off`**: provide no `workspaceChanges` service at all; the deliverables
- *   card stays off.
+ * - **`off`**: no jj recording and no card data; a read-only empty service is
+ *   still provided so the Host's deliverables row (which injects
+ *   `workspaceChanges`) keeps its present/open routes and file-reference prompt.
  *
  * Recording is a best-effort side channel: every jj failure (missing binary,
  * broken repository, stale working copy, truncated output) resolves to "no
- * summary for this turn", never to a broken turn. If another plugin already
- * provides `workspaceChanges`, this entry warns and does nothing instead of
- * failing the profile.
+ * summary for this turn", never to a broken turn. The turn-start snapshot is
+ * awaited from a `tools/pre-execute` barrier so the first tool write of a turn
+ * cannot be folded into the baseline. If another plugin already provides
+ * `workspaceChanges`, this entry warns and does nothing instead of failing the
+ * profile.
  *
  * @module dsh-jj/changes
  */
@@ -37,7 +40,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { WorkspaceChanges } from '@deepseek-ai/dsh-workspace-changes/types';
 import { resolveConfig, type ResolvedJjConfig } from './config.ts';
 import { createRunJj } from './jj-command.ts';
-import { createChangesService } from './changes-service.ts';
+import { createChangesService, createEmptyChangesService } from './changes-service.ts';
 import { createJjChangesReader } from './changes-jj.ts';
 import { TurnChangesRecorder, type ChangesSessionLike } from './changes-recorder.ts';
 import { sniffVcsSync } from './detect.ts';
@@ -64,7 +67,8 @@ export const inject = ['subprocess', 'fs', 'jj'] as const;
  * - `auto`: jj recording for jj-workspace Sessions plus the built-in recorder
  *   for everything else, merged per turn.
  * - `builtin`: the unmodified built-in recorder (no jj recording).
- * - `off`: leave the service unprovided so the changed-files card is disabled.
+ * - `off`: no jj recording and no card data; a read-only empty service keeps the
+ *   deliverables row (which injects `workspaceChanges`) active.
  */
 export const WORKSPACE_CHANGES_MODES = ['auto', 'builtin', 'off'] as const;
 export type WorkspaceChangesMode = (typeof WORKSPACE_CHANGES_MODES)[number];
@@ -236,15 +240,22 @@ export async function apply(ctx: Context, config: ChangesConfig = {}): Promise<v
       logger?.info?.(message);
     } catch {}
   };
-  if (resolved.workspaceChanges === 'off') {
-    info('dsh-jj changes: `workspaceChanges: off`; no changed-files summary is served');
-    return;
-  }
+  // Another plugin owning the service wins in every mode: providing on top of it
+  // would be a duplicate provide in the same Cordis scope and could break the profile.
   const existing = ctx.get('workspaceChanges', false);
   if (existing !== undefined) {
     warn(
       'dsh-jj changes: another plugin already provides `workspaceChanges`; ' +
         'jj workspace-change recording is disabled. Disable the other provider or set `workspaceChanges: off`.',
+    );
+    return;
+  }
+  if (resolved.workspaceChanges === 'off') {
+    // Recorder, reader, and every session listener stay uncreated: `off` only
+    // serves the empty placeholder the deliverables row injects.
+    ctx.provide('workspaceChanges', createEmptyChangesService() as unknown as WorkspaceChanges);
+    info(
+      'dsh-jj changes: `workspaceChanges: off`; change recording is disabled and a read-only empty service is provided',
     );
     return;
   }
@@ -383,6 +394,21 @@ export async function apply(ctx: Context, config: ChangesConfig = {}): Promise<v
         if (session === undefined || turn === undefined) return;
         if (!isTopLevelSession(session)) return;
         await recorder.stopping(session as unknown as ChangesSessionLike, turn);
+      });
+      // Barrier before the first tool write of a turn: the baseline snapshot is
+      // queued asynchronously on `turn/start`, and a write that overtook it would
+      // be folded into the baseline (the turn's only change could vanish from the
+      // card). The built-in recorder has the same barrier from its own
+      // `tools/pre-execute` hook; awaiting here keeps the semantics aligned.
+      listen.call(ctx, 'tools/pre-execute', async (...args: unknown[]) => {
+        const exec = args[0];
+        const next = args[1];
+        if (exec !== null && typeof exec === 'object') {
+          const session = (exec as { agent?: { session?: SessionLike } }).agent?.session;
+          const id = session === undefined ? undefined : sessionId(session);
+          if (id !== undefined) await recorder.settled(id);
+        }
+        return typeof next === 'function' ? (next as () => unknown)() : undefined;
       });
       listen.call(ctx, 'session/disposed', (...args: unknown[]) => {
         const id = sessionId((args[0] ?? {}) as SessionLike);
