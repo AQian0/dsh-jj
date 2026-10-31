@@ -24,7 +24,9 @@ export interface RawSegment {
 }
 
 const OPERATORS = new Set([';', '&&', '||', '|', '&', '\n', '(', ')']);
-const MAX_NESTING = 6;
+
+/** Maximum recursion depth for command substitutions and nested shell wrappers. */
+export const MAX_NESTING = 6;
 
 function isAssignment(word: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
@@ -81,8 +83,20 @@ const SHELL_KEYWORDS = new Set([
   'if',
 ]);
 
-/** Multi-call wrappers whose inner command cannot be resolved statically. */
-const DYNAMIC_WRAPPERS = new Set(['busybox', 'toybox', 'unbuffer', 'parallel']);
+/**
+ * Multi-call wrappers whose inner command cannot be resolved statically. They are
+ * reported through a one-time parser warning instead of being silently skipped.
+ */
+const DYNAMIC_WRAPPERS = new Set([
+  'busybox',
+  'toybox',
+  'unbuffer',
+  'parallel',
+  'xcrun',
+  'strace',
+  'ltrace',
+  'valgrind',
+]);
 
 const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   sudo: [
@@ -127,60 +141,98 @@ const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = Object.
   ],
   timeout: ['-s', '--signal', '-k', '--kill-after'],
   command: [],
+  exec: ['-a'],
 });
+
+/** A nested command line option found in a wrapper's arguments. */
+interface WrapperInner {
+  /** True when the wrapper names a nested command-line option (`-c`, `/c`, `-Command`, `env -S`). */
+  readonly found: boolean;
+  /** The nested command line text, when one could be read. */
+  readonly command?: string;
+}
 
 /**
  * The nested command line a shell wrapper would execute (`bash -c …`,
  * `pwsh -Command …`, `cmd /c …`, `fish -c …`).
+ *
+ * Shells accept `--` between the option and its value (`bash -c -- "…"`), so it
+ * is skipped: without that the `-c` value was read as a literal `--`.
  */
-function shellWrapperInnerCommand(name: string, rest: readonly string[]): string | undefined {
+function shellWrapperInnerCommand(name: string, rest: readonly string[]): WrapperInner {
+  const afterFlag = (index: number): WrapperInner => {
+    const value = rest[index + 1] === '--' ? rest[index + 2] : rest[index + 1];
+    return { found: true, ...(value !== undefined && value.length > 0 ? { command: value } : {}) };
+  };
   if (BASH_LIKE_SHELLS.has(name)) {
     const index = rest.findIndex((token) => token === '-c' || /^-[a-zA-Z]*c[a-zA-Z]*$/.test(token));
-    return index >= 0 ? rest[index + 1] : undefined;
+    return index >= 0 ? afterFlag(index) : { found: false };
   }
   const lower = name.toLowerCase();
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] ?? '';
     if (lower === 'cmd' || lower === 'cmd.exe') {
-      if (/^\/[cC]$/.test(token)) return rest[index + 1];
+      if (/^\/[cC]$/.test(token)) return afterFlag(index);
       continue;
     }
-    if (token === '-c' || token === '-Command' || token === '-command') return rest[index + 1];
+    if (token === '-c' || token === '-Command' || token === '-command') return afterFlag(index);
   }
-  return undefined;
+  return { found: false };
 }
 
-/** The command line carried by `env -S`/`--split-string`. */
-function envSplitString(rest: readonly string[]): string | undefined {
-  for (let index = 0; index < rest.length; index += 1) {
-    const token = rest[index] ?? '';
-    if (token === '-S' || token === '--split-string') return rest[index + 1];
-    const match = /^(?:-S|--split-string)=(.*)$/.exec(token);
-    if (match !== null) return match[1];
+/**
+ * The command line carried by one `env` argument, when that argument is
+ * `-S`/`--split-string` or the attached `-S'…'` spelling (one token after
+ * tokenization).
+ *
+ * @param token - the `env` argument under inspection.
+ * @param next - the following argument (the split string for the spaced spelling).
+ */
+function envSplitValue(token: string, next: string | undefined): WrapperInner {
+  if (token === '-S' || token === '--split-string') {
+    return { found: true, ...(next !== undefined && next.length > 0 ? { command: next } : {}) };
   }
-  return undefined;
+  if (token.startsWith('-S') && token.length > 2) {
+    const value = token.slice(2);
+    return { found: true, ...(value.length > 0 ? { command: value } : {}) };
+  }
+  const attached = /^--split-string=(.*)$/.exec(token);
+  if (attached !== null) {
+    const value = attached[1];
+    return { found: true, ...(value !== undefined && value.length > 0 ? { command: value } : {}) };
+  }
+  return { found: false };
 }
 
 /**
  * Nested command lines carried by one segment: shell wrapper `-c` arguments and
- * `env -S` split strings. Their text is re-tokenized so the wrapped Git/jj
- * command is classified.
+ * `env -S` split strings. The returned text is re-tokenized by the classifiers,
+ * recursively (a nested line may itself hide a wrapped command), so their
+ * invocations are classified instead of silently missed.
+ *
+ * @param segment - one parsed segment of the outer command line.
+ * @param warnings - receives a one-time parser warning for a wrapper whose nested
+ *   command line cannot be read (never dropped silently).
+ * @returns the nested command lines, outermost first.
  */
-export function nestedCommandStrings(segment: RawSegment): string[] {
-  const program = segment.words[0]?.value;
-  if (program === undefined) return [];
-  const name = baseName(program);
+export function nestedCommandStrings(segment: RawSegment, warnings: string[] = []): string[] {
+  const prelude = scanPrelude(segment.words, []);
   const nested: string[] = [];
+  for (const split of prelude.envSplitStrings) nested.push(split);
+  const program = segment.words[prelude.programIndex]?.value;
+  if (program === undefined) return nested;
+  const name = baseName(program);
   if (SHELL_WRAPPERS.has(name)) {
     const inner = shellWrapperInnerCommand(
       name,
-      segment.words.slice(1).map((token) => token.value),
+      segment.words.slice(prelude.programIndex + 1).map((token) => token.value),
     );
-    if (inner !== undefined && inner.length > 0) nested.push(inner);
-  }
-  if (name === 'env') {
-    const split = envSplitString(segment.words.slice(1).map((token) => token.value));
-    if (split !== undefined && split.length > 0) nested.push(split);
+    if (inner.command !== undefined) nested.push(inner.command);
+    else if (inner.found) {
+      warnings.push(
+        `\`${name} -c\` has no command string to inspect; the wrapped command was not classified (inspect it manually).`,
+      );
+    }
   }
   return nested;
 }
@@ -553,28 +605,44 @@ export function scanArgs(
   return { flags, positionals };
 }
 
-/** Skip leading `VAR=value` assignments, shell keywords, wrapper commands, and shell wrappers; returns the program index. */
+/** Wrapper/environment prelude decoded for one shell segment. */
+export interface PreludeScan {
+  /** Index of the first word that is not an assignment, keyword, or wrapper. */
+  readonly programIndex: number;
+  /** Command lines carried by `env -S`/`--split-string` in the prelude chain. */
+  readonly envSplitStrings: readonly string[];
+}
 
-export function skipPrelude(words: readonly Token[], warnings: string[]): number {
+/**
+ * Skip leading `VAR=value` assignments, shell keywords, wrapper commands, and
+ * shell wrappers.
+ *
+ * Wrappers may be chained (`sudo -u root env A=1 command bash -c …`), so the
+ * walk repeats until it reaches the program the shell would actually run. The
+ * `env -S` split strings found on the way are returned for the caller to
+ * re-tokenize, and a wrapper whose nested command line cannot be read produces a
+ * one-time warning instead of disappearing silently.
+ *
+ * @param words - dequoted words of one shell segment.
+ * @param warnings - receives parser warnings (never a silent drop).
+ * @returns the program index and the env split strings found in the prelude.
+ */
+export function scanPrelude(words: readonly Token[], warnings: string[]): PreludeScan {
   let index = 0;
+  const envSplitStrings: string[] = [];
   for (;;) {
     while (index < words.length && isAssignment(words[index]?.value ?? '')) index += 1;
     const head = words[index]?.value;
-    if (head === undefined) return index;
+    if (head === undefined) return { programIndex: index, envSplitStrings };
     const name = baseName(head);
     if (SHELL_KEYWORDS.has(name)) {
       index += 1;
       continue;
     }
     if (SHELL_WRAPPERS.has(name)) {
-      const inner = shellWrapperInnerCommand(
-        name,
-        words.slice(index + 1).map((token) => token.value),
-      );
-      if (inner !== undefined && inner.length > 0) {
-        warnings.push(...tokenize(inner, 'substitution', MAX_NESTING).warnings);
-      }
-      return index;
+      // The inner command line is expanded by `nestedCommandStrings`, which
+      // re-tokenizes it recursively; its warnings surface there.
+      return { programIndex: index, envSplitStrings };
     }
     if (!WRAPPERS.has(name)) {
       if (name === 'eval') {
@@ -605,6 +673,13 @@ export function skipPrelude(words: readonly Token[], warnings: string[]): number
       if (token.startsWith('-') && token !== '-') {
         const eq = token.indexOf('=');
         const flag = eq >= 0 ? token.slice(0, eq) : token;
+        if (name === 'env') {
+          const split = envSplitValue(token, words[index + 1]?.value);
+          if (split.found) {
+            if (split.command !== undefined) envSplitStrings.push(split.command);
+            else warnings.push('`env -S` has no split string to inspect; the wrapped command was not classified.');
+          }
+        }
         index += eq < 0 && valueFlags.includes(flag) ? 2 : 1;
         continue;
       }
@@ -612,5 +687,73 @@ export function skipPrelude(words: readonly Token[], warnings: string[]): number
     }
     if (name === 'timeout' && index < words.length && !(words[index]?.value ?? '').startsWith('-')) index += 1;
   }
-  return index;
+  return { programIndex: index, envSplitStrings };
+}
+
+/** True when a `cd` argument can be resolved without shell expansion. */
+export function isStaticDirectoryTarget(target: string): boolean {
+  if (target.length === 0 || target === '-') return false;
+  return !target.includes('$') && !target.includes('`') && !target.startsWith('~');
+}
+
+/** Directory change carried by the leading `cd`/`pushd`/`popd` of one segment. */
+export interface SegmentDirectoryChange {
+  /** Raw target directory, when one was written (`cd -P dir`, `pushd dir`). */
+  readonly target?: string;
+  /** One-time warning for a directory change that cannot be followed statically. */
+  readonly warning?: string;
+}
+
+/** Commands that change the current directory of the following segments. */
+const DIRECTORY_COMMANDS = new Set(['cd', 'pushd', 'popd']);
+
+/**
+ * Target of a leading `cd`/`pushd` in one shell segment.
+ *
+ * `cd` accepts flags before the path (`cd -P dir`, `cd -- dir`) and `cd -` returns
+ * to the previous directory, which cannot be resolved statically. `pushd -n` only
+ * touches the directory stack without changing the directory, while `pushd`/`popd`
+ * without a statically known target leave the next directory unknown — those get a
+ * parser warning so the guard never silently follows a guessed directory.
+ *
+ * @param words - dequoted words of one shell segment.
+ * @returns the directory change, or `undefined` when the segment does not start
+ *   with a directory-changing command.
+ */
+export function segmentDirectoryChange(words: readonly Token[]): SegmentDirectoryChange | undefined {
+  const { programIndex } = scanPrelude(words, []);
+  const program = words[programIndex]?.value;
+  if (program === undefined) return undefined;
+  const name = baseName(program);
+  if (!DIRECTORY_COMMANDS.has(name)) return undefined;
+  const rest = words.slice(programIndex + 1).map((token) => token.value);
+  if (name === 'popd') {
+    return { warning: '`popd` returns to a directory on the stack; the guard could not follow that directory.' };
+  }
+  let noChange = false;
+  let index = 0;
+  for (; index < rest.length; index += 1) {
+    const token = rest[index] ?? '';
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (token === '-') {
+      return {
+        target: token,
+        warning: '`cd -` returns to the previous directory, which cannot be followed statically.',
+      };
+    }
+    if (!token.startsWith('-')) break;
+    // pushd -n pushes onto the stack without changing the current directory.
+    if (name === 'pushd' && token === '-n') noChange = true;
+  }
+  if (noChange) return undefined;
+  const target = rest[index];
+  if (target === undefined) {
+    return name === 'pushd'
+      ? { warning: '`pushd` without a directory argument swaps the directory stack; the guard could not follow it.' }
+      : undefined;
+  }
+  return { target };
 }

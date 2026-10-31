@@ -12,7 +12,15 @@
  * @module dsh-jj/jj-rules
  */
 
-import { baseName, nestedCommandStrings, skipPrelude, tokenize } from './git-tokenize.ts';
+import {
+  baseName,
+  isStaticDirectoryTarget,
+  MAX_NESTING,
+  nestedCommandStrings,
+  scanPrelude,
+  segmentDirectoryChange,
+  tokenize,
+} from './git-tokenize.ts';
 import type { RawSegment, Token } from './git-tokenize.ts';
 
 // ---------------------------------------------------------------------------
@@ -36,7 +44,10 @@ export interface JjInvocation {
   readonly subcommand: string;
   readonly scope: JjScope;
   readonly globalOptions: readonly string[];
-  /** `-R`/`--repository` target, when given. */
+  /**
+   * `-R`/`--repository` target, when given. jj's global options are accepted
+   * after the subcommand too, so this is populated for either position.
+   */
   readonly repository?: string;
   /** `--at-op`/`--at-operation` value, when given (read-only replay). */
   readonly atOp?: string;
@@ -53,11 +64,13 @@ export interface JjInvocation {
 /**
  * One shell segment of a jj command line.
  *
- * `changeDir` is set only when the segment starts with `cd <literal path>` whose
- * target can be resolved statically (no `$VAR`, command substitution, backtick,
- * or unexpanded `~`). The guard follows it in {@link JjCommandClassification.segments}
- * order to compute the directory each invocation would actually run in; a missing
- * field means "cannot be determined statically" (callers must fail open).
+ * `changeDir` is set only when the segment starts with `cd`/`pushd` and its target
+ * can be resolved statically: `cd <literal>`, `cd -P <literal>`, `cd -- <literal>`
+ * and `pushd <literal>` are followed; `$VAR`, command substitution, backticks, an
+ * unexpanded `~`, `cd -`, bare `pushd` and `popd` are not. The guard follows it in
+ * {@link JjCommandClassification.segments} order to compute the directory each
+ * invocation would actually run in; a missing field means "cannot be determined
+ * statically" (callers must fail open).
  */
 export interface JjParsedSegment {
   /** Raw shell segment text this segment was parsed from. */
@@ -234,16 +247,26 @@ interface ScannedJjArgs {
   readonly positionals: string[];
   /** Values of `-r/--revisions/-o` (revsets, not filesets). */
   readonly revisionTargets: string[];
-  /** Values of `-t/--into/--to` (the revision `jj restore` writes into). */
+  /** Values of `-t/--into/--to` (the revision `jj restore`/`jj squash` writes into). */
   readonly intoTargets: string[];
+  /** `-R`/`--repository` value: a global option jj also accepts after the subcommand. */
+  readonly repository?: string;
 }
 
-/** Split jj subcommand arguments into flags, positionals, and revision/into targets. */
+/**
+ * Split jj subcommand arguments into flags, positionals, and revision/into targets.
+ *
+ * jj's global options are declared `global = true` in clap, so they are accepted
+ * **after** the subcommand too (`jj op restore <id> -R <other-repo>`). Capturing
+ * the repository here keeps the scope-creep hard deny independent of the option
+ * position.
+ */
 function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
   const flags: string[] = [];
   const positionals: string[] = [];
   const revisionTargets: string[] = [];
   const intoTargets: string[] = [];
+  let repository: string | undefined;
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] ?? '';
     if (token === '--') {
@@ -256,7 +279,8 @@ function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
       const attachedShort = eq < 0 && token.length > 2 && !token.startsWith('--') ? token.slice(0, 2) : undefined;
       if (attachedShort !== undefined && JJ_SUBCOMMAND_VALUE_FLAGS.has(attachedShort)) {
         flags.push(attachedShort);
-        if (JJ_REVISION_FLAGS.has(attachedShort)) revisionTargets.push(token.slice(2));
+        if (attachedShort === '-R') repository = token.slice(2);
+        else if (JJ_REVISION_FLAGS.has(attachedShort)) revisionTargets.push(token.slice(2));
         else if (JJ_INTO_FLAGS.has(attachedShort)) intoTargets.push(token.slice(2));
         continue;
       }
@@ -265,9 +289,12 @@ function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
         const value = rest[index + 1];
         if (value !== undefined) {
           index += 1;
-          if (JJ_REVISION_FLAGS.has(flag)) revisionTargets.push(value);
+          if (flag === '-R' || flag === '--repository') repository = value;
+          else if (JJ_REVISION_FLAGS.has(flag)) revisionTargets.push(value);
           else if (JJ_INTO_FLAGS.has(flag)) intoTargets.push(value);
         }
+      } else if (eq >= 0 && (flag === '-R' || flag === '--repository')) {
+        repository = token.slice(eq + 1);
       } else if (eq >= 0 && JJ_INTO_FLAGS.has(flag)) {
         intoTargets.push(token.slice(eq + 1));
       }
@@ -275,7 +302,7 @@ function scanJjArgs(rest: readonly string[]): ScannedJjArgs {
     }
     positionals.push(token);
   }
-  return { flags, positionals, revisionTargets, intoTargets };
+  return { flags, positionals, revisionTargets, intoTargets, ...(repository !== undefined ? { repository } : {}) };
 }
 
 /** jj global boolean flags. */
@@ -288,17 +315,14 @@ const JJ_BOOLEAN_FLAGS = new Set([
   '--debug',
 ]);
 
-/** True when a `cd` argument can be resolved without shell expansion. */
-function isStaticChangeDir(target: string): boolean {
-  if (target.length === 0 || target === '-') return false;
-  return !target.includes('$') && !target.includes('`') && !target.startsWith('~');
-}
-
 function jjSubcommandOf(words: readonly string[]): { subcommand: string; rest: string[] } | undefined {
   const first = words[0];
   if (first === undefined || first.startsWith('-')) return undefined;
   const second = words[1];
-  if (first === 'op' && second !== undefined && !second.startsWith('-')) {
+  // `operation` is the canonical spelling and `op` is its alias: normalize both to
+  // `op <verb>` so the scope table and the `workspace forget`-style special cases
+  // apply identically.
+  if ((first === 'op' || first === 'operation') && second !== undefined && !second.startsWith('-')) {
     return { subcommand: `op ${second}`, rest: words.slice(2) };
   }
   if (first === 'workspace' && second !== undefined && !second.startsWith('-')) {
@@ -317,7 +341,7 @@ function classifyJjWords(
   warnings: string[],
 ): JjInvocation | undefined {
   if (!parsed || words.length === 0) return undefined;
-  const index = skipPrelude(words, warnings);
+  const index = scanPrelude(words, warnings).programIndex;
   const program = words[index]?.value ?? '';
   if (baseName(program) !== 'jj' && baseName(program) !== 'jj.exe') return undefined;
 
@@ -375,23 +399,30 @@ function classifyJjWords(
   }
   const { subcommand, rest } = parsedSub;
 
-  const { flags: restFlags, positionals, revisionTargets, intoTargets } = scanJjArgs(rest);
+  const { flags: restFlags, positionals, revisionTargets, intoTargets, repository: restRepository } = scanJjArgs(rest);
+  // jj global options may follow the subcommand (`jj op restore <id> -R <repo>`);
+  // the scope-creep decision must not depend on where the option was written.
+  if (restRepository !== undefined) repository = restRepository;
   const allowCrossWorkspace = restFlags.includes('--allow-cross-workspace');
   const hasRevisionArgument = positionals.length >= 1 || revisionTargets.length >= 1;
   const abandonsWorkingCopy = positionals.includes('@') || revisionTargets.includes('@');
-  // `jj restore --into <revision other than @>` writes a revision outside the
-  // working copy (its descendants are rebased), so it is repository-wide rather
-  // than workspace-local. `--into @` keeps the default working-copy semantics.
-  const restoreIntoOther = subcommand === 'restore' ? intoTargets.find((target) => target.trim() !== '@') : undefined;
+  // `jj restore`/`jj squash` with `--into <revision other than @>` write a revision
+  // outside the working copy (its descendants are rebased), so they are
+  // repository-wide rather than workspace-local. `--into @` keeps the default
+  // working-copy semantics.
+  const intoOther =
+    subcommand === 'restore' || subcommand === 'squash'
+      ? intoTargets.find((target) => target.trim() !== '@')
+      : undefined;
 
   let scope: JjScope;
   let reason: string;
   if (restFlags.includes('--help') || restFlags.includes('-h')) {
     scope = 'read-only';
     reason = `\`jj ${subcommand} --help\` only prints help`;
-  } else if (restoreIntoOther !== undefined) {
+  } else if (intoOther !== undefined) {
     scope = 'repo-wide';
-    reason = `\`jj restore --into ${restoreIntoOther}\` rewrites a revision other than the working copy and rebases its descendants`;
+    reason = `\`jj ${subcommand} --into ${intoOther}\` rewrites a revision other than the working copy and rebases its descendants`;
   } else if (subcommand === 'restore' && positionals.length === 0) {
     scope = 'destructive';
     reason = '`jj restore` without a fileset silently discards the entire working-copy change';
@@ -455,9 +486,10 @@ function classifyJjWords(
  *
  * The returned {@link JjCommandClassification.segments} mirror the Git-side
  * `ParsedSegment` shape: each segment carries a statically resolvable
- * `changeDir` (only for `cd <literal>`), and `invocationIndexes` point into
- * `invocations`, so a synchronous guard can follow `cd` changes between
- * invocations without spawning anything.
+ * `changeDir` (only for `cd`/`pushd` with a literal target), and
+ * `invocationIndexes` point into `invocations`, so a synchronous guard can follow
+ * directory changes between invocations without spawning anything. Shell wrappers
+ * are expanded recursively, so a nested `bash -c '…'` segment also appears here.
  *
  * @param commandLine - raw shell command string.
  * @returns jj invocations with their scope, the parsed segments, and warnings.
@@ -474,9 +506,13 @@ export function classifyJjInvocation(commandLine: string): JjCommandClassificati
       invocationIndexes.push(invocations.length);
       invocations.push(invocation);
     }
-    const head = segment.words[0]?.value;
-    const cdTarget = head === 'cd' && segment.parsed ? segment.words[1]?.value.trim() : undefined;
-    const changeDir = cdTarget !== undefined && isStaticChangeDir(cdTarget) ? cdTarget : undefined;
+    // `cd` options (`cd -P dir`, `cd -- dir`) and `pushd` are followed like a
+    // plain `cd`; `cd -` and stack commands cannot be resolved statically and are
+    // reported through the parser warnings instead.
+    const change = segment.parsed ? segmentDirectoryChange(segment.words) : undefined;
+    if (change?.warning !== undefined) warnings.push(change.warning);
+    const target = change?.target;
+    const changeDir = target !== undefined && isStaticDirectoryTarget(target) ? target : undefined;
     segments.push({
       raw: segment.raw,
       kind: segment.kind,
@@ -486,15 +522,22 @@ export function classifyJjInvocation(commandLine: string): JjCommandClassificati
       invocationIndexes,
     });
   };
-  const recordNested = (segment: RawSegment): void => {
-    for (const inner of nestedCommandStrings(segment)) {
-      for (const nestedSegment of tokenize(inner, 'substitution', 1).segments) record(nestedSegment);
+  // Recursive expansion (with a depth cap) so nested/prelude shell wrappers are
+  // classified instead of silently skipped.
+  const recordTree = (segment: RawSegment, depth: number): void => {
+    record(segment);
+    if (!segment.parsed) return;
+    if (depth >= MAX_NESTING) {
+      warnings.push('Shell wrapper nesting limit reached; deeper wrapped commands were not classified.');
+      return;
+    }
+    for (const inner of nestedCommandStrings(segment, warnings)) {
+      const nested = tokenize(inner, 'substitution', depth + 1);
+      warnings.push(...nested.warnings);
+      for (const nestedSegment of nested.segments) recordTree(nestedSegment, depth + 1);
     }
   };
-  for (const segment of outer.segments) {
-    record(segment);
-    recordNested(segment);
-  }
+  for (const segment of outer.segments) recordTree(segment, 0);
   return {
     invocations: Object.freeze(invocations),
     segments: Object.freeze(segments),

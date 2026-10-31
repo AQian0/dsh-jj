@@ -775,3 +775,224 @@ test('every redirection spelling drops its target from the command words', () =>
     assert.equal(classification.invocations.length, 1, commandLine);
   }
 });
+
+// ---------------------------------------------------------------------------
+// A1 audited regressions: jj global-option order, nested shell wrappers,
+// directory changes, help arity, fetch `-n`, jj scope consistency, false
+// positives, and explicit Git repository retargeting.
+// ---------------------------------------------------------------------------
+
+test('A1-1: jj global -R/--repository is honoured after the subcommand', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ['jj op restore abc -R /tmp/other', '/tmp/other'],
+    ['jj op restore abc --repository /tmp/other', '/tmp/other'],
+    ['jj op restore abc -R/tmp/other', '/tmp/other'],
+    ['jj op restore abc --repository=/tmp/other', '/tmp/other'],
+    ['jj undo -R /tmp/other', '/tmp/other'],
+    ['jj workspace forget other -R /tmp/other', '/tmp/other'],
+  ];
+  for (const [command, repository] of cases) {
+    const invocation = classifyJjInvocation(command).invocations[0];
+    assert.equal(invocation?.repository, repository, command);
+    assert.equal(invocation?.scope, 'repo-wide', command);
+  }
+  // The subcommand's own arguments still parse normally: `-m` values are not
+  // options, so `jj describe -m -R` must not look like a cross-repo call.
+  assert.equal(classifyJjInvocation('jj describe -m -R').invocations[0]?.repository, undefined);
+  assert.equal(
+    classifyJjInvocation('jj workspace forget other -R /tmp/other').invocations[0]?.targetWorkspace,
+    'other',
+  );
+});
+
+test('A1-2: nested and prelude shell wrappers classify their inner command', () => {
+  const gitForms: readonly string[] = [
+    'bash -c "git commit -m x"',
+    'bash -c \'bash -c "git commit -m x"\'',
+    'command bash -c "git commit -m x"',
+    'env bash -c "git commit -m x"',
+    'nohup bash -c "git commit -m x"',
+    'timeout 5 bash -c "git commit -m x"',
+    'xargs bash -c "git commit -m x"',
+    'A=1 GIT_PAGER=cat bash -c "git commit -m x"',
+    'sudo -u root env A=1 command bash -c "git commit -m x"',
+    'bash -c -- "git commit -m x"',
+    "env -S'git commit -m x'",
+    'exec -a x git commit -m x',
+  ];
+  for (const commandLine of gitForms) {
+    const classification = classifyGitInvocation(commandLine);
+    assert.equal(classification.warnings.length, 0, `${commandLine} must classify without warnings`);
+    assert.ok(
+      classification.invocations.some((entry) => entry.subcommand === 'commit' && entry.mutating),
+      `expected the wrapped git commit in: ${commandLine}`,
+    );
+  }
+});
+
+test('A1-2: wrapped jj hard-deny commands keep their scope', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  for (const commandLine of [
+    'bash -c \'bash -c "jj restore"\'',
+    'command bash -c "jj restore"',
+    'env bash -c "jj restore"',
+    'nohup bash -c "jj restore"',
+    'timeout 5 bash -c "jj restore"',
+    'bash -c -- "jj restore"',
+    "env -S'jj restore'",
+    'exec -a x jj restore',
+  ]) {
+    const invocation = classifyJjInvocation(commandLine).invocations[0];
+    assert.equal(invocation?.subcommand, 'restore', commandLine);
+    assert.equal(invocation?.scope, 'destructive', commandLine);
+  }
+  const wrappedUndo = classifyJjInvocation('command bash -c "jj undo"').invocations[0];
+  assert.equal(wrappedUndo?.scope, 'repo-wide');
+});
+
+test('A1-2: a wrapper whose nested command line cannot be read warns instead of vanishing', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  const bareShell = classifyGitInvocation('bash -c');
+  assert.equal(bareShell.invocations.length, 0);
+  assert.ok(bareShell.warnings.some((warning) => warning.includes('no command string')));
+
+  const bareEnv = classifyJjInvocation('env -S');
+  assert.equal(bareEnv.invocations.length, 0);
+  assert.ok(bareEnv.warnings.some((warning) => warning.includes('env -S')));
+});
+
+test('A1-3: canonical `jj operation` spellings share the `op` scope', async () => {
+  const { classifyJjInvocation, JJ_REPO_WIDE_SUBCOMMANDS } = await import('../src/git-command.ts');
+  assert.ok(JJ_REPO_WIDE_SUBCOMMANDS.includes('op restore'));
+  for (const command of ['jj operation restore abcdef', 'jj operation revert abcdef', 'jj operation abandon abcdef']) {
+    const invocation = classifyJjInvocation(command).invocations[0];
+    assert.equal(
+      invocation?.subcommand,
+      'op ' + (command.split(' ')[1] === 'operation' ? command.split(' ')[2] : ''),
+      command,
+    );
+    assert.equal(invocation?.scope, 'repo-wide', command);
+  }
+  assert.equal(classifyJjInvocation('jj operation log').invocations[0]?.scope, 'read-only');
+});
+
+test('A1-4: cumulative git -C is kept in order for the guard to apply', () => {
+  const single = only('git -C /tmp/repo commit');
+  assert.equal(single.changeDir, '/tmp/repo');
+  assert.equal(single.changeDirs, undefined, 'a single -C keeps the backward-compatible shape');
+  const cumulative = only('git -C /tmp/repo -C sub commit');
+  assert.deepEqual([...(cumulative.changeDirs ?? [])], ['/tmp/repo', 'sub']);
+  assert.equal(cumulative.changeDir, 'sub');
+  assert.equal(only('git -C/tmp/a -C b commit').changeDirs?.length, 2);
+});
+
+test('A1-4: cd flags/`--` and pushd are followed while cd - and popd warn', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  const gitTargets: ReadonlyArray<readonly [string, string]> = [
+    ['cd -P /tmp/repo && git status', '/tmp/repo'],
+    ['cd -- /tmp/repo && git status', '/tmp/repo'],
+    ['cd -L /tmp/repo && git status', '/tmp/repo'],
+    ['pushd /tmp/repo && git status', '/tmp/repo'],
+  ];
+  for (const [commandLine, target] of gitTargets) {
+    assert.equal(classifyGitInvocation(commandLine).segments[0]?.cdTarget, target, commandLine);
+  }
+  for (const [commandLine, target] of [
+    ['cd -P /tmp/repo && jj status', '/tmp/repo'],
+    ['cd -- /tmp/repo && jj status', '/tmp/repo'],
+    ['pushd /tmp/repo && jj status', '/tmp/repo'],
+  ] as const) {
+    assert.equal(classifyJjInvocation(commandLine).segments[0]?.changeDir, target, commandLine);
+  }
+
+  const gitDash = classifyGitInvocation('cd - && git status');
+  assert.equal(gitDash.segments[0]?.cdTarget, undefined, '`cd -` must not become a literal `-` path');
+  assert.ok(gitDash.warnings.some((warning) => warning.includes('previous directory')));
+  const jjDash = classifyJjInvocation('cd - && jj undo');
+  assert.equal(jjDash.segments[0]?.changeDir, undefined);
+  assert.ok(jjDash.warnings.some((warning) => warning.includes('previous directory')));
+  for (const commandLine of ['popd && jj undo', 'pushd && jj undo']) {
+    const classification = classifyJjInvocation(commandLine);
+    assert.equal(classification.segments[0]?.changeDir, undefined, commandLine);
+    assert.ok(classification.warnings.length > 0, `${commandLine} must warn instead of guessing the directory`);
+  }
+  // `pushd -n` pushes without changing directory.
+  assert.equal(classifyJjInvocation('pushd -n /tmp/repo && jj undo').segments[0]?.changeDir, undefined);
+});
+
+test('A1-5: -h/--help only counts in a real flag position', () => {
+  for (const commandLine of [
+    'git commit -a -m -h',
+    'git commit -m --help',
+    'git stash push -m --help',
+    'git checkout -- --help',
+    'git commit -m="-h"',
+  ]) {
+    const invocation = only(commandLine);
+    assert.equal(invocation.mutating, true, `${commandLine} must stay mutating`);
+    assert.equal(invocation.safety, 'mutate', commandLine);
+  }
+  for (const commandLine of ['git commit --help', 'git commit -a --help', 'git push --help', 'git stash --help']) {
+    assert.equal(only(commandLine).safety, 'read', commandLine);
+  }
+});
+
+test('A1-6: fetch -n means --no-tags, and only push -n is a dry run', () => {
+  const fetchNoTags = only('git fetch -n origin');
+  assert.equal(fetchNoTags.mutating, true, '`git fetch -n` really updates remote-tracking refs');
+  assert.equal(only('git fetch --dry-run origin').safety, 'read');
+  assert.equal(only('git push -n origin main').safety, 'read', '`git push -n` is the dry run');
+  assert.equal(only('git push --dry-run').safety, 'read');
+});
+
+test('A1-7: --git-dir/--work-tree and the GIT_DIR assignment are parsed as targets', () => {
+  const explicit = only('git --git-dir=/tmp/repo/.git --work-tree=/tmp/repo commit -m x');
+  assert.equal(explicit.gitDir, '/tmp/repo/.git');
+  assert.equal(explicit.workTree, '/tmp/repo');
+  const fromEnv = only('GIT_DIR=/tmp/repo/.git git commit -m x');
+  assert.equal(fromEnv.gitDir, '/tmp/repo/.git');
+  // A dynamic assignment cannot be resolved statically: fail open, but say so.
+  const dynamic = only('GIT_DIR="$X/.git" git commit -m x');
+  assert.equal(dynamic.gitDir, undefined);
+  assert.equal(dynamic.confidence, 'low');
+});
+
+test('A1-8: jj squash --into a revision other than @ is repository-wide', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  for (const command of [
+    'jj squash --into @-',
+    'jj squash --into @- file.txt',
+    'jj squash -t other',
+    'jj squash --to=other',
+  ]) {
+    assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'repo-wide', command);
+  }
+  for (const command of ['jj squash', 'jj squash file.txt', 'jj squash --into @ file.txt']) {
+    assert.equal(classifyJjInvocation(command).invocations[0]?.scope, 'workspace-local', command);
+  }
+});
+
+test('A1-9: read-only branch selectors and real dry runs are not mutating', () => {
+  for (const commandLine of [
+    'git branch --contains HEAD',
+    'git branch --merged HEAD',
+    'git branch --points-at HEAD',
+    'git branch -l "feat*"',
+    'git branch --list',
+  ]) {
+    assert.equal(only(commandLine).safety, 'read', commandLine);
+  }
+  for (const commandLine of [
+    'git commit --dry-run -m x',
+    'git commit -a --dry-run',
+    'git rebase --dry-run main',
+    'git merge --dry-run',
+  ]) {
+    assert.equal(only(commandLine).safety, 'read', commandLine);
+  }
+  // The mutating forms keep their classification.
+  for (const commandLine of ['git branch feature/x', 'git branch -f main HEAD', 'git commit -m x', 'git rebase main']) {
+    assert.equal(only(commandLine).mutating, true, commandLine);
+  }
+});

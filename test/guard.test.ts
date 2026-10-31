@@ -916,3 +916,282 @@ test('the guard entry warns once about config keys owned by other rows', () => {
   harness.runGuard(bash('git commit -m x'));
   assert.equal(harness.guards.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// A1 audited regressions (P1/P2/P3): scope-creep option order, wrapper
+// nesting, canonical jj operation spelling, directory changes, help arity,
+// `fetch -n`, explicit Git targets, squash --into, and read-only false
+// positives. Every decision runs against real jj/git fixtures.
+// ---------------------------------------------------------------------------
+
+test('A1-1: scope creep is hard-denied no matter where -R/--repository is written', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-1');
+  const outer = await initJjNative(fx.run, fx.path('outer'));
+  const inner = await initJjNative(fx.run, fx.path('outer/inner'));
+  const harness = createGuardContext();
+  install(harness, { defaultCwd: inner }); // default (warn) policy
+
+  const forms = [
+    `jj -R ${outer} undo`,
+    `jj undo -R ${outer}`,
+    `jj undo --repository ${outer}`,
+    `jj undo --repository=${outer}`,
+    `jj undo -R${outer}`,
+    `jj op restore deadbeef -R ${outer}`,
+    `jj workspace forget other -R ${outer}`,
+  ];
+  for (const [index, command] of forms.entries()) {
+    const reason = harness.runGuard({ name: 'bash', callId: `a1-1-${index}`, arguments: { command, workdir: inner } });
+    assert.ok(typeof reason === 'string', `${command} must be hard-denied as scope creep`);
+    assert.match(reason, /is not the repository this session is working in/, command);
+  }
+  // The same repository addressed from behind the subcommand stays allowed.
+  assert.equal(
+    harness.runGuard({
+      name: 'bash',
+      callId: 'a1-1-ok',
+      arguments: { command: `jj undo -R ${inner}`, workdir: inner },
+    }),
+    undefined,
+  );
+});
+
+test('A1-2: hard denies and deny-mode Git blocks reach through shell wrappers', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-2');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const jjHarness = createGuardContext();
+  install(jjHarness, { defaultCwd: colo }); // hard denies ignore the policy mode
+
+  const hardDenyForms = [
+    'bash -c \'bash -c "jj restore"\'',
+    'command bash -c "jj restore"',
+    'env bash -c "jj restore"',
+    'nohup bash -c "jj restore"',
+    'timeout 5 bash -c "jj restore"',
+    'xargs bash -c "jj restore"',
+    'bash -c -- "jj restore"',
+    "env -S'jj restore'",
+    'exec -a x jj restore',
+  ];
+  for (const [index, command] of hardDenyForms.entries()) {
+    const reason = jjHarness.runGuard({
+      name: 'bash',
+      callId: `a1-2-jj-${index}`,
+      arguments: { command, workdir: colo },
+    });
+    assert.match(reason ?? '', /^Blocked: `jj restore`/, command);
+  }
+
+  const gitHarness = createGuardContext();
+  install(gitHarness, { guardMutatingGit: 'deny', defaultCwd: colo });
+  for (const [index, command] of [
+    'bash -c \'bash -c "git commit -m x"\'',
+    'command bash -c "git commit -m x"',
+    'env bash -c "git commit -m x"',
+    'A=1 bash -c "git commit -m x"',
+    'exec -a x git commit -m x',
+    "env -S'git commit -m x'",
+  ].entries()) {
+    const reason = gitHarness.runGuard({
+      name: 'bash',
+      callId: `a1-2-git-${index}`,
+      arguments: { command, workdir: colo },
+    });
+    assert.match(reason ?? '', /^Blocked: `git commit`/, command);
+  }
+});
+
+test('A1-2: an unreadable wrapper is diagnosed once instead of vanishing', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-2-warn');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  install(harness, { defaultCwd: colo });
+  assert.equal(harness.runGuard(bash('bash -c', colo)), undefined, 'unparsable input stays fail-open');
+  const diagnostics = harness.events.filter((entry) => entry.event === 'jj/guard-degraded');
+  assert.equal(diagnostics.length, 1, 'the unreadable wrapper produces one diagnostic');
+  assert.match(diagnostics[0]?.payload?.message ?? '', /could not fully parse/);
+});
+
+test('A1-3: the canonical `jj operation` spelling cannot bypass repository-wide protection', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-3');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  install(harness, { guardJjRepositoryWide: 'deny', defaultCwd: colo });
+  for (const [index, command] of [
+    'jj operation restore abcdef',
+    'jj operation revert abcdef',
+    'jj operation abandon abcdef',
+    'jj op restore abcdef',
+  ].entries()) {
+    const reason = harness.runGuard({ name: 'bash', callId: `a1-3-${index}`, arguments: { command, workdir: colo } });
+    assert.ok(typeof reason === 'string', `${command} must be blocked like the op alias`);
+    assert.match(reason, /^Blocked: `jj op /, command);
+  }
+  assert.equal(harness.runGuard(bash('jj operation log', colo)), undefined, 'operation log stays read-only');
+});
+
+test('A1-4: cumulative -C, cd flags, and pushd are followed into the jj workspace', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-4');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const plain = fx.path('plain');
+
+  const gitHarness = createGuardContext();
+  install(gitHarness, { guardMutatingGit: 'deny', defaultCwd: plain });
+  for (const [index, command] of [
+    `git -C ${colo} -C . commit -m x`,
+    `git -C ${plain} -C ${colo} commit -m x`,
+    `cd -P ${colo} && git commit -m x`,
+    `cd -- ${colo} && git commit -m x`,
+    `pushd ${colo} && git commit -m x`,
+  ].entries()) {
+    assert.match(
+      gitHarness.runGuard({ name: 'bash', callId: `a1-4-git-${index}`, arguments: { command } }) ?? '',
+      /^Blocked: `git commit`/,
+      command,
+    );
+  }
+
+  const jjHarness = createGuardContext();
+  install(jjHarness, { defaultCwd: plain });
+  for (const [index, command] of [
+    `pushd ${colo} && jj restore`,
+    `cd -P ${colo} && jj restore`,
+    `cd -- ${colo} && jj restore`,
+    `bash -c "cd -P ${colo} && jj restore"`,
+  ].entries()) {
+    assert.match(
+      jjHarness.runGuard({ name: 'bash', callId: `a1-4-jj-${index}`, arguments: { command } }) ?? '',
+      /^Blocked: `jj restore`/,
+      command,
+    );
+  }
+});
+
+test('A1-5: an option value that looks like -h/--help does not disarm the deny', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-5');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  install(harness, { guardMutatingGit: 'deny', defaultCwd: colo });
+  for (const [index, command] of [
+    'git commit -a -m -h',
+    'git commit -m --help',
+    'git stash push -m --help',
+    'git checkout -- --help',
+  ].entries()) {
+    assert.match(
+      harness.runGuard({ name: 'bash', callId: `a1-5-${index}`, arguments: { command, workdir: colo } }) ?? '',
+      /^Blocked: `git /,
+      command,
+    );
+  }
+  for (const command of ['git commit --help', 'git commit -a --help', 'git push --help']) {
+    assert.equal(harness.runGuard({ name: 'bash', callId: `a1-5-ok-${command}`, arguments: { command } }), undefined);
+  }
+});
+
+test('A1-6: `git fetch -n` is a real fetch, so deny mode blocks it', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-6');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  install(harness, { guardMutatingGit: 'deny', defaultCwd: colo });
+  assert.match(harness.runGuard(bash('git fetch -n origin', colo)) ?? '', /^Blocked: `git fetch`/);
+  assert.equal(harness.runGuard(bash('git fetch --dry-run origin', colo)), undefined);
+  assert.equal(harness.runGuard(bash('git push -n origin main', colo)), undefined, '`git push -n` is the dry run');
+});
+
+test('A1-7: --git-dir/--work-tree retargeting takes part in the decision', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-7');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const plainGit = await initGit(fx.run, fx.path('plain-git'));
+  const plain = fx.path('plain');
+
+  const outsideHarness = createGuardContext();
+  install(outsideHarness, { guardMutatingGit: 'deny', defaultCwd: plain });
+  const aimedAtJj = `git --git-dir=${colo}/.git --work-tree=${colo} commit -m sneaky`;
+  assert.match(
+    outsideHarness.runGuard({ name: 'bash', callId: 'a1-7-aimed', arguments: { command: aimedAtJj } }) ?? '',
+    /^Blocked: `git commit`/,
+  );
+  const envAimedAtJj = `GIT_DIR=${colo}/.git git commit -m sneaky`;
+  assert.match(
+    outsideHarness.runGuard({ name: 'bash', callId: 'a1-7-env', arguments: { command: envAimedAtJj } }) ?? '',
+    /^Blocked: `git commit`/,
+  );
+
+  // Reverse direction: a git write explicitly aimed at a plain Git repository is
+  // not a jj write, even from inside a jj workspace.
+  const insideHarness = createGuardContext();
+  install(insideHarness, { guardMutatingGit: 'deny', defaultCwd: colo });
+  assert.equal(
+    insideHarness.runGuard(bash(`git --git-dir=${plainGit}/.git commit -m x`, colo)),
+    undefined,
+    'an explicit plain-Git target must not be refused',
+  );
+  // `--work-tree` alone does not move the repository Git writes to: git still
+  // discovers it from the cwd, so this stays a jj write and is blocked.
+  assert.match(
+    insideHarness.runGuard(bash(`git --work-tree=${plain} commit -m x`, colo)) ?? '',
+    /^Blocked: `git commit`/,
+    '`--work-tree` without `--git-dir` must not defeat the jj decision',
+  );
+});
+
+test('A1-7: evaluateGitCommand follows --git-dir/--work-tree with an injected sniff', () => {
+  const layouts: Readonly<Record<string, GuardDescriptorLike>> = {
+    '/jj': { kind: 'jj-colocated', jjRoot: '/jj', root: '/jj', workspaceName: 'default' },
+    '/plain': { kind: 'git', jjRoot: undefined, root: '/plain' },
+  };
+  const sniff = (cwd: string): GuardDescriptorLike => layouts[cwd] ?? { kind: 'none', jjRoot: undefined, root: cwd };
+  const aimed = evaluateGitCommand('git --git-dir=/jj/.git --work-tree=/jj commit -m x', '/plain', { sniff });
+  assert.equal(aimed.findings.length, 1);
+  assert.equal(aimed.findings[0]?.cwd, '/jj');
+  const reversed = evaluateGitCommand('git --git-dir=/plain/.git commit -m x', '/jj', { sniff });
+  assert.equal(reversed.findings.length, 0, 'a plain Git target from inside jj is not a jj write');
+});
+
+test('A1-8: `jj squash --into` another revision follows the repository-wide policy', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-8');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+
+  const warnHarness = createGuardContext();
+  install(warnHarness, { defaultCwd: colo });
+  assert.equal(warnHarness.runGuard(bash('jj squash --into @- file.txt', colo)), undefined, 'warn class runs');
+  assert.ok(
+    warnHarness.events.some((entry) => entry.event === 'jj/repo-wide-op' && entry.payload.subcommand === 'squash'),
+    'the cross-revision squash is reported as repository-wide',
+  );
+  assert.equal(warnHarness.runGuard(bash('jj squash', colo)), undefined);
+  assert.equal(
+    warnHarness.events.some((entry) => entry.event === 'jj/repo-wide-op' && entry.payload.subcommand === 'squash'),
+    true,
+  );
+
+  const denyHarness = createGuardContext();
+  install(denyHarness, { guardJjRepositoryWide: 'deny', defaultCwd: colo });
+  assert.match(denyHarness.runGuard(bash('jj squash --into @- file.txt', colo)) ?? '', /^Blocked: `jj squash`/);
+  assert.equal(denyHarness.runGuard(bash('jj squash', colo)), undefined, 'plain `jj squash` stays workspace-local');
+});
+
+test('A1-9: read-only Git selectors and real dry runs are allowed in deny mode', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-a1-9');
+  const colo = await initJjColocated(fx.run, fx.path('colo'));
+  const harness = createGuardContext();
+  install(harness, { guardMutatingGit: 'deny', readOnlyGitNotice: false, defaultCwd: colo });
+  for (const [index, command] of [
+    'git branch --contains HEAD',
+    'git branch --merged HEAD',
+    'git branch --points-at HEAD',
+    'git branch -l "feat*"',
+    'git commit --dry-run -m x',
+    'git commit -a --dry-run',
+    'git rebase --dry-run main',
+    'git merge --dry-run',
+  ].entries()) {
+    assert.equal(
+      harness.runGuard({ name: 'bash', callId: `a1-9-${index}`, arguments: { command, workdir: colo } }),
+      undefined,
+      `${command} is read-only and must be allowed`,
+    );
+  }
+  assert.match(harness.runGuard(bash('git branch feature/x', colo)) ?? '', /^Blocked: `git branch`/);
+});
