@@ -83,7 +83,10 @@ export interface GuardHarness {
 
 /** Create an isolated temporary root with a cleanup hook. */
 export function makeTempRoot(label = 'dsh-jj'): TempRoot {
-  const dir = mkdtempSync(join(tmpdir(), `${label}-`));
+  // Canonicalize the root: on macOS `tmpdir()` lives under the `/var` → `/private/var`
+  // symlink, and plugins report `realpath`-normalized paths that would otherwise never
+  // compare equal to fixture-derived paths.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), `${label}-`)));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
