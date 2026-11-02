@@ -52,6 +52,20 @@ function badInput(message: string, argv: readonly string[] = []): JjError {
   return new JjError('JJ_BAD_INPUT', message, { argv, exitCode: null, stderr: '', stdout: '' });
 }
 
+/**
+ * jj warnings printed on a zero exit (for example a pathspec that matched no file).
+ *
+ * They are returned instead of discarded: a silent empty commit or a paths-limited
+ * fold that matched nothing would otherwise look like a successful operation.
+ */
+function stderrWarnings(stderr: string): string[] {
+  const lines = stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('Warning:'));
+  return lines.length > 0 ? [bound(lines.join('\n'), 2 * 1024).text] : [];
+}
+
 const OPERATION_ID_RE = /^[0-9a-f]{4,128}$/;
 const BOOKMARK_NAME_RE = /^[^\s@]+$/;
 /** Bookmark names safe to embed verbatim in a jj revset (`bookmarks(exact:…)` / `::name`). */
@@ -81,6 +95,40 @@ export interface JjCommitResult {
   /** The new working-copy change; it keeps any changes not covered by `paths`. */
   readonly workingCopy: JjChangeRecord;
   /** Non-fatal jj warnings (for example paths that matched no file), surfaced to the model. */
+  readonly warnings: readonly string[];
+}
+
+/** Options for {@link JjOperations.amend}. */
+export interface JjAmendOptions {
+  /** Target change: a revset that must resolve to exactly one revision (usually a change id). */
+  readonly into: string;
+  /** Source of the correction; defaults to `@`. Pass the correction's change id when it was already committed. */
+  readonly from?: string;
+  /** Replacement description; omitted keeps the target's description (never opens an editor). */
+  readonly message?: string;
+  /** Repository-relative paths to fold only; the remaining changes stay in the source change. */
+  readonly paths?: readonly string[];
+}
+
+/** One change rewritten (rebased) by an amendment. */
+export interface JjAmendRewritten {
+  readonly changeId: string;
+  readonly description: string;
+  /** True when the rewrite left a conflict in this change; the model must resolve it. */
+  readonly conflict: boolean;
+}
+
+/** Result of {@link JjOperations.amend}. */
+export interface JjAmendResult {
+  /** The target change after the rewrite (its change id is stable). */
+  readonly amended: JjChangeRecord;
+  /** The working-copy change after the rewrite; a fully folded `@` is replaced by a fresh empty change. */
+  readonly workingCopy: JjChangeRecord;
+  /** True when the source was a committed change that jj abandoned after folding it. */
+  readonly sourceAbandoned: boolean;
+  /** Descendants rebased by the rewrite, newest first (target and `@` excluded). */
+  readonly rewritten: readonly JjAmendRewritten[];
+  /** Model-facing warnings (empty target description, remaining working-copy changes, conflicts). */
   readonly warnings: readonly string[];
 }
 
@@ -438,14 +486,9 @@ export class JjOperations {
     // A pathspec would otherwise be parsed as an option; `--` ends option parsing.
     const argv = ['commit', '-m', message, ...(paths.length > 0 ? ['--', ...paths] : [])];
     const commitResult = await this.run(cwd, argv, signal);
-    const warnings: string[] = [];
     // jj writes progress ("Working copy now at: …") to stderr as well; only real
     // warning lines are surfaced to the model.
-    const warningLines = commitResult.stderr
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith('Warning:'));
-    if (warningLines.length > 0) warnings.push(bound(warningLines.join('\n'), 2 * 1024).text);
+    const warnings: string[] = stderrWarnings(commitResult.stderr);
     const records = await this.readChangesAt(cwd, '@ | @-', TPL_STATUS, signal);
     const workingCopy = records.find((change) => change.currentWorkingCopy);
     const committed = records.find((change) => !change.currentWorkingCopy);
@@ -514,13 +557,29 @@ export class JjOperations {
     return descriptions;
   }
 
-  /** `jj squash --from <from> --into <into> [-m msg | --use-destination-message]`. */
+  /**
+   * `jj squash --from <from> --into <into> [-m msg | --use-destination-message] [-- <paths…>]`.
+   *
+   * A failed rewrite of published history is reported as `JJ_BAD_INPUT` with the
+   * correction-policy next step instead of jj's raw "is immutable" error: dsh-jj
+   * never retries with `--ignore-immutable`, so the model must be told to append a
+   * new change instead.
+   *
+   * @param cwd - workspace directory.
+   * @param from - source revset.
+   * @param into - destination revset.
+   * @param message - replacement description, or `undefined` with `useDestinationMessage`.
+   * @param useDestinationMessage - keep the destination's description (never opens an editor).
+   * @param paths - optional repository-relative paths to move only those changes.
+   * @param signal - cancellation signal.
+   */
   async squash(
     cwd: string,
     from: string,
     into: string,
     message: string | undefined,
     useDestinationMessage: boolean,
+    paths: readonly string[],
     signal?: AbortSignal,
   ): Promise<JjChangeRecord> {
     if (message !== undefined && useDestinationMessage) {
@@ -532,11 +591,211 @@ export class JjOperations {
         'jj_squash needs a message path: pass -m <message> or useDestinationMessage: true (jj would otherwise open an editor).',
       );
     }
+    for (const path of paths) {
+      if (path.trim().length === 0 || path.startsWith('-')) {
+        throw badInput('paths must be non-empty and must not start with "-".');
+      }
+    }
     const argv = ['squash', '--from', from, '--into', into];
     if (message !== undefined) argv.push('-m', message);
     if (useDestinationMessage) argv.push('--use-destination-message');
-    await this.run(cwd, argv, signal);
+    // A pathspec would otherwise be parsed as an option; `--` ends option parsing.
+    if (paths.length > 0) argv.push('--', ...paths);
+    try {
+      await this.run(cwd, argv, signal);
+    } catch (error) {
+      if (
+        error instanceof JjError &&
+        error.code !== 'JJ_BAD_INPUT' &&
+        /is immutable|rewrite \d+ immutable/i.test(error.detail.stderr)
+      ) {
+        throw badInput(
+          `jj_squash cannot rewrite ${JSON.stringify(into)}: the rewritten range contains a published change (jj treats it as immutable). A correction there would need a forced push, which dsh-jj never does; commit the correction as a new change instead.`,
+          argv,
+        );
+      }
+      throw error;
+    }
     return await this.readAt(cwd, signal);
+  }
+
+  /**
+   * Fold a correction into an earlier change (`jj squash --from … --into …`).
+   *
+   * This is the jj-native alternative to appending a "fix" commit: the target
+   * change is rewritten in place, its descendants are rebased, local bookmarks
+   * follow, and the change id stays stable.
+   *
+   * Safety invariants (all checked before anything is executed; failures are
+   * `JJ_BAD_INPUT` and never a partial rewrite):
+   * - `into` and `from` each resolve to exactly one revision, and are different;
+   * - `into` is an ancestor of `from` (only this workspace's own stack is foldable);
+   * - the rewritten range `into::@` contains no immutable change and no remote
+   *   bookmark. The second half matters: jj's default `immutable_heads()` leaves a
+   *   pushed *tracked* bookmark mutable, and folding into it would diverge the
+   *   local bookmark from its remote (a forced push);
+   * - the target is not a merge, the source is not empty and not conflicted.
+   *
+   * The destination description is kept by default (`--use-destination-message`),
+   * so jj never opens an editor; pass `message` when the fix changes what the
+   * target commit does. A stale working copy is recovered once and the flow
+   * retried, exactly like {@link handoff}.
+   *
+   * @param cwd - workspace directory.
+   * @param options - target, optional source/message/paths.
+   * @param signal - cancellation signal.
+   * @returns the amended target, the working copy, and every rebased descendant.
+   */
+  async amend(cwd: string, options: JjAmendOptions, signal?: AbortSignal): Promise<JjAmendResult> {
+    try {
+      return await this.amendFlow(cwd, options, signal);
+    } catch (error) {
+      if (!isStaleWorkingCopyFailure(error)) throw error;
+      await this.updateStale(cwd, signal);
+      return await this.amendFlow(cwd, options, signal);
+    }
+  }
+
+  /** One amendment attempt; {@link amend} retries it once after stale recovery. */
+  private async amendFlow(cwd: string, options: JjAmendOptions, signal?: AbortSignal): Promise<JjAmendResult> {
+    const into = options.into.trim();
+    if (into.length === 0) {
+      throw badInput('jj_amend needs a target change: pass the change id from jj_log as `into`.');
+    }
+    const from = options.from?.trim() ?? '@';
+    if (from.length === 0) {
+      throw badInput('jj_amend `from` must be a non-empty revset; omit it to fold the working copy.');
+    }
+    const paths = options.paths ?? [];
+    for (const path of paths) {
+      if (path.trim().length === 0 || path.startsWith('-')) {
+        throw badInput('paths must be non-empty and must not start with "-".');
+      }
+    }
+    if (options.message !== undefined && options.message.trim().length === 0) {
+      throw badInput(
+        'jj_amend `message` must not be empty; omit it to keep the target description, or pass the full new description.',
+      );
+    }
+
+    const intoIds = await this.readCommitIds(cwd, into, signal, 2);
+    if (intoIds.length === 0) {
+      throw badInput(
+        `jj_amend target ${JSON.stringify(into)} does not resolve to a change in this repository; pass exactly one change id from jj_log.`,
+      );
+    }
+    if (intoIds.length > 1) {
+      throw badInput(
+        `jj_amend target ${JSON.stringify(into)} selects more than one revision; pass exactly one change id so only that change is rewritten.`,
+      );
+    }
+    const fromIds = await this.readCommitIds(cwd, from, signal, 2);
+    if (fromIds.length === 0) {
+      throw badInput(`jj_amend source ${JSON.stringify(from)} does not resolve to a change in this repository.`);
+    }
+    if (fromIds.length > 1) {
+      throw badInput(
+        `jj_amend source ${JSON.stringify(from)} selects more than one revision; pass exactly one change id or path list.`,
+      );
+    }
+    if (intoIds[0] === fromIds[0]) {
+      throw badInput(
+        'jj_amend target and source are the same change; edit the files and use jj_describe / jj_commit, or pass the change the correction belongs to as `into`.',
+      );
+    }
+
+    // Only this workspace's own stack: the target must be an ancestor of the source.
+    const inStack = await this.readCommitIds(cwd, `(${into})::(${from})`, signal, 1);
+    if (inStack.length === 0) {
+      throw badInput(
+        `jj_amend cannot fold ${JSON.stringify(from)} into ${JSON.stringify(into)}: the target is not an ancestor of the source. Only changes in this workspace's own stack can be amended; inspect the graph with jj_log.`,
+      );
+    }
+
+    // Publication boundary over the WHOLE rewritten range (into::@), not only the
+    // target: `jj squash --into` rebases every descendant up to the working copy.
+    const published = await this.readChangesAt(
+      cwd,
+      `(${into})::@ & (immutable() | remote_bookmarks())`,
+      TPL_LOG,
+      signal,
+      1,
+    );
+    const publishedChange = published[0];
+    if (publishedChange !== undefined) {
+      const label = bound(publishedChange.description.trim(), 120) || '(no description)';
+      throw badInput(
+        `jj_amend refuses to rewrite ${publishedChange.changeId} (${label}): the rewritten range contains a published change (trunk, tag or remote bookmark). Folding the correction would require a forced push, which dsh-jj never does — commit the correction as a new change instead and tell the user why.`,
+      );
+    }
+
+    const parents = await this.readCommitIds(cwd, `(${into})-`, signal, 2);
+    if (parents.length > 1) {
+      throw badInput(
+        `jj_amend cannot fold into ${JSON.stringify(into)}: the target is a merge commit (${parents.length} parents), and folding into a merge would make the correction's intent ambiguous.`,
+      );
+    }
+
+    const source = await this.readAt(cwd, signal, from);
+    // Conflict first: a conflicted merge change also reports `empty`, and folding
+    // it would move the conflict markers into the target.
+    if (source.conflict) {
+      throw badInput(
+        `jj_amend cannot fold ${JSON.stringify(from)}: the source change has conflicts. Resolve them first (edit the files, then jj_status), and call jj_amend again.`,
+      );
+    }
+    if (source.empty) {
+      throw badInput(
+        `jj_amend has nothing to fold: ${JSON.stringify(from)} has no content changes. Edit the files first, or use jj_describe for a description-only change.`,
+      );
+    }
+
+    const argv = ['squash', '--from', from, '--into', into];
+    if (options.message !== undefined) argv.push('-m', options.message);
+    else argv.push('--use-destination-message');
+    if (paths.length > 0) argv.push('--', ...paths);
+    const squashResult = await this.run(cwd, argv, signal);
+
+    const amended = await this.readAt(cwd, signal, into);
+    const workingCopy = await this.readAt(cwd, signal);
+    const stack = await this.readChangesAt(cwd, `(${into})::@`, TPL_LOG, signal, this.config.maxLogLimit);
+    const rewritten = stack
+      .filter((change) => change.changeId !== amended.changeId && !change.currentWorkingCopy)
+      .map((change) => ({
+        changeId: change.changeId,
+        description: change.description,
+        conflict: change.conflict,
+      }));
+
+    let sourceAbandoned = false;
+    if (!source.currentWorkingCopy) {
+      // Change ids survive rewrites, so an empty lookup means jj abandoned the
+      // now-empty correction change instead of keeping it in the stack. The
+      // working-copy change is never reported as abandoned: a fully folded `@` is
+      // replaced by a fresh empty change, which `workingCopy` already describes.
+      const stillVisible = await this.readCommitIds(cwd, source.changeId, signal, 1);
+      sourceAbandoned = stillVisible.length === 0;
+    }
+
+    const warnings = stderrWarnings(squashResult.stderr);
+    if (amended.description.trim().length === 0) {
+      warnings.push(
+        'The amended change has no description; pass `message` when the correction changes what the commit does (jj_commit_style reports the repository style).',
+      );
+    }
+    if (paths.length > 0 && !workingCopy.empty) {
+      warnings.push(
+        'Only the given paths were folded; the remaining working-copy changes are still in @ (it is not empty).',
+      );
+    }
+    const conflicted = rewritten.filter((change) => change.conflict);
+    if (conflicted.length > 0) {
+      warnings.push(
+        `The rewrite left conflicts in: ${conflicted.map((change) => change.changeId).join(', ')}. Resolve them yourself, then call jj_amend again to verify.`,
+      );
+    }
+
+    return { amended, workingCopy, sourceAbandoned, rewritten, warnings };
   }
 
   /** `jj undo` or `jj op restore <operationId>`; records the head operation first. */
@@ -1478,8 +1737,17 @@ export class JjOperations {
     revset: string,
     template: string,
     signal?: AbortSignal,
+    limit?: number,
   ): Promise<JjChangeRecord[]> {
-    const argv = ['log', '-r', revset, '--no-graph', '-T', template];
+    const argv = [
+      'log',
+      '-r',
+      revset,
+      '--no-graph',
+      ...(limit !== undefined ? ['--limit', String(limit)] : []),
+      '-T',
+      template,
+    ];
     const result = await this.run(cwd, argv, signal);
     return readChangeRecords(result.stdout, argv);
   }

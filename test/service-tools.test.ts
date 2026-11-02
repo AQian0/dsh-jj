@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
-import { createCommandRunJj } from '../src/jj-command.ts';
+import { createCommandRunJj, JjError } from '../src/jj-command.ts';
 import { JjOperations, TPL_CHANGE, TPL_STATUS, changeFromRecord, isRewritableChange } from '../src/service.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
 import {
@@ -151,7 +151,7 @@ test('operation layer: status, new, describe, log, diff, op log, bookmarks, work
   assert.ok(workspaces.some((entry) => entry.name === 'outside'));
 
   // squash + rebase run through jj as well
-  await operations.squash(repo, '@', '@-', undefined, true, undefined);
+  await operations.squash(repo, '@', '@-', undefined, true, [], undefined);
   const rebased = await operations.rebase(repo, '@', '@-', undefined);
   assert.equal(typeof rebased, 'string');
   assert.ok(
@@ -222,7 +222,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   const operations = new JjOperations({ runJj, config: {} });
 
   await assert.rejects(() => operations.undo(repo, 'NOT-HEX', undefined), /hexadecimal operation id/);
-  await assert.rejects(() => operations.squash(repo, '@', '@-', 'msg', true, undefined), /mutually exclusive/);
+  await assert.rejects(() => operations.squash(repo, '@', '@-', 'msg', true, [], undefined), /mutually exclusive/);
   await assert.rejects(
     () => operations.bookmarkSet(repo, 'bad name', '@', false, undefined),
     /must not contain whitespace/,
@@ -1582,4 +1582,234 @@ test('operation layer: jj_handoff does not move a bookmark that points at shared
   assert.match(result.bookmarkSkipped ?? '', /outside this workspace's stack/);
   const mainAfter = (await mustRun(fx.run, ['jj', 'log', '-r', 'main', '--no-graph', '-T', 'commit_id'], repo)).stdout;
   assert.equal(mainAfter, mainBefore, 'the shared main bookmark was not moved');
+});
+
+// ---------------------------------------------------------------------------
+// Correction folding (amend): rewrite an unpushed target instead of appending.
+// Policy: the window stays open until a remote bookmark, trunk or tag reaches
+// the change; a local bookmark (even at the tip) does not close it.
+// ---------------------------------------------------------------------------
+
+/** Read one change id through the real jj CLI (fixture assertions). */
+async function changeIdAt(fx: Fixture, cwd: string, revset: string): Promise<string> {
+  const result = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'log', '-r', revset, '--no-graph', '-T', 'json(change_id)'],
+    cwd,
+  );
+  return JSON.parse(result.stdout.trim()) as string;
+}
+
+/** Number of changes above jj's root: the whole local stack, including the empty @. */
+async function stackSize(fx: Fixture, cwd: string): Promise<number> {
+  const result = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'log', '-r', '::@ ~ root()', '--no-graph', '-T', 'json(change_id) ++ "\\n"'],
+    cwd,
+  );
+  return result.stdout.split('\n').filter((line) => line.trim().length > 0).length;
+}
+
+/** Three unpushed commits (`one`, `two`, `three`) plus an empty @ on top. */
+async function makeAmendFixture(t: Parameters<typeof makeFixture>[0], label: string) {
+  const fx = makeFixture(t, label);
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'one.txt', 'one');
+  await commitWorkingCopy(fx, repo, 'feat(one): add one');
+  await writeFixtureFile(fx, repo, 'two.txt', 'two');
+  await commitWorkingCopy(fx, repo, 'feat(two): add two');
+  await writeFixtureFile(fx, repo, 'three.txt', 'three');
+  await commitWorkingCopy(fx, repo, 'feat(three): add three');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  return {
+    fx,
+    repo,
+    operations,
+    one: await changeIdAt(fx, repo, '@---'),
+    two: await changeIdAt(fx, repo, '@--'),
+    three: await changeIdAt(fx, repo, '@-'),
+  };
+}
+
+/** Local bare remote wired as `origin`; nothing is pushed by this helper. */
+async function addBareRemote(fx: Fixture, repo: string): Promise<string> {
+  const remote = join(fx.root, 'remote.git');
+  await mustRun(fx.run, ['git', 'init', '--bare', '--quiet', remote], fx.root);
+  await mustRun(fx.run, ['jj', 'git', 'remote', 'add', 'origin', remote], repo);
+  return remote;
+}
+
+test('operation layer: amend folds a working-copy correction into an earlier change', async (t) => {
+  const { fx, repo, operations, one, two, three } = await makeAmendFixture(t, 'dsh-jj-amend-basic');
+  await writeFixtureFile(fx, repo, 'one.txt', 'one fixed');
+
+  const result = await operations.amend(repo, { into: one });
+
+  assert.equal(result.amended.changeId, one, 'the target change id is stable');
+  assert.equal(result.amended.description, 'feat(one): add one', 'the target description is kept');
+  assert.equal(result.workingCopy.empty, true, 'the folded working copy is empty');
+  assert.deepEqual(
+    result.rewritten.map((change) => change.changeId),
+    [three, two],
+    'the rebased descendants are reported, newest first',
+  );
+  assert.equal(result.sourceAbandoned, false);
+  assert.equal(await stackSize(fx, repo), 4, 'no new commit was appended');
+  const shown = await mustRun(fx.run, ['jj', 'file', 'show', '-r', one, 'one.txt'], repo);
+  assert.match(shown.stdout, /one fixed/);
+});
+
+test('operation layer: amend folds an already-committed correction and abandons it', async (t) => {
+  const { fx, repo, operations, one, two, three } = await makeAmendFixture(t, 'dsh-jj-amend-committed');
+  await writeFixtureFile(fx, repo, 'one.txt', 'one fixed');
+  await commitWorkingCopy(fx, repo, 'fix: fold me into one');
+  const correction = await changeIdAt(fx, repo, '@-');
+  assert.equal(await stackSize(fx, repo), 5, 'four commits plus the empty @');
+
+  const result = await operations.amend(repo, { from: correction, into: one });
+
+  assert.equal(result.amended.changeId, one);
+  assert.equal(result.sourceAbandoned, true, 'the emptied correction commit is abandoned');
+  assert.deepEqual(
+    result.rewritten.map((change) => change.changeId),
+    [three, two],
+  );
+  assert.equal(await stackSize(fx, repo), 4, 'the correction commit is gone');
+  const shown = await mustRun(fx.run, ['jj', 'file', 'show', '-r', one, 'one.txt'], repo);
+  assert.match(shown.stdout, /one fixed/);
+});
+
+test('operation layer: amend with paths folds only the given files', async (t) => {
+  const { fx, repo, operations, one } = await makeAmendFixture(t, 'dsh-jj-amend-paths');
+  await writeFixtureFile(fx, repo, 'one.txt', 'one fixed');
+  await writeFixtureFile(fx, repo, 'extra.txt', 'extra');
+
+  const result = await operations.amend(repo, { into: one, paths: ['one.txt'] });
+
+  assert.equal(result.workingCopy.empty, false, 'the unrelated change stays in the working copy');
+  assert.ok(result.warnings.some((warning) => /remaining working-copy changes/.test(warning)));
+  const target = await mustRun(fx.run, ['jj', 'file', 'show', '-r', one, 'one.txt'], repo);
+  assert.match(target.stdout, /one fixed/);
+  const workingCopyFiles = await mustRun(
+    fx.run,
+    ['jj', 'log', '-r', '@', '--no-graph', '-T', 'json(self.diff().files().map(|f| f.path()))'],
+    repo,
+  );
+  assert.match(workingCopyFiles.stdout, /extra\.txt/);
+  assert.doesNotMatch(workingCopyFiles.stdout, /one\.txt/);
+});
+
+test('operation layer: amend rewrites the target description only when message is passed', async (t) => {
+  const { fx, repo, operations, two } = await makeAmendFixture(t, 'dsh-jj-amend-message');
+  await writeFixtureFile(fx, repo, 'two.txt', 'two fixed');
+
+  const result = await operations.amend(repo, { into: two, message: 'feat(two): add two, corrected' });
+
+  assert.equal(result.amended.description, 'feat(two): add two, corrected');
+  assert.equal(result.amended.changeId, two);
+});
+
+test('operation layer: amend refuses a published target (trunk push) without rewriting anything', async (t) => {
+  const { fx, repo, operations, one } = await makeAmendFixture(t, 'dsh-jj-amend-trunk');
+  await addBareRemote(fx, repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'main', '-r', '@-'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'push', '--bookmark', 'main'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'fetch'], repo);
+  await writeFixtureFile(fx, repo, 'one.txt', 'one fixed');
+
+  await assert.rejects(
+    () => operations.amend(repo, { into: one }),
+    (error: unknown) =>
+      error instanceof JjError && error.code === 'JJ_BAD_INPUT' && /published change/.test(error.message),
+  );
+  const target = await mustRun(fx.run, ['jj', 'file', 'show', '-r', one, 'one.txt'], repo);
+  assert.match(target.stdout, /^one$/m, 'the published target was not rewritten');
+});
+
+test('operation layer: amend refuses a pushed tracked bookmark even though jj still calls it mutable', async (t) => {
+  const { fx, repo, operations, three } = await makeAmendFixture(t, 'dsh-jj-amend-remote-bookmark');
+  await addBareRemote(fx, repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'feat', '-r', three], repo);
+  await mustRun(fx.run, ['jj', 'git', 'push', '--bookmark', 'feat'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'fetch'], repo);
+  const target = await operations.log(repo, three, 1);
+  assert.equal(target[0]?.immutable, false, 'tracked bookmarks stay outside the default immutable_heads()');
+  assert.deepEqual([...(target[0]?.remoteBookmarks ?? [])], ['feat']);
+  await writeFixtureFile(fx, repo, 'three.txt', 'three fixed');
+
+  await assert.rejects(
+    () => operations.amend(repo, { into: three }),
+    (error: unknown) =>
+      error instanceof JjError && error.code === 'JJ_BAD_INPUT' && /remote bookmark/.test(error.message),
+  );
+});
+
+test('operation layer: amend rejects a target outside the stack, an empty source, and a merge target', async (t) => {
+  const { fx, repo, operations, two, three } = await makeAmendFixture(t, 'dsh-jj-amend-invalid');
+  await assert.rejects(
+    () => operations.amend(repo, { into: three, from: two }),
+    (error: unknown) => error instanceof JjError && /not an ancestor/.test(error.message),
+  );
+  await assert.rejects(
+    () => operations.amend(repo, { into: two }),
+    (error: unknown) => error instanceof JjError && /nothing to fold/.test(error.message),
+  );
+
+  await mustRun(fx.run, ['jj', 'new', two, three, '-m', 'merge: combine'], repo);
+  await mustRun(fx.run, ['jj', 'new'], repo);
+  const merge = await changeIdAt(fx, repo, '@-');
+  await writeFixtureFile(fx, repo, 'one.txt', 'one more');
+  await assert.rejects(
+    () => operations.amend(repo, { into: merge }),
+    (error: unknown) => error instanceof JjError && /merge commit/.test(error.message),
+  );
+});
+
+test('operation layer: amend refuses a conflicted source', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-amend-conflict');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  const base = await changeIdAt(fx, repo, '@-');
+  await mustRun(fx.run, ['jj', 'new', base], repo);
+  await writeFixtureFile(fx, repo, 'f.txt', 'left');
+  await commitWorkingCopy(fx, repo, 'feat: left');
+  const left = await changeIdAt(fx, repo, '@-');
+  await mustRun(fx.run, ['jj', 'new', base], repo);
+  await writeFixtureFile(fx, repo, 'f.txt', 'right');
+  await commitWorkingCopy(fx, repo, 'feat: right');
+  const right = await changeIdAt(fx, repo, '@-');
+  await mustRun(fx.run, ['jj', 'new', left, right], repo);
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  await assert.rejects(
+    () => operations.amend(repo, { into: left }),
+    (error: unknown) => error instanceof JjError && /has conflicts/.test(error.message),
+  );
+});
+
+test('operation layer: jj_squash moves only the given paths and reports published targets', async (t) => {
+  const { fx, repo, operations, three } = await makeAmendFixture(t, 'dsh-jj-squash-paths');
+  await writeFixtureFile(fx, repo, 'three.txt', 'three fixed');
+  await writeFixtureFile(fx, repo, 'extra.txt', 'extra');
+
+  const workingCopy = await operations.squash(repo, '@', three, undefined, true, ['three.txt']);
+  assert.equal(workingCopy.empty, false, 'the unrelated change stays in @');
+  const target = await mustRun(fx.run, ['jj', 'file', 'show', '-r', three, 'three.txt'], repo);
+  assert.match(target.stdout, /three fixed/);
+
+  await addBareRemote(fx, repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'main', '-r', three], repo);
+  await mustRun(fx.run, ['jj', 'git', 'push', '--bookmark', 'main'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'fetch'], repo);
+  await writeFixtureFile(fx, repo, 'three.txt', 'three fixed again');
+  await assert.rejects(
+    () => operations.squash(repo, '@', three, undefined, true, []),
+    (error: unknown) =>
+      error instanceof JjError && error.code === 'JJ_BAD_INPUT' && /published change/.test(error.message),
+  );
 });

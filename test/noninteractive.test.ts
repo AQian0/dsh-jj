@@ -103,14 +103,14 @@ test('V2: `jj_squash` with no message never launches an editor (operation layer)
 
   // §7.3.6: with neither message path the operation refuses before spawning jj.
   await assert.rejects(
-    () => operations.squash(repo, '@', '@-', undefined, false, undefined),
+    () => operations.squash(repo, '@', '@-', undefined, false, [], undefined),
     /jj_squash needs a message path/,
   );
   assert.equal(calls.filter((argv) => argv.includes('squash')).length, 0, 'no jj squash process was spawned');
   assert.equal(editor.called(), 0, 'jj must not launch any editor');
 
   // The explicit message paths still work and never edit.
-  const change = await operations.squash(repo, '@', '@-', undefined, true, undefined);
+  const change = await operations.squash(repo, '@', '@-', undefined, true, [], undefined);
   assert.equal(typeof change.changeId, 'string');
   assert.equal(editor.called(), 0, 'jj must not launch any editor');
   const squashCall = calls.find((argv) => argv.includes('squash'));

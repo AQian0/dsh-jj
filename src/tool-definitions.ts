@@ -423,6 +423,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           args.into ?? '@-',
           args.message,
           args.useDestinationMessage ?? false,
+          [],
           exec.signal,
         );
         return changeView(change);
