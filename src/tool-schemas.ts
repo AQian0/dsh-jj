@@ -62,6 +62,7 @@ export function workspaceFields(descriptor: VcsDescriptor): {
   };
 }
 
+/** Model-facing view of one change record; the field set is declared once by {@link CHANGE_SCHEMA}. */
 export interface ChangeView {
   readonly changeId: string;
   readonly commitId: string;
@@ -75,6 +76,12 @@ export interface ChangeView {
   readonly author: string;
 }
 
+/**
+ * Project one change record onto the model-facing view declared by {@link CHANGE_SCHEMA}.
+ *
+ * @param change - a change record from the jj templates.
+ * @returns the view, with `rewritable` derived from the publication window.
+ */
 export function changeView(change: {
   changeId: string;
   commitId: string;

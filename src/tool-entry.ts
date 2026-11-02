@@ -10,7 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { assertServiceableConfig, resolveConfig, warnMisplacedConfig, type JjPluginConfig } from './config.ts';
 import { jjToolDefinitions } from './tool-definitions.ts';
-import type { JjToolService, JjToolsHost } from './tool-shared.ts';
+import type { JjToolService, JjToolsHost, ToolExec } from './tool-shared.ts';
 
 /**
  * Read the host logger without touching an unavailable Cordis service property.
@@ -53,7 +53,7 @@ export function registerJjTools(
    * `defaultCwd` remains the documented path only for calls without an agent
    * (tests/embedders).
    */
-  const cwdFor = async (exec: { agent?: unknown; signal?: AbortSignal }): Promise<string> => {
+  const cwdFor = async (exec: ToolExec): Promise<string> => {
     const fallback = config.defaultCwd.length > 0 ? config.defaultCwd : process.cwd();
     if (exec.agent === undefined) return fallback;
     if (host.workingDirectory === undefined) {

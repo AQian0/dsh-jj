@@ -175,14 +175,6 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
       ? systemPrompt.getContextOrder('WORKING_DIRECTORY')
       : JJ_CONTEXT_ORDER_FALLBACK);
 
-  const commitOptions: JjPromptCommitOptions = {
-    ...(options.commitGuidance !== undefined ? { commitGuidance: options.commitGuidance } : {}),
-    ...(options.commitStyle !== undefined ? { commitStyle: options.commitStyle } : {}),
-    ...(options.commitStyleCustom !== undefined ? { commitStyleCustom: options.commitStyleCustom } : {}),
-    ...(options.preferSplitCommits !== undefined ? { preferSplitCommits: options.preferSplitCommits } : {}),
-    ...(options.preferAmendCorrections !== undefined ? { preferAmendCorrections: options.preferAmendCorrections } : {}),
-  };
-
   /**
    * Sessions that have already seen a parallel peer. Latching keeps the end-of-task
    * rebase checklist in the context after the peer session ends, so the hand-off
@@ -194,26 +186,41 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
   const rebaseTarget = options.rebaseTarget ?? DEFAULT_REBASE_TARGET;
   const isObject = (value: unknown): value is object => typeof value === 'object' && value !== null;
 
+  /** One directory's jj workspace facts: the prompt needs kind/name, detection the identity. */
+  interface ResolvedWorkspace extends JjWorkspaceIdentity {
+    readonly kind: VcsKind;
+    readonly workspaceName?: string;
+  }
+
   /**
-   * Resolve one directory to its jj workspace identity, peeking at the warm cache
-   * first (no subprocess either way). Failures are contained by the caller.
+   * Resolve one directory to its jj workspace: the warm cache first, then the sync
+   * sniff (no subprocess either way). `undefined` outside a jj workspace; every
+   * caller contains failures, so this can never break an assembly.
    */
-  const probeWorkspace: JjWorkspaceProbe = (cwd: string): JjWorkspaceIdentity | undefined => {
+  const resolveWorkspace = (cwd: string): ResolvedWorkspace | undefined => {
     const peeked = options.peek?.(cwd);
     if (peeked !== undefined) {
       if (!peeked.kind.startsWith('jj-')) return undefined;
       return {
+        kind: peeked.kind,
         workspaceRoot: peeked.root,
+        ...(peeked.workspaceName !== undefined ? { workspaceName: peeked.workspaceName } : {}),
         ...(peeked.jjRepoPath !== undefined ? { jjRepoPath: peeked.jjRepoPath } : {}),
       };
     }
     const sniffed = (options.sniff ?? sniffVcsSync)(cwd);
     if (!sniffed.kind.startsWith('jj-')) return undefined;
+    // The filesystem sniff cannot resolve a workspace *name* (`jj workspace
+    // list` is the only source); leave it undefined instead of reading a field
+    // the sniff result does not have.
     return {
+      kind: sniffed.kind,
       workspaceRoot: sniffed.jjRoot ?? sniffed.cwd,
       ...(sniffed.jjRepoPath !== undefined ? { jjRepoPath: sniffed.jjRepoPath } : {}),
     };
   };
+  /** Peer probe for the multi-session detection: it needs the workspace identity only. */
+  const probeWorkspace: JjWorkspaceProbe = (cwd) => resolveWorkspace(cwd);
 
   /** One agent's multi-session applicability plus detection result. */
   interface MultiSessionState {
@@ -251,38 +258,13 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
       const cwd = workingDirectory.get(agent.session);
       if (typeof cwd !== 'string' || cwd.length === 0) return '';
 
-      const peeked = options.peek?.(cwd);
-      let kind: VcsKind;
-      let root: string;
-      let workspaceName: string | undefined;
-      let identity: JjWorkspaceIdentity;
-      if (peeked !== undefined) {
-        if (!peeked.kind.startsWith('jj-')) return '';
-        kind = peeked.kind;
-        root = peeked.root;
-        workspaceName = peeked.workspaceName;
-        identity = {
-          workspaceRoot: root,
-          ...(peeked.jjRepoPath !== undefined ? { jjRepoPath: peeked.jjRepoPath } : {}),
-        };
-      } else {
-        const sniffed = (options.sniff ?? sniffVcsSync)(cwd);
-        if (!sniffed.kind.startsWith('jj-')) return '';
-        kind = sniffed.kind;
-        root = sniffed.jjRoot ?? sniffed.cwd;
-        // The filesystem sniff cannot resolve a workspace *name* (`jj workspace
-        // list` is the only source); leave it undefined instead of reading a field
-        // the sniff result does not have.
-        identity = {
-          workspaceRoot: root,
-          ...(sniffed.jjRepoPath !== undefined ? { jjRepoPath: sniffed.jjRepoPath } : {}),
-        };
-      }
+      const workspace = resolveWorkspace(cwd);
+      if (workspace === undefined) return '';
 
       // Multi-session guidance is optional and must never break an assembly.
       let multiSessionText = '';
       try {
-        const state = multiSessionStateFor(agent.session, identity);
+        const state = multiSessionStateFor(agent.session, workspace);
         if (state.applicable) {
           const seenPeer =
             (state.detection?.sharedWorkspace.length ?? 0) > 0 || (state.detection?.siblingWorkspace.length ?? 0) > 0;
@@ -302,7 +284,7 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
         multiSessionText = '';
       }
 
-      const base = jjPreferenceContextText(kind, root, workspaceName, commitOptions);
+      const base = jjPreferenceContextText(workspace.kind, workspace.workspaceRoot, workspace.workspaceName, options);
       return multiSessionText.length > 0 ? `${base}\n${multiSessionText}` : base;
     } catch {
       // A prompt contribution must never break an assembly.

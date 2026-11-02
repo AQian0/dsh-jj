@@ -20,6 +20,7 @@ import {
 } from './commit-style.ts';
 import { isRewritableChange } from './jj-templates.ts';
 import { CHANGE_PROPERTIES, CHANGE_SCHEMA, changeView, textRender, workspaceFields } from './tool-schemas.ts';
+import type { VcsDescriptor } from './types.ts';
 import {
   amendNextSteps,
   canonicalWorkspacePath,
@@ -27,6 +28,7 @@ import {
   isRootWorkspace,
   requireWorkspace,
   type ToolContext,
+  type ToolExec,
 } from './tool-shared.ts';
 
 /**
@@ -62,6 +64,17 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   // session prompt and jj_commit_style cannot disagree; the tools row only carries
   // tool-specific tuning (limits, default cwd, …).
   const commitConfig = operations.config;
+  /**
+   * Resolve one tool call's directory and refuse it when it is not a usable jj
+   * workspace (contract §7.4).
+   *
+   * Every tool starts here, so "never guess a repository, never fall back to Git" is
+   * stated once instead of in every `execute` body.
+   */
+  const openWorkspace = async (exec: ToolExec): Promise<{ cwd: string; descriptor: VcsDescriptor }> => {
+    const cwd = await context.cwdFor(exec);
+    return { cwd, descriptor: await requireWorkspace(context, cwd, exec.signal) };
+  };
 
   return [
     defineTool({
@@ -93,8 +106,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(_args, exec) {
-        const cwd = await context.cwdFor(exec);
-        const descriptor = await requireWorkspace(context, cwd, exec.signal);
+        const { cwd, descriptor } = await openWorkspace(exec);
         const status = await operations.status(cwd, exec.signal);
         return {
           ...workspaceFields(descriptor),
@@ -137,8 +149,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const revset = args.revset ?? '@ | @-';
         const requested = args.limit ?? config.defaultLogLimit;
         const limit = Math.max(1, Math.min(requested, config.maxLogLimit));
@@ -146,18 +157,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         return {
           revset,
           truncated: changes.length >= limit,
-          changes: changes.map((change) => ({
-            changeId: change.changeId,
-            commitId: change.commitId,
-            description: change.description,
-            empty: change.empty,
-            conflict: change.conflict,
-            currentWorkingCopy: change.currentWorkingCopy,
-            bookmarks: [...change.bookmarks],
-            remoteBookmarks: [...change.remoteBookmarks],
-            rewritable: isRewritableChange(change),
-            author: change.author,
-          })),
+          changes: changes.map(changeView),
         };
       },
     }),
@@ -194,8 +194,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const revset = args.revset ?? '@';
         const format = args.format ?? 'stat';
         const paths = args.paths ?? [];
@@ -228,8 +227,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const change = await operations.newChange(cwd, args.parents ?? [], args.message, exec.signal);
         return changeView(change);
       },
@@ -274,8 +272,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const result = await operations.commit(cwd, args.message, args.paths ?? [], exec.signal);
         return {
           committed: changeView(result.committed),
@@ -305,8 +302,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const change = await operations.describeChange(cwd, args.revset ?? '@', args.message, exec.signal);
         return changeView(change);
       },
@@ -367,8 +363,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(_args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const sampleLimit = Math.max(1, Math.min(commitConfig.commitStyleSampleLimit, config.maxLogLimit));
         // `@` and the root commit are usually empty, so read a few extra log entries
         // to collect `sampleLimit` non-empty descriptions; the tools row's maxLogLimit
@@ -433,8 +428,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const change = await operations.squash(
           cwd,
           args.from ?? '@',
@@ -509,18 +503,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
-        const result = await operations.amend(
-          cwd,
-          {
-            into: args.into,
-            ...(args.from !== undefined ? { from: args.from } : {}),
-            ...(args.message !== undefined ? { message: args.message } : {}),
-            ...(args.paths !== undefined ? { paths: args.paths } : {}),
-          },
-          exec.signal,
-        );
+        const { cwd } = await openWorkspace(exec);
+        const result = await operations.amend(cwd, args, exec.signal);
         return {
           amended: changeView(result.amended),
           workingCopy: changeView(result.workingCopy),
@@ -556,8 +540,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const result = await operations.undo(cwd, args.operationId, exec.signal);
         return { mode: result.mode, operationId: result.operationId, message: result.message };
       },
@@ -598,8 +581,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const limit = Math.max(1, Math.min(args.limit ?? 20, 100));
         const all = await operations.opLog(cwd, limit, exec.signal);
         return {
@@ -658,8 +640,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const result = await operations.workspaceAdd(
           cwd,
           args.path,
@@ -708,8 +689,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(_args, exec) {
-        const cwd = await context.cwdFor(exec);
-        const descriptor = await requireWorkspace(context, cwd, exec.signal);
+        const { cwd, descriptor } = await openWorkspace(exec);
         const workspaces = await operations.workspaceList(cwd, exec.signal);
         return {
           workspaces: workspaces.map((workspace) => ({
@@ -752,8 +732,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const bookmarks = await operations.bookmarkList(cwd, args.allRemotes ?? false, exec.signal);
         return {
           bookmarks: bookmarks.map((bookmark) => ({
@@ -790,8 +769,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const result = await operations.bookmarkSet(
           cwd,
           args.name,
@@ -831,8 +809,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        await requireWorkspace(context, cwd, exec.signal);
+        const { cwd } = await openWorkspace(exec);
         const mode = args.mode ?? 'revisions';
         const message = await operations.rebase(cwd, args.revision, args.destination, exec.signal, mode);
         return { revision: args.revision, destination: args.destination, mode, message };
@@ -926,8 +903,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const cwd = await context.cwdFor(exec);
-        const descriptor = await requireWorkspace(context, cwd, exec.signal);
+        const { cwd, descriptor } = await openWorkspace(exec);
         const workspaceName = descriptor.workspaceName ?? 'default';
         const explicitFirst = args.firstChange?.trim();
         if (isRootWorkspace(descriptor) && (explicitFirst === undefined || explicitFirst.length === 0)) {
@@ -994,8 +970,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(_args, exec) {
-        const cwd = await context.cwdFor(exec);
-        const descriptor = await requireWorkspace(context, cwd, exec.signal);
+        const { cwd, descriptor } = await openWorkspace(exec);
         const workspaceName = descriptor.workspaceName ?? 'default';
         if (workspaceName === 'default') {
           throw new Error(

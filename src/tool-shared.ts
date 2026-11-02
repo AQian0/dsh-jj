@@ -98,11 +98,17 @@ export function isRootWorkspace(descriptor: VcsDescriptor): boolean {
   }
 }
 
+/** The caller identity and cancellation one tool call runs with (the `execute` `exec` argument). */
+export interface ToolExec {
+  readonly agent?: unknown;
+  readonly signal?: AbortSignal;
+}
+
 export interface ToolContext {
   readonly service: JjToolService;
   readonly config: ResolvedJjConfig;
   readonly host: JjToolsHost;
-  readonly cwdFor: (exec: { agent?: unknown; signal?: AbortSignal }) => Promise<string>;
+  readonly cwdFor: (exec: ToolExec) => Promise<string>;
 }
 
 export async function requireWorkspace(
