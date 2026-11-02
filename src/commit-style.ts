@@ -191,9 +191,26 @@ const EMPTY_CUSTOM_GUIDANCE = [
 /** Companion guidance: keep work as a readable stack of small commits. */
 export const SPLIT_COMMITS_GUIDANCE = [
   'Commit granularity: advance the work as a series of small, self-contained commits.',
-  'After each coherent step (one feature, one bug fix, one refactor, one docs or test change), finish it with jj_commit (`jj commit -m "…"`), which describes the current change and starts a new empty working copy; use jj_squash only to fold small corrections into the previous commit.',
+  'After each coherent step (one feature, one bug fix, one refactor, one docs or test change), finish it with jj_commit (`jj commit -m "…"`), which describes the current change and starts a new empty working copy; a correction to an earlier step belongs in the commit that should have contained it, not in a new commit (see the correction rules below).',
   'Do not accumulate a whole task in @ — one giant change is hard for humans to review. Split by concern, not by file, and explain the why in the description.',
   'Use jj_new only when starting an intentionally empty change, and never use git commit.',
+].join('\n');
+
+/**
+ * Companion guidance: fold a user-requested correction into the commit it belongs
+ * to while that commit is still unpushed.
+ *
+ * The window boundary is publication, not the local bookmark: jj rebases the later
+ * commits and moves local bookmarks along, so a local `main` at the tip does not
+ * prevent a rewrite. Once a remote bookmark, trunk or tag reaches the change, the
+ * next push would need a force update, which dsh-jj never performs.
+ */
+export const CORRECTION_GUIDANCE = [
+  'Corrections to commits you made earlier in this session: fold the fix into the commit that should have contained it instead of appending a new commit, while that commit is still unpushed (`rewritable`).',
+  '- jj_log reports `rewritable` per change; it turns false once a remote bookmark, trunk or tag reaches the change. Moving a local bookmark (even to the tip) does not close the window: jj rebases the later commits and moves that bookmark for you.',
+  '- Correction still in the working copy: call jj_amend with `into: <change id>`. Correction already committed: call jj_amend with `from: <correction change id>` and `into: <target change id>`. Keep the target description unless the fix changes what the commit does (then pass `message`).',
+  '- Only fold into changes you created in this session, in this workspace. Never fold into a published change (`rewritable: false`) and never pass `--ignore-immutable`: the next push would need a force update, so make a normal new commit and tell the user why.',
+  '- A new increment is not a correction; when the target is ambiguous, ask the user or append a new commit instead of guessing.',
 ].join('\n');
 
 /** First line of a description, with trailing whitespace removed. */
@@ -369,11 +386,16 @@ export interface CommitStylePromptOptions extends ResolveCommitStyleOptions {
    * granularity entirely to the user.
    */
   readonly preferSplitCommits?: boolean;
+  /**
+   * Append the correction-folding rules (default true). Set `false` to let the
+   * user's own review workflow decide whether corrections rewrite or append.
+   */
+  readonly preferAmendCorrections?: boolean;
 }
 
 /**
  * Model-facing guidance block: description style policy plus (by default) the
- * split-commit workflow.
+ * split-commit and correction-folding workflows.
  *
  * @param options - configured style, optional custom rules, optional detection, split preference.
  * @returns multi-line text; empty never.
@@ -382,6 +404,7 @@ export function commitStylePromptText(options: CommitStylePromptOptions = {}): s
   const policy = resolveCommitStylePolicy(options);
   const sections = [policy.guidance];
   if (options.preferSplitCommits !== false) sections.push(SPLIT_COMMITS_GUIDANCE);
+  if (options.preferAmendCorrections !== false) sections.push(CORRECTION_GUIDANCE);
   return sections.join('\n');
 }
 

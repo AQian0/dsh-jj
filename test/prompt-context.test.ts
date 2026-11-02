@@ -166,6 +166,17 @@ test('configured and custom styles are reflected in the prompt text', () => {
   assert.match(noSplit, /Commit descriptions/);
 });
 
+test('the correction-folding rules are part of the session context and can be turned off', () => {
+  const text = jjPreferenceContextText('jj-native', '/repo');
+  assert.match(text, /fold the fix into the commit/);
+  assert.match(text, /jj_amend/);
+  assert.match(text, /rewritable/);
+
+  const off = jjPreferenceContextText('jj-native', '/repo', undefined, { preferAmendCorrections: false });
+  assert.doesNotMatch(off, /jj_amend/);
+  assert.match(off, /Commit granularity/, 'the split-commit workflow stays on');
+});
+
 test('the install options forward into the registered context text', () => {
   const session = { id: 'style' };
   const cwd = '/fake/jj-workspace';

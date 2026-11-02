@@ -48,6 +48,10 @@ export const Config = z.object({
   commitStyleCustom: z.string().default(''),
   // Prefer a stack of small, self-contained commits over one growing @ change.
   preferSplitCommits: z.boolean().default(true),
+  // Correction policy (2026-11-02): a correction to a commit made earlier in this
+  // session is folded into that commit (jj_amend) while it is still unpushed.
+  // Setting this to false only drops that guidance; jj_amend stays available.
+  preferAmendCorrections: z.boolean().default(true),
   // How many recent descriptions jj_commit_style samples (also bounds its process output).
   commitStyleSampleLimit: z.natural().default(30),
   defaultLogLimit: z.natural().default(30),
@@ -154,6 +158,7 @@ export const CONFIG_OWNERSHIP: Readonly<Record<keyof ResolvedJjConfig, ConfigOwn
   commitStyle: 'runtime',
   commitStyleCustom: 'runtime',
   preferSplitCommits: 'runtime',
+  preferAmendCorrections: 'runtime',
   commitStyleSampleLimit: 'runtime',
   defaultLogLimit: 'tools',
   maxLogLimit: 'tools',

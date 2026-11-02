@@ -248,6 +248,7 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
         commitStyle: resolved.commitStyle,
         commitStyleCustom: resolved.commitStyleCustom,
         preferSplitCommits: resolved.preferSplitCommits,
+        preferAmendCorrections: resolved.preferAmendCorrections,
         // Multi-session handling (policy 2026-10-30): when a parallel top-level session
         // shares the project, ask this session to isolate in its own jj workspace and to
         // rebase the finished stack onto `rebaseTarget`.
@@ -329,9 +330,11 @@ export {
   COMMIT_STYLE_IDS,
   COMMIT_STYLE_PRESETS,
   CONCRETE_COMMIT_STYLE_IDS,
+  CORRECTION_GUIDANCE,
   MIN_COMMIT_STYLE_SAMPLES,
   SPLIT_COMMITS_GUIDANCE,
   classifyDescriptionStyle,
+  commitCorrectionHint,
   commitStylePromptText,
   detectCommitStyle,
   firstDescriptionLine,

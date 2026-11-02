@@ -35,6 +35,7 @@ test('resolveConfig applies the commit-description defaults', () => {
   assert.equal(resolved.commitStyle, 'auto');
   assert.equal(resolved.commitStyleCustom, '');
   assert.equal(resolved.preferSplitCommits, true);
+  assert.equal(resolved.preferAmendCorrections, true);
   assert.equal(resolved.commitStyleSampleLimit, 30);
 });
 
@@ -45,6 +46,7 @@ test('the schemastery Config defaults agree with resolveConfig', () => {
     'commitStyle',
     'commitStyleCustom',
     'preferSplitCommits',
+    'preferAmendCorrections',
     'commitStyleSampleLimit',
   ] as const) {
     assert.deepEqual(defaults[key], resolveConfig({})[key], `default mismatch for ${key}`);
@@ -57,12 +59,14 @@ test('explicit commit-style config is preserved', () => {
     commitStyle: 'angular',
     commitStyleCustom: 'unused for angular',
     preferSplitCommits: false,
+    preferAmendCorrections: false,
     commitStyleSampleLimit: 7,
   });
   assert.equal(resolved.commitGuidance, false);
   assert.equal(resolved.commitStyle, 'angular');
   assert.equal(resolved.commitStyleCustom, 'unused for angular');
   assert.equal(resolved.preferSplitCommits, false);
+  assert.equal(resolved.preferAmendCorrections, false);
   assert.equal(resolved.commitStyleSampleLimit, 7);
 });
 
@@ -181,6 +185,7 @@ test('CONFIG_OWNERSHIP maps every config key to exactly one bundle row', () => {
       'commitStyle',
       'commitStyleCustom',
       'preferSplitCommits',
+      'preferAmendCorrections',
       'commitStyleSampleLimit',
     ],
     tools: ['defaultLogLimit', 'maxLogLimit', 'defaultCwd'],

@@ -76,6 +76,8 @@ export interface JjPromptCommitOptions {
   readonly commitStyleCustom?: string;
   /** Recommend a stack of small commits (default true). */
   readonly preferSplitCommits?: boolean;
+  /** Inject the correction-folding rules (default true). */
+  readonly preferAmendCorrections?: boolean;
 }
 
 /** Multi-session guidance options reflected in the injected context. */
@@ -146,6 +148,7 @@ export function jjPreferenceContextText(
         configured: commitOptions.commitStyle ?? 'auto',
         customStyle: commitOptions.commitStyleCustom ?? '',
         preferSplitCommits: commitOptions.preferSplitCommits ?? true,
+        preferAmendCorrections: commitOptions.preferAmendCorrections ?? true,
       }),
     );
   }
@@ -177,6 +180,7 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
     ...(options.commitStyle !== undefined ? { commitStyle: options.commitStyle } : {}),
     ...(options.commitStyleCustom !== undefined ? { commitStyleCustom: options.commitStyleCustom } : {}),
     ...(options.preferSplitCommits !== undefined ? { preferSplitCommits: options.preferSplitCommits } : {}),
+    ...(options.preferAmendCorrections !== undefined ? { preferAmendCorrections: options.preferAmendCorrections } : {}),
   };
 
   /**
