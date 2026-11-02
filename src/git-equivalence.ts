@@ -13,6 +13,7 @@ export type GitSafety = 'read' | 'mutate' | 'unknown';
 /** Finer-grained class kept for messaging and tests (base-layer extra). */
 export type GitSafetySubtype = 'read-only' | 'index' | 'worktree' | 'mutating' | 'unknown';
 
+/** Classification of one invocation; what the rule table and `refine` produce. */
 export interface RuleResult {
   readonly safety: GitSafety;
   readonly subtype?: GitSafetySubtype;
@@ -21,18 +22,19 @@ export interface RuleResult {
   readonly equivalence?: string;
 }
 
-export interface SubcommandRule {
+/** One row of the Git subcommand table. */
+export interface SubcommandRule extends RuleResult {
   /** `contextual` rules must be resolved by `refine`. */
   readonly contextual?: boolean;
-  readonly safety: GitSafety;
-  readonly subtype?: GitSafetySubtype;
-  readonly reason: string;
-  readonly equivalence?: string;
-  readonly refine?: (context: RefineContext) => RuleResult;
+  /**
+   * Resolve the row for one argument list. Returning `undefined` keeps the row's
+   * own classification, so a rule only has to describe its exceptions.
+   */
+  readonly refine?: (context: RefineContext) => RuleResult | undefined;
 }
 
+/** Parsed argument list a `refine` decision may look at. */
 export interface RefineContext {
-  readonly args: readonly string[];
   readonly flags: readonly string[];
   readonly positionals: readonly string[];
 }
@@ -70,17 +72,12 @@ export const JJ_EQUIVALENCE = Object.freeze({
     '(no single jj equivalent; inspect with jj_log / jj_status first, then use jj_new, jj_describe, jj_squash, jj_rebase, jj_undo, jj_workspace_* as appropriate)',
 });
 
-const READ_RULE: RuleResult = {
-  safety: 'read',
-  subtype: 'read-only',
-  reason: 'read-only Git subcommand',
-  equivalence: '',
-};
-
-export function readRule(reason = READ_RULE.reason): SubcommandRule {
+/** A `read` classification: used for read-only rows and for `refine` exceptions. */
+export function readRule(reason = 'read-only Git subcommand'): RuleResult {
   return { safety: 'read', subtype: 'read-only', reason, equivalence: '' };
 }
 
-export function mutateRule(reason: string, equivalence?: string): SubcommandRule {
+/** A `mutate` classification: used for rows and for `refine` exceptions. */
+export function mutateRule(reason: string, equivalence?: string): RuleResult {
   return { safety: 'mutate', subtype: 'mutating', reason, ...(equivalence !== undefined ? { equivalence } : {}) };
 }

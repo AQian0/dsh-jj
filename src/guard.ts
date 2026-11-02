@@ -617,29 +617,24 @@ export function installGitConfusionGuard(
     const fallback = resolved.defaultCwd.length > 0 ? resolved.defaultCwd : process.cwd();
     const workdirArg = args?.['workdir'];
     const explicitWorkdir = typeof workdirArg === 'string' && workdirArg.length > 0 ? workdirArg : undefined;
+    /** Resolve a relative `workdir` against `base`; an absent workdir keeps `base`. */
+    const under = (base: string): string => (explicitWorkdir === undefined ? base : resolve(base, explicitWorkdir));
     // An absolute workdir is authoritative and needs no session lookup.
     if (explicitWorkdir !== undefined && isAbsolute(explicitWorkdir)) {
       return { cwd: explicitWorkdir, degraded: false };
     }
     if (execution.agent === undefined) {
       // No calling agent: the documented defaultCwd path (tests/embedders).
-      const cwd = explicitWorkdir === undefined ? fallback : resolve(fallback, explicitWorkdir);
-      return { cwd, degraded: false };
+      return { cwd: under(fallback), degraded: false };
     }
 
     const session = resolveSessionCwd(execution);
     if (session.cwd !== undefined) {
-      return {
-        cwd: explicitWorkdir === undefined ? session.cwd : resolve(session.cwd, explicitWorkdir),
-        degraded: false,
-      };
+      return { cwd: under(session.cwd), degraded: false };
     }
     // The session directory is unknown: do not guess a relative base. The
     // degraded marker makes the caller fail open (contract §5.10).
-    return {
-      cwd: explicitWorkdir === undefined ? fallback : resolve(fallback, explicitWorkdir),
-      degraded: session.degraded,
-    };
+    return { cwd: under(fallback), degraded: session.degraded };
   };
 
   /**
@@ -1021,10 +1016,9 @@ export function installGitConfusionGuard(
       }
       return message;
     }
-    const args2 = args;
-    const commandLine = readCommandLine(args2);
+    const commandLine = readCommandLine(args);
     if (commandLine !== undefined) {
-      const jjReason = decideJjCommand(execution, args2, commandLine);
+      const jjReason = decideJjCommand(execution, args, commandLine);
       if (jjReason !== undefined) return jjReason;
     }
     return decideGitCommand(execution, args);

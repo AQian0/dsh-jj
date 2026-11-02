@@ -580,6 +580,40 @@ export function tokenize(
   return { segments, warnings };
 }
 
+/**
+ * Visit every shell segment of a command line, innermost wrappers included.
+ *
+ * Shell wrappers are expanded recursively with a depth cap: a wrapper inside a
+ * wrapper (`bash -c 'bash -c "git commit"'`) and a prelude before the wrapper
+ * (`command bash -c …`, `A=1 bash -c …`, `env -S'…'`) are classified instead of
+ * silently disappearing. Both classifiers share this walk so the expansion depth,
+ * the nesting-limit warning, and the warning order stay identical.
+ *
+ * @param commandLine - raw shell command string.
+ * @param warnings - parser warnings collected from the tokenizer and the walk
+ *   (callers may push their own while visiting a segment).
+ * @param onSegment - called once per segment, in command-line order, before its
+ *   nested wrappers are expanded.
+ */
+export function walkSegments(commandLine: string, warnings: string[], onSegment: (segment: RawSegment) => void): void {
+  const visit = (segment: RawSegment, depth: number): void => {
+    onSegment(segment);
+    if (!segment.parsed) return;
+    if (depth >= MAX_NESTING) {
+      warnings.push('Shell wrapper nesting limit reached; deeper wrapped commands were not classified.');
+      return;
+    }
+    for (const inner of nestedCommandStrings(segment, warnings)) {
+      const nested = tokenize(inner, 'substitution', depth + 1);
+      warnings.push(...nested.warnings);
+      for (const nestedSegment of nested.segments) visit(nestedSegment, depth + 1);
+    }
+  };
+  const outer = tokenize(commandLine, 'command', 0);
+  warnings.push(...outer.warnings);
+  for (const segment of outer.segments) visit(segment, 0);
+}
+
 /** Split arguments into flags and positionals, honouring value-taking flags. */
 export function scanArgs(
   args: readonly string[],

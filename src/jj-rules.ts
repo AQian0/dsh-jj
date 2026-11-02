@@ -15,13 +15,11 @@
 import {
   baseName,
   isStaticDirectoryTarget,
-  MAX_NESTING,
-  nestedCommandStrings,
   scanPrelude,
   segmentDirectoryChange,
-  tokenize,
+  walkSegments,
 } from './git-tokenize.ts';
-import type { RawSegment, Token } from './git-tokenize.ts';
+import type { Token } from './git-tokenize.ts';
 
 // ---------------------------------------------------------------------------
 // jj-side classification (contract §8.3b)
@@ -125,7 +123,6 @@ export const JJ_WORKSPACE_LOCAL_SUBCOMMANDS: readonly string[] = Object.freeze([
   'resolve',
   'next',
   'prev',
-  'squash',
   'move',
   'parallelize',
   'simplify-parents',
@@ -495,11 +492,10 @@ function classifyJjWords(
  * @returns jj invocations with their scope, the parsed segments, and warnings.
  */
 export function classifyJjInvocation(commandLine: string): JjCommandClassification {
-  const outer = tokenize(commandLine, 'command', 0);
-  const warnings = [...outer.warnings];
   const invocations: JjInvocation[] = [];
   const segments: JjParsedSegment[] = [];
-  const record = (segment: RawSegment): void => {
+  const warnings: string[] = [];
+  walkSegments(commandLine, warnings, (segment) => {
     const invocation = classifyJjWords(segment.words, segment.raw, segment.parsed, warnings);
     const invocationIndexes: number[] = [];
     if (invocation !== undefined) {
@@ -521,23 +517,7 @@ export function classifyJjInvocation(commandLine: string): JjCommandClassificati
       ...(changeDir !== undefined ? { changeDir } : {}),
       invocationIndexes,
     });
-  };
-  // Recursive expansion (with a depth cap) so nested/prelude shell wrappers are
-  // classified instead of silently skipped.
-  const recordTree = (segment: RawSegment, depth: number): void => {
-    record(segment);
-    if (!segment.parsed) return;
-    if (depth >= MAX_NESTING) {
-      warnings.push('Shell wrapper nesting limit reached; deeper wrapped commands were not classified.');
-      return;
-    }
-    for (const inner of nestedCommandStrings(segment, warnings)) {
-      const nested = tokenize(inner, 'substitution', depth + 1);
-      warnings.push(...nested.warnings);
-      for (const nestedSegment of nested.segments) recordTree(nestedSegment, depth + 1);
-    }
-  };
-  for (const segment of outer.segments) recordTree(segment, 0);
+  });
   return {
     invocations: Object.freeze(invocations),
     segments: Object.freeze(segments),

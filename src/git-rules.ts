@@ -13,15 +13,13 @@ import { JJ_EQUIVALENCE, mutateRule, readRule } from './git-equivalence.ts';
 import type { GitSafety, GitSafetySubtype, RuleResult, SubcommandRule } from './git-equivalence.ts';
 import {
   baseName,
-  MAX_NESTING,
-  nestedCommandStrings,
   scanArgs,
   scanPrelude,
   segmentDirectoryChange,
   isStaticDirectoryTarget,
-  tokenize,
+  walkSegments,
 } from './git-tokenize.ts';
-import type { RawSegment, Token } from './git-tokenize.ts';
+import type { Token } from './git-tokenize.ts';
 
 /** True when any of `names` is present in `flags`. */
 function anyFlag(flags: readonly string[], names: readonly string[]): boolean {
@@ -296,129 +294,58 @@ export interface GitCommandClassification {
 export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Object.freeze({
   // ---- mutate: history / working copy / refs
   commit: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `commit` creates a Git commit',
-    equivalence: JJ_EQUIVALENCE.commit,
+    ...mutateRule('subcommand `commit` creates a Git commit', JJ_EQUIVALENCE.commit),
     refine: ({ flags }) =>
       anyFlag(flags, ['--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `commit --dry-run` only reports what would be committed',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `commit` creates a Git commit',
-            equivalence: JJ_EQUIVALENCE.commit,
-          },
+        ? readRule('subcommand `commit --dry-run` only reports what would be committed')
+        : undefined,
   },
   checkout: mutateRule('subcommand `checkout` moves Git HEAD and rewrites the working copy', JJ_EQUIVALENCE.checkout),
   switch: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `switch` switches Git branches',
-    equivalence: JJ_EQUIVALENCE.checkout,
+    ...mutateRule('subcommand `switch` switches Git branches', JJ_EQUIVALENCE.checkout),
     refine: ({ flags }) =>
       anyFlag(flags, ['-c', '-C', '--create', '--force-create'])
-        ? {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `switch` with `-c` creates and checks out a new Git branch',
-            equivalence: JJ_EQUIVALENCE.switchCreate,
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `switch` switches Git branches',
-            equivalence: JJ_EQUIVALENCE.checkout,
-          },
+        ? mutateRule(
+            'subcommand `switch` with `-c` creates and checks out a new Git branch',
+            JJ_EQUIVALENCE.switchCreate,
+          )
+        : undefined,
   },
   reset: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `reset` moves Git HEAD/branch and can discard the index and working copy',
-    equivalence: JJ_EQUIVALENCE.reset,
+    ...mutateRule(
+      'subcommand `reset` moves Git HEAD/branch and can discard the index and working copy',
+      JJ_EQUIVALENCE.reset,
+    ),
     refine: ({ flags }) =>
       anyFlag(flags, ['--hard', '--merge', '--keep'])
-        ? {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `reset` with `--hard`/`--merge`/`--keep` rewrites the working copy',
-            equivalence: JJ_EQUIVALENCE.resetHard,
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `reset` moves Git HEAD/branch (jj has no index to reset)',
-            equivalence: JJ_EQUIVALENCE.reset,
-          },
+        ? mutateRule(
+            'subcommand `reset` with `--hard`/`--merge`/`--keep` rewrites the working copy',
+            JJ_EQUIVALENCE.resetHard,
+          )
+        : mutateRule('subcommand `reset` moves Git HEAD/branch (jj has no index to reset)', JJ_EQUIVALENCE.reset),
   },
   restore: mutateRule('subcommand `restore` restores paths from the Git index/commit', JJ_EQUIVALENCE.restore),
   revert: mutateRule('subcommand `revert` creates inverse Git commits', JJ_EQUIVALENCE.revert),
   stash: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `stash` hides changes in a Git side ref',
-    equivalence: JJ_EQUIVALENCE.stash,
-    refine: ({ positionals }) => {
-      const sub = positionals[0];
-      return sub === 'list' || sub === 'show'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `stash list`/`stash show` only lists stash entries',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `stash` hides changes in a Git side ref',
-            equivalence: JJ_EQUIVALENCE.stash,
-          };
-    },
+    ...mutateRule('subcommand `stash` hides changes in a Git side ref', JJ_EQUIVALENCE.stash),
+    refine: ({ positionals }) =>
+      positionals[0] === 'list' || positionals[0] === 'show'
+        ? readRule('subcommand `stash list`/`stash show` only lists stash entries')
+        : undefined,
   },
   merge: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `merge` creates a Git merge commit',
-    equivalence: JJ_EQUIVALENCE.merge,
+    ...mutateRule('subcommand `merge` creates a Git merge commit', JJ_EQUIVALENCE.merge),
     refine: ({ flags }) =>
       anyFlag(flags, ['--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `merge --dry-run` only reports what would be merged',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `merge` creates a Git merge commit',
-            equivalence: JJ_EQUIVALENCE.merge,
-          },
+        ? readRule('subcommand `merge --dry-run` only reports what would be merged')
+        : undefined,
   },
   rebase: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `rebase` rewrites Git commits and refs',
-    equivalence: JJ_EQUIVALENCE.rebase,
+    ...mutateRule('subcommand `rebase` rewrites Git commits and refs', JJ_EQUIVALENCE.rebase),
     refine: ({ flags }) =>
       anyFlag(flags, ['--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `rebase --dry-run` only reports the rebase plan',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `rebase` rewrites Git commits and refs',
-            equivalence: JJ_EQUIVALENCE.rebase,
-          },
+        ? readRule('subcommand `rebase --dry-run` only reports the rebase plan')
+        : undefined,
   },
   'cherry-pick': mutateRule('subcommand `cherry-pick` applies commits onto Git HEAD', JJ_EQUIVALENCE.cherryPick),
   am: mutateRule('subcommand `am` applies mailbox patches as Git commits', JJ_EQUIVALENCE.conflict),
@@ -428,24 +355,11 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   ),
   mergetool: mutateRule('subcommand `mergetool` resolves Git merge state', JJ_EQUIVALENCE.conflict),
   apply: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `apply` writes patch content',
-    equivalence: JJ_EQUIVALENCE.conflict,
+    ...mutateRule('subcommand `apply` writes patch content', JJ_EQUIVALENCE.conflict),
     refine: ({ flags }) =>
       anyFlag(flags, ['--check', '--stat', '--numstat', '--summary'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `apply --check` only inspects the patch',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `apply` writes patch content',
-            equivalence: JJ_EQUIVALENCE.conflict,
-          },
+        ? readRule('subcommand `apply --check` only inspects the patch')
+        : undefined,
   },
   'format-patch': mutateRule(
     'subcommand `format-patch` writes patch files into the working copy',
@@ -464,85 +378,33 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   ),
   mktree: mutateRule("subcommand `mktree` writes tree objects outside jj's change graph", JJ_EQUIVALENCE.noEquivalent),
   'hash-object': {
-    safety: 'read',
-    subtype: 'read-only',
-    reason: 'subcommand `hash-object` without `-w` only computes an object id',
-    equivalence: '',
+    ...readRule('subcommand `hash-object` without `-w` only computes an object id'),
     refine: ({ flags }) =>
       anyFlag(flags, ['-w', '--stdin-paths'])
-        ? {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `hash-object -w` writes objects into the shared store',
-            equivalence: JJ_EQUIVALENCE.noEquivalent,
-          }
-        : {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `hash-object` without `-w` only computes an object id',
-            equivalence: '',
-          },
+        ? mutateRule('subcommand `hash-object -w` writes objects into the shared store', JJ_EQUIVALENCE.noEquivalent)
+        : undefined,
   },
   'checkout-index': mutateRule("subcommand `checkout-index` writes files from Git's index", JJ_EQUIVALENCE.restore),
   clean: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `clean` deletes untracked files',
-    equivalence: JJ_EQUIVALENCE.historyEdit,
+    ...mutateRule('subcommand `clean` deletes untracked files', JJ_EQUIVALENCE.historyEdit),
     refine: ({ flags }) =>
       anyFlag(flags, ['-n', '--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `clean --dry-run` only reports what would be deleted',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `clean` deletes untracked files',
-            equivalence: JJ_EQUIVALENCE.historyEdit,
-          },
+        ? readRule('subcommand `clean --dry-run` only reports what would be deleted')
+        : undefined,
   },
   rm: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: "subcommand `rm` removes files and updates Git's index",
-    equivalence: JJ_EQUIVALENCE.restore,
+    ...mutateRule("subcommand `rm` removes files and updates Git's index", JJ_EQUIVALENCE.restore),
     refine: ({ flags }) =>
       anyFlag(flags, ['-n', '--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `rm --dry-run` only reports what would be removed',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: "subcommand `rm` removes files and updates Git's index",
-            equivalence: JJ_EQUIVALENCE.restore,
-          },
+        ? readRule('subcommand `rm --dry-run` only reports what would be removed')
+        : undefined,
   },
   mv: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: "subcommand `mv` moves files and updates Git's index",
-    equivalence: JJ_EQUIVALENCE.noEquivalent,
+    ...mutateRule("subcommand `mv` moves files and updates Git's index", JJ_EQUIVALENCE.noEquivalent),
     refine: ({ flags }) =>
       anyFlag(flags, ['-n', '--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `mv --dry-run` only reports what would be moved',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: "subcommand `mv` moves files and updates Git's index",
-            equivalence: JJ_EQUIVALENCE.noEquivalent,
-          },
+        ? readRule('subcommand `mv --dry-run` only reports what would be moved')
+        : undefined,
   },
   add: {
     safety: 'mutate',
@@ -551,18 +413,8 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     equivalence: 'no staging step is needed in jj; `jj status` already sees the change',
     refine: ({ flags }) =>
       anyFlag(flags, ['-n', '--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `add --dry-run` only reports what would be added',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'index',
-            reason: "subcommand `add` stages files in Git's index, which jj does not use",
-            equivalence: 'no staging step is needed in jj; `jj status` already sees the change',
-          },
+        ? readRule('subcommand `add --dry-run` only reports what would be added')
+        : undefined,
   },
   init: mutateRule(
     'subcommand `init` creates Git metadata jj will not own',
@@ -570,41 +422,28 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   ),
   clone: mutateRule('subcommand `clone` creates a plain Git checkout jj cannot manage', 'jj git clone <url>'),
   worktree: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `worktree` creates or removes Git worktrees, which are not jj workspaces',
-    equivalence: JJ_EQUIVALENCE.worktreeAdd,
+    ...mutateRule(
+      'subcommand `worktree` creates or removes Git worktrees, which are not jj workspaces',
+      JJ_EQUIVALENCE.worktreeAdd,
+    ),
     refine: ({ positionals }) => {
       const sub = positionals[0];
-      if (sub === 'list')
-        return {
-          safety: 'read',
-          subtype: 'read-only',
-          reason: 'subcommand `worktree list` only lists Git worktrees',
-          equivalence: '',
-        };
+      if (sub === 'list') return readRule('subcommand `worktree list` only lists Git worktrees');
       if (sub === 'remove') {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `worktree remove` deletes a Git worktree that jj does not track',
-          equivalence: JJ_EQUIVALENCE.worktreeRemove,
-        };
+        return mutateRule(
+          'subcommand `worktree remove` deletes a Git worktree that jj does not track',
+          JJ_EQUIVALENCE.worktreeRemove,
+        );
       }
-      return {
-        safety: 'mutate',
-        subtype: 'mutating',
-        reason: 'subcommand `worktree` changes Git worktrees, which are not jj workspaces',
-        equivalence: JJ_EQUIVALENCE.worktreeAdd,
-      };
+      return mutateRule(
+        'subcommand `worktree` changes Git worktrees, which are not jj workspaces',
+        JJ_EQUIVALENCE.worktreeAdd,
+      );
     },
   },
   branch: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `branch` changes Git branches',
-    equivalence: JJ_EQUIVALENCE.bookmark,
+    ...mutateRule('subcommand `branch` changes Git branches', JJ_EQUIVALENCE.bookmark),
     refine: ({ flags, positionals }) => {
       const writeFlags = [
         '-d',
@@ -646,48 +485,19 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
         anyFlag(flags, ['-f', '--force']) ||
         (positionals.length >= 2 && anyFlag(flags, ['-m', '-M', '--move', '-c', '-C', '--copy']))
       ) {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `branch` force-moves or rewrites a Git branch',
-          equivalence: JJ_EQUIVALENCE.branchForce,
-        };
+        return mutateRule('subcommand `branch` force-moves or rewrites a Git branch', JJ_EQUIVALENCE.branchForce);
       }
       if (anyFlag(flags, writeFlags)) {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `branch` creates, moves, or deletes a Git branch',
-          equivalence: JJ_EQUIVALENCE.bookmark,
-        };
+        return mutateRule('subcommand `branch` creates, moves, or deletes a Git branch', JJ_EQUIVALENCE.bookmark);
       }
       // Read-only selectors win over the positional check: `git branch --contains
       // HEAD` and `git branch -l 'feat*'` are listings, and the revision/pattern
       // they take is not a branch name to create.
-      if (anyFlag(flags, readFlags)) {
-        return {
-          safety: 'read',
-          subtype: 'read-only',
-          reason: 'subcommand `branch` only lists branches',
-          equivalence: '',
-        };
-      }
+      if (anyFlag(flags, readFlags)) return readRule('subcommand `branch` only lists branches');
       if (positionals.length >= 1) {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `branch <name>` creates a Git branch',
-          equivalence: JJ_EQUIVALENCE.branchCreate,
-        };
+        return mutateRule('subcommand `branch <name>` creates a Git branch', JJ_EQUIVALENCE.branchCreate);
       }
-      if (flags.length === 0) {
-        return {
-          safety: 'read',
-          subtype: 'read-only',
-          reason: 'subcommand `branch` only lists branches',
-          equivalence: '',
-        };
-      }
+      if (flags.length === 0) return readRule('subcommand `branch` only lists branches');
       return {
         safety: 'unknown',
         subtype: 'unknown',
@@ -698,10 +508,10 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   },
   tag: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `tag` creates, edits, or deletes Git tags',
-    equivalence: 'jj tag (0.46 has `jj tag`; `jj bookmark` also works for named pointers)',
+    ...mutateRule(
+      'subcommand `tag` creates, edits, or deletes Git tags',
+      'jj tag (0.46 has `jj tag`; `jj bookmark` also works for named pointers)',
+    ),
     refine: ({ flags, positionals }) => {
       const listFlags = [
         '-l',
@@ -718,23 +528,13 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
       ];
       const writeFlags = ['-d', '--delete', '-a', '--annotate', '-s', '--sign', '-f', '--force', '-m', '-F', '--edit'];
       if (anyFlag(flags, writeFlags)) {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `tag` creates, edits, or deletes Git tags',
-          equivalence: 'jj tag set/delete',
-        };
+        return mutateRule('subcommand `tag` creates, edits, or deletes Git tags', 'jj tag set/delete');
       }
       if (anyFlag(flags, listFlags) || (positionals.length === 0 && flags.length === 0)) {
-        return { safety: 'read', subtype: 'read-only', reason: 'subcommand `tag` only lists tags', equivalence: '' };
+        return readRule('subcommand `tag` only lists tags');
       }
       if (positionals.length >= 1) {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `tag <name>` creates a Git tag',
-          equivalence: 'jj tag set <name> -r <revset>',
-        };
+        return mutateRule('subcommand `tag <name>` creates a Git tag', 'jj tag set <name> -r <revset>');
       }
       return {
         safety: 'unknown',
@@ -745,101 +545,49 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     },
   },
   push: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `push` writes Git refs on the remote',
-    equivalence: JJ_EQUIVALENCE.push,
+    ...mutateRule('subcommand `push` writes Git refs on the remote', JJ_EQUIVALENCE.push),
     refine: ({ flags }) =>
       anyFlag(flags, ['-n', '--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `push --dry-run` only reports what would be pushed',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `push` writes Git refs on the remote',
-            equivalence: JJ_EQUIVALENCE.push,
-          },
+        ? readRule('subcommand `push --dry-run` only reports what would be pushed')
+        : undefined,
   },
   fetch: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: "subcommand `fetch` updates Git remote-tracking refs outside jj's import path",
-    equivalence: JJ_EQUIVALENCE.fetch,
+    ...mutateRule("subcommand `fetch` updates Git remote-tracking refs outside jj's import path", JJ_EQUIVALENCE.fetch),
     // `git fetch -n` means `--no-tags`, not a dry run (`git push -n` is the one
     // where `-n` means `--dry-run`); only `--dry-run` skips the ref updates.
     refine: ({ flags }) =>
       anyFlag(flags, ['--dry-run'])
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `fetch --dry-run` only reports what would be fetched',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: "subcommand `fetch` updates Git remote-tracking refs outside jj's import path",
-            equivalence: JJ_EQUIVALENCE.fetch,
-          },
+        ? readRule('subcommand `fetch --dry-run` only reports what would be fetched')
+        : undefined,
   },
   pull: mutateRule('subcommand `pull` fetches and merges into Git HEAD', JJ_EQUIVALENCE.pull),
   remote: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `remote` reconfigures Git remotes',
-    equivalence: JJ_EQUIVALENCE.remote,
+    ...mutateRule('subcommand `remote` reconfigures Git remotes', JJ_EQUIVALENCE.remote),
     refine: ({ flags, positionals }) => {
       const sub = positionals[0];
       if (sub === undefined || sub === 'show' || sub === 'get-url' || anyFlag(flags, ['-v', '--verbose'])) {
-        return {
-          safety: 'read',
-          subtype: 'read-only',
-          reason: 'subcommand `remote` only lists or shows remotes',
-          equivalence: '',
-        };
+        return readRule('subcommand `remote` only lists or shows remotes');
       }
-      return {
-        safety: 'mutate',
-        subtype: 'mutating',
-        reason: 'subcommand `remote` reconfigures Git remotes',
-        equivalence: JJ_EQUIVALENCE.remote,
-      };
+      return undefined;
     },
   },
   submodule: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `submodule` changes Git submodules',
-    equivalence: JJ_EQUIVALENCE.submoduleLimited,
+    ...mutateRule('subcommand `submodule` changes Git submodules', JJ_EQUIVALENCE.submoduleLimited),
     refine: ({ positionals }) => {
       const sub = positionals[0];
       return sub === undefined || sub === 'status' || sub === 'summary'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `submodule status` only reports submodule state',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `submodule` adds, updates, or removes Git submodules',
-            equivalence: JJ_EQUIVALENCE.submoduleLimited,
-          };
+        ? readRule('subcommand `submodule status` only reports submodule state')
+        : mutateRule(
+            'subcommand `submodule` adds, updates, or removes Git submodules',
+            JJ_EQUIVALENCE.submoduleLimited,
+          );
     },
   },
   config: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `config` writes Git configuration',
-    equivalence: 'jj config set --repo <name> <value>',
+    ...mutateRule('subcommand `config` writes Git configuration', 'jj config set --repo <name> <value>'),
     refine: ({ flags, positionals }) => {
       const readFlags = [
         '--get',
@@ -863,117 +611,65 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
         '-e',
       ];
       if (anyFlag(flags, writeFlags)) {
-        return {
-          safety: 'mutate',
-          subtype: 'mutating',
-          reason: 'subcommand `config` writes Git configuration',
-          equivalence: 'jj config set --repo <name> <value> / `jj config unset --repo <name>`',
-        };
+        return mutateRule(
+          'subcommand `config` writes Git configuration',
+          'jj config set --repo <name> <value> / `jj config unset --repo <name>`',
+        );
       }
       if (anyFlag(flags, readFlags) || positionals.length <= 1) {
-        return {
-          safety: 'read',
-          subtype: 'read-only',
-          reason: 'subcommand `config` only reads Git configuration',
-          equivalence: '',
-        };
+        return readRule('subcommand `config` only reads Git configuration');
       }
-      return {
-        safety: 'mutate',
-        subtype: 'mutating',
-        reason: 'subcommand `config <key> <value>` writes Git configuration',
-        equivalence: 'jj config set --repo <name> <value>',
-      };
+      return mutateRule(
+        'subcommand `config <key> <value>` writes Git configuration',
+        'jj config set --repo <name> <value>',
+      );
     },
   },
   reflog: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `reflog` deletes Git reflog entries',
-    equivalence: 'jj op log / `jj undo` / `jj op restore <operation-id>`',
+    ...mutateRule(
+      'subcommand `reflog` deletes Git reflog entries',
+      'jj op log / `jj undo` / `jj op restore <operation-id>`',
+    ),
     refine: ({ positionals }) => {
       const sub = positionals[0];
       return sub === 'expire' || sub === 'delete'
-        ? {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `reflog delete`/`expire` deletes Git reflog entries',
-            equivalence: 'jj op log / `jj undo` / `jj op restore <operation-id>`',
-          }
-        : {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: "subcommand `reflog` only shows Git's reflog",
-            equivalence: '',
-          };
+        ? mutateRule(
+            'subcommand `reflog delete`/`expire` deletes Git reflog entries',
+            'jj op log / `jj undo` / `jj op restore <operation-id>`',
+          )
+        : readRule("subcommand `reflog` only shows Git's reflog");
     },
   },
   'symbolic-ref': {
     contextual: true,
-    safety: 'read',
-    subtype: 'read-only',
-    reason: 'subcommand `symbolic-ref` only reads a symbolic ref',
-    equivalence: '',
+    ...readRule('subcommand `symbolic-ref` only reads a symbolic ref'),
     refine: ({ flags, positionals }) =>
       positionals.length >= 2 || anyFlag(flags, ['-m', '--delete', '-d'])
-        ? {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `symbolic-ref` writes a symbolic ref (HEAD)',
-            equivalence: JJ_EQUIVALENCE.historyEdit,
-          }
-        : {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `symbolic-ref` only reads a symbolic ref',
-            equivalence: '',
-          },
+        ? mutateRule('subcommand `symbolic-ref` writes a symbolic ref (HEAD)', JJ_EQUIVALENCE.historyEdit)
+        : undefined,
   },
   bisect: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `bisect` moves Git HEAD during a bisection',
-    equivalence: 'jj bisect (jj has native bisection)',
+    ...mutateRule('subcommand `bisect` moves Git HEAD during a bisection', 'jj bisect (jj has native bisection)'),
     refine: ({ positionals }) => {
       const sub = positionals[0];
       return sub === 'log' || sub === 'view' || sub === 'visualize'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `bisect log`/`view` only reads bisection state',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `bisect` moves Git HEAD during a bisection',
-            equivalence: 'jj bisect (jj has native bisection)',
-          };
+        ? readRule('subcommand `bisect log`/`view` only reads bisection state')
+        : undefined;
     },
   },
   notes: {
     contextual: true,
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: "subcommand `notes` writes Git notes outside jj's model",
-    equivalence: 'put the information in the change description with `jj describe`',
+    ...mutateRule(
+      "subcommand `notes` writes Git notes outside jj's model",
+      'put the information in the change description with `jj describe`',
+    ),
     refine: ({ positionals }) => {
       const sub = positionals[0];
       return sub === undefined || sub === 'list' || sub === 'show' || sub === 'get-ref'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `notes list`/`show` only reads Git notes',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: "subcommand `notes` writes Git notes outside jj's model",
-            equivalence: 'put the information in the change description with `jj describe`',
-          };
+        ? readRule('subcommand `notes list`/`show` only reads Git notes')
+        : undefined;
     },
   },
   bundle: {
@@ -984,18 +680,8 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     equivalence: '',
     refine: ({ positionals }) =>
       positionals[0] === 'verify' || positionals[0] === 'list-heads'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `bundle verify`/`list-heads` only inspects a bundle',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'worktree',
-            reason: 'subcommand `bundle create` writes a bundle file',
-            equivalence: '',
-          },
+        ? readRule('subcommand `bundle verify`/`list-heads` only inspects a bundle')
+        : undefined,
   },
   'sparse-checkout': mutateRule(
     'subcommand `sparse-checkout` changes which files are checked out',
@@ -1012,12 +698,7 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     'subcommand `request-pull` generates a pull request description',
     JJ_EQUIVALENCE.noEquivalent,
   ),
-  gc: {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `gc` prunes the object store that jj and git share',
-    equivalence: JJ_EQUIVALENCE.gc,
-  },
+  gc: mutateRule('subcommand `gc` prunes the object store that jj and git share', JJ_EQUIVALENCE.gc),
   prune: mutateRule('subcommand `prune` deletes unreachable objects from the store jj depends on', JJ_EQUIVALENCE.gc),
   repack: mutateRule('subcommand `repack` rewrites pack files in the store jj depends on', JJ_EQUIVALENCE.store),
   'pack-refs': mutateRule('subcommand `pack-refs` rewrites refs that jj expects to manage', JJ_EQUIVALENCE.store),
@@ -1068,24 +749,14 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   'check-ignore': readRule(),
   'check-attr': readRule(),
   fsck: {
-    safety: 'read',
-    subtype: 'read-only',
-    reason: 'subcommand `fsck` only verifies object connectivity',
-    equivalence: '',
+    ...readRule('subcommand `fsck` only verifies object connectivity'),
     refine: ({ flags }) =>
       anyFlag(flags, ['--lost-found'])
-        ? {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `fsck --lost-found` writes dangling objects under `.git/lost-found`',
-            equivalence: JJ_EQUIVALENCE.noEquivalent,
-          }
-        : {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `fsck` only verifies object connectivity',
-            equivalence: '',
-          },
+        ? mutateRule(
+            'subcommand `fsck --lost-found` writes dangling objects under `.git/lost-found`',
+            JJ_EQUIVALENCE.noEquivalent,
+          )
+        : undefined,
   },
   'verify-commit': readRule(),
   'verify-tag': readRule(),
@@ -1105,44 +776,19 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     JJ_EQUIVALENCE.noEquivalent,
   ),
   'commit-graph': {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `commit-graph write` writes commit-graph files into the shared store',
-    equivalence: JJ_EQUIVALENCE.noEquivalent,
+    ...mutateRule(
+      'subcommand `commit-graph write` writes commit-graph files into the shared store',
+      JJ_EQUIVALENCE.noEquivalent,
+    ),
     refine: ({ positionals }) =>
-      positionals[0] === 'verify'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `commit-graph verify` only checks the graph file',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `commit-graph write` writes commit-graph files into the shared store',
-            equivalence: JJ_EQUIVALENCE.noEquivalent,
-          },
+      positionals[0] === 'verify' ? readRule('subcommand `commit-graph verify` only checks the graph file') : undefined,
   },
   'multi-pack-index': {
-    safety: 'mutate',
-    subtype: 'mutating',
-    reason: 'subcommand `multi-pack-index` writes or rewrites pack index files',
-    equivalence: JJ_EQUIVALENCE.noEquivalent,
+    ...mutateRule('subcommand `multi-pack-index` writes or rewrites pack index files', JJ_EQUIVALENCE.noEquivalent),
     refine: ({ positionals }) =>
       positionals[0] === 'verify'
-        ? {
-            safety: 'read',
-            subtype: 'read-only',
-            reason: 'subcommand `multi-pack-index verify` only checks the index files',
-            equivalence: '',
-          }
-        : {
-            safety: 'mutate',
-            subtype: 'mutating',
-            reason: 'subcommand `multi-pack-index` writes or rewrites pack index files',
-            equivalence: JJ_EQUIVALENCE.noEquivalent,
-          },
+        ? readRule('subcommand `multi-pack-index verify` only checks the index files')
+        : undefined,
   },
   'pack-objects': mutateRule(
     'subcommand `pack-objects` writes pack files and deltas into the object store',
@@ -1323,15 +969,12 @@ function classifyWords(
   }
 
   const { flags, positionals } = scanArgs(rest, []);
-  const resolved: RuleResult =
-    rule.refine !== undefined
-      ? rule.refine({ args: rest, flags, positionals })
-      : {
-          safety: rule.safety,
-          subtype: rule.subtype ?? (rule.safety === 'mutate' ? 'mutating' : 'read-only'),
-          reason: rule.reason,
-          ...(rule.equivalence !== undefined ? { equivalence: rule.equivalence } : {}),
-        };
+  const resolved: RuleResult = rule.refine?.({ flags, positionals }) ?? {
+    safety: rule.safety,
+    subtype: rule.subtype ?? (rule.safety === 'mutate' ? 'mutating' : 'read-only'),
+    reason: rule.reason,
+    ...(rule.equivalence !== undefined ? { equivalence: rule.equivalence } : {}),
+  };
 
   const confidence: 'high' | 'low' = lowConfidenceNote === undefined ? 'high' : 'low';
   const reason = lowConfidenceNote === undefined ? resolved.reason : `${resolved.reason} (${lowConfidenceNote})`;
@@ -1361,12 +1004,10 @@ function classifyWords(
  * @returns recognized invocations in order, the parsed segments, and parse warnings.
  */
 export function classifyGitInvocation(commandLine: string): GitCommandClassification {
-  const outer = tokenize(commandLine, 'command', 0);
-  const warnings = [...outer.warnings];
   const invocations: GitInvocation[] = [];
   const segments: ParsedSegment[] = [];
-
-  const record = (segment: RawSegment): ParsedSegment => {
+  const warnings: string[] = [];
+  walkSegments(commandLine, warnings, (segment) => {
     const invocation = classifyWords(segment.words, segment.raw, segment.parsed, warnings);
     const invocationIndexes: number[] = [];
     if (invocation !== undefined) {
@@ -1376,35 +1017,15 @@ export function classifyGitInvocation(commandLine: string): GitCommandClassifica
     const change = segment.parsed ? segmentDirectoryChange(segment.words) : undefined;
     if (change?.warning !== undefined) warnings.push(change.warning);
     const cdTarget = change?.target;
-    return {
+    segments.push({
       raw: segment.raw,
       kind: segment.kind,
       words: segment.words.map((token) => token.value),
       parsed: segment.parsed,
       ...(cdTarget !== undefined && isStaticDirectoryTarget(cdTarget) ? { cdTarget } : {}),
       invocationIndexes,
-    };
-  };
-
-  // Shell wrappers are expanded recursively with a depth cap: a wrapper inside a
-  // wrapper (`bash -c 'bash -c "git commit"'`) and a prelude before the wrapper
-  // (`command bash -c …`, `A=1 bash -c …`, `env -S'…'`) all classify their inner
-  // command instead of silently disappearing.
-  const recordTree = (segment: RawSegment, depth: number): void => {
-    segments.push(record(segment));
-    if (!segment.parsed) return;
-    if (depth >= MAX_NESTING) {
-      warnings.push('Shell wrapper nesting limit reached; deeper wrapped commands were not classified.');
-      return;
-    }
-    for (const inner of nestedCommandStrings(segment, warnings)) {
-      const nested = tokenize(inner, 'substitution', depth + 1);
-      warnings.push(...nested.warnings);
-      for (const nestedSegment of nested.segments) recordTree(nestedSegment, depth + 1);
-    }
-  };
-
-  for (const segment of outer.segments) recordTree(segment, 0);
+    });
+  });
 
   return {
     invocations: Object.freeze(invocations),
