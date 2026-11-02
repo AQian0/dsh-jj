@@ -71,6 +71,54 @@ const BOOKMARK_NAME_RE = /^[^\s@]+$/;
 /** Bookmark names safe to embed verbatim in a jj revset (`bookmarks(exact:…)` / `::name`). */
 const SAFE_BOOKMARK_RE = /^[A-Za-z0-9_./-]+$/;
 
+/** Reject path arguments jj would read as options (and empty/whitespace paths). */
+function assertPaths(paths: readonly string[]): void {
+  for (const path of paths) {
+    if (path.trim().length === 0 || path.startsWith('-')) {
+      throw badInput('paths must be non-empty and must not start with "-".');
+    }
+  }
+}
+
+/** Validate a bookmark name before anything is rewritten (jj only rejects it later). */
+function assertBookmarkName(name: string): void {
+  if (!BOOKMARK_NAME_RE.test(name) || name.includes('@')) {
+    throw badInput("bookmark names must be non-empty and must not contain whitespace or '@'.");
+  }
+}
+
+/** `jj log -r <revset> --no-graph [--limit <n>] -T <template>`: the argv every change read shares. */
+function logArgv(revset: string, template: string, limit?: number): string[] {
+  const boundedBy = limit === undefined ? [] : ['--limit', String(limit)];
+  return ['log', '-r', revset, '--no-graph', ...boundedBy, '-T', template];
+}
+
+/**
+ * Parse one `-T 'json(self) ++ "\n"'` read (one JSON object per line) into records.
+ *
+ * A line that is not JSON is `JJ_OUTPUT_INVALID` carrying that line as evidence —
+ * jj output must never turn into a silently empty result. A line that parses to a
+ * non-object is skipped.
+ */
+function jsonRecords(argv: readonly string[], stdout: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line.trim().length === 0) continue;
+    let record: Record<string, unknown> | undefined;
+    try {
+      record = asRecord(JSON.parse(line));
+    } catch {
+      throw new JjError(
+        'JJ_OUTPUT_INVALID',
+        `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`,
+        { argv, exitCode: 0, stderr: '', stdout: bound(stdout, 512).text },
+      );
+    }
+    if (record !== undefined) records.push(record);
+  }
+  return records;
+}
+
 /** Result of `status()`. */
 export interface JjStatusResult {
   readonly change: JjChangeRecord;
@@ -387,7 +435,7 @@ export class JjOperations {
     // Content-reporting reads intentionally snapshot: `jj log -r @` must show the
     // current working-copy content (contract §5.8's --ignore-working-copy applies
     // to metadata reads, which are listed below).
-    const argv = ['log', '-r', revset, '--no-graph', '--limit', String(limit), '-T', TPL_LOG];
+    const argv = logArgv(revset, TPL_LOG, limit);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecords(result.stdout, argv);
   }
@@ -478,11 +526,7 @@ export class JjOperations {
     if (message.trim().length === 0) {
       throw badInput('jj_commit needs a non-empty description that follows the repository commit style.');
     }
-    for (const path of paths) {
-      if (path.trim().length === 0 || path.startsWith('-')) {
-        throw badInput('paths must be non-empty and must not start with "-".');
-      }
-    }
+    assertPaths(paths);
     // A pathspec would otherwise be parsed as an option; `--` ends option parsing.
     const argv = ['commit', '-m', message, ...(paths.length > 0 ? ['--', ...paths] : [])];
     const commitResult = await this.run(cwd, argv, signal);
@@ -524,7 +568,7 @@ export class JjOperations {
     limit: number,
     signal?: AbortSignal,
   ): Promise<readonly string[]> {
-    const argv = ['log', '-r', revset, '--no-graph', '--limit', String(limit), '-T', TPL_DESCRIPTION];
+    const argv = logArgv(revset, TPL_DESCRIPTION, limit);
     const result = await this.run(cwd, argv, signal);
     const descriptions: string[] = [];
     const lines = result.stdout.split('\n');
@@ -591,11 +635,7 @@ export class JjOperations {
         'jj_squash needs a message path: pass -m <message> or useDestinationMessage: true (jj would otherwise open an editor).',
       );
     }
-    for (const path of paths) {
-      if (path.trim().length === 0 || path.startsWith('-')) {
-        throw badInput('paths must be non-empty and must not start with "-".');
-      }
-    }
+    assertPaths(paths);
     const argv = ['squash', '--from', from, '--into', into];
     if (message !== undefined) argv.push('-m', message);
     if (useDestinationMessage) argv.push('--use-destination-message');
@@ -667,11 +707,7 @@ export class JjOperations {
       throw badInput('jj_amend `from` must be a non-empty revset; omit it to fold the working copy.');
     }
     const paths = options.paths ?? [];
-    for (const path of paths) {
-      if (path.trim().length === 0 || path.startsWith('-')) {
-        throw badInput('paths must be non-empty and must not start with "-".');
-      }
-    }
+    assertPaths(paths);
     if (options.message !== undefined && options.message.trim().length === 0) {
       throw badInput(
         'jj_amend `message` must not be empty; omit it to keep the target description, or pass the full new description.',
@@ -869,24 +905,7 @@ export class JjOperations {
     const argv = ['op', 'log', '-n', String(limit), '--ignore-working-copy', '--no-graph', '-T', TPL_OP_LOG];
     const result = await this.run(cwd, argv, signal);
     const operations: JjOperation[] = [];
-    for (const line of result.stdout.split('\n')) {
-      if (line.trim().length === 0) continue;
-      let record: Record<string, unknown> | undefined;
-      try {
-        record = asRecord(JSON.parse(line));
-      } catch {
-        throw new JjError(
-          'JJ_OUTPUT_INVALID',
-          `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`,
-          {
-            argv,
-            exitCode: 0,
-            stderr: '',
-            stdout: bound(result.stdout, 512).text,
-          },
-        );
-      }
-      if (record === undefined) continue;
+    for (const record of jsonRecords(argv, result.stdout)) {
       const id = String(record['id'] ?? '');
       const attributes = asRecord(record['attributes']) ?? {};
       operations.push({
@@ -1011,24 +1030,7 @@ export class JjOperations {
     argv.push('-T', TPL_BOOKMARK_LIST);
     const result = await this.run(cwd, argv, signal);
     const bookmarks: { name: string; target: string; remote: string | null }[] = [];
-    for (const line of result.stdout.split('\n')) {
-      if (line.trim().length === 0) continue;
-      let record: Record<string, unknown> | undefined;
-      try {
-        record = asRecord(JSON.parse(line));
-      } catch {
-        throw new JjError(
-          'JJ_OUTPUT_INVALID',
-          `\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(line, 512).text}`,
-          {
-            argv,
-            exitCode: 0,
-            stderr: '',
-            stdout: bound(result.stdout, 512).text,
-          },
-        );
-      }
-      if (record === undefined) continue;
+    for (const record of jsonRecords(argv, result.stdout)) {
       const target = Array.isArray(record['target']) ? record['target'] : [];
       bookmarks.push({
         name: String(record['name'] ?? ''),
@@ -1060,22 +1062,20 @@ export class JjOperations {
     knownTargetCommitId?: string,
     existingTarget?: string | null,
   ): Promise<{ name: string; target: string; moved: boolean }> {
-    if (!BOOKMARK_NAME_RE.test(name) || name.includes('@')) {
-      throw badInput("bookmark names must be non-empty and must not contain whitespace or '@'.");
-    }
-    let existing = existingTarget !== null;
-    if (existingTarget === undefined) {
-      const before = await this.bookmarkList(cwd, false, signal);
-      existing = before.find((bookmark) => bookmark.name === name) !== undefined;
-    }
+    assertBookmarkName(name);
+    // A caller that already listed the bookmarks passes what it knows in, so the
+    // pre-set inspection and the post-set read-back only run when it is unknown.
+    const existing =
+      existingTarget === undefined
+        ? (await this.bookmarkList(cwd, false, signal)).some((bookmark) => bookmark.name === name)
+        : existingTarget !== null;
     const argv = ['bookmark', 'set', name, '-r', revset];
     if (allowBackwards) argv.push('--allow-backwards');
     await this.run(cwd, argv, signal);
-    let target = knownTargetCommitId ?? '';
-    if (knownTargetCommitId === undefined) {
-      const after = await this.bookmarkList(cwd, false, signal);
-      target = after.find((bookmark) => bookmark.name === name)?.target ?? '';
-    }
+    const target =
+      knownTargetCommitId ??
+      (await this.bookmarkList(cwd, false, signal)).find((bookmark) => bookmark.name === name)?.target ??
+      '';
     return { name, target, moved: existing };
   }
 
@@ -1319,11 +1319,7 @@ export class JjOperations {
     // already rewritten the workspace, so the model saw an error for work that had
     // actually been done.
     const requestedBookmark = options.bookmark?.trim();
-    if (requestedBookmark !== undefined && requestedBookmark.length > 0) {
-      if (!BOOKMARK_NAME_RE.test(requestedBookmark) || requestedBookmark.includes('@')) {
-        throw badInput("bookmark names must be non-empty and must not contain whitespace or '@'.");
-      }
-    }
+    if (requestedBookmark !== undefined && requestedBookmark.length > 0) assertBookmarkName(requestedBookmark);
 
     const fetchResult: JjFetchResult =
       options.fetch === false
@@ -1422,8 +1418,8 @@ export class JjOperations {
         options.bookmark,
         stack,
         conflicts,
-        signal,
         first.changeId,
+        signal,
       );
       return {
         ...base,
@@ -1454,8 +1450,8 @@ export class JjOperations {
       options.bookmark,
       stack,
       conflicts,
-      signal,
       first.changeId,
+      signal,
     );
 
     return {
@@ -1495,16 +1491,16 @@ export class JjOperations {
    * @param requested - bookmark name requested by the caller, when any.
    * @param stack - the integrated stack (newest first).
    * @param conflicts - conflicted changes in the stack.
-   * @param signal - cancellation signal.
    * @param firstChangeId - bottom-most change of the stack, used for the ownership check.
+   * @param signal - cancellation signal.
    */
   private async moveRequestedBookmark(
     cwd: string,
     requested: string | undefined,
     stack: readonly JjChangeRecord[],
     conflicts: readonly JjHandoffConflict[],
+    firstChangeId: string,
     signal?: AbortSignal,
-    firstChangeId?: string,
   ): Promise<{ bookmark?: JjHandoffBookmark; bookmarkSkipped?: string }> {
     const name = requested?.trim();
     if (name === undefined || name.length === 0) return {};
@@ -1520,7 +1516,7 @@ export class JjOperations {
     try {
       const bookmarks = await this.bookmarkList(cwd, false, signal);
       const existing = bookmarks.find((bookmark) => bookmark.name === name && bookmark.remote === null);
-      if (existing !== undefined && existing.target.length > 0 && firstChangeId !== undefined) {
+      if (existing !== undefined && existing.target.length > 0) {
         const inside = await this.readCommitIds(cwd, `(${existing.target}) & ((${firstChangeId})::@)`, signal, 1);
         if (inside.length === 0) {
           return {
@@ -1658,15 +1654,7 @@ export class JjOperations {
     limit?: number,
   ): Promise<readonly string[]> {
     try {
-      const argv = [
-        'log',
-        '-r',
-        revset,
-        '--no-graph',
-        ...(limit !== undefined ? ['--limit', String(limit)] : []),
-        '-T',
-        TPL_COMMIT_IDS,
-      ];
+      const argv = logArgv(revset, TPL_COMMIT_IDS, limit);
       const result = await this.run(cwd, argv, signal);
       return result.stdout
         .split('\n')
@@ -1726,7 +1714,7 @@ export class JjOperations {
 
   /** Read one revision as a {@link JjChangeRecord} (default `@`, lightweight template). */
   private async readAt(cwd: string, signal?: AbortSignal, revset = '@'): Promise<JjChangeRecord> {
-    const argv = ['log', '-r', revset, '--no-graph', '-T', TPL_CHANGE];
+    const argv = logArgv(revset, TPL_CHANGE);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecord(result.stdout, argv);
   }
@@ -1739,15 +1727,7 @@ export class JjOperations {
     signal?: AbortSignal,
     limit?: number,
   ): Promise<JjChangeRecord[]> {
-    const argv = [
-      'log',
-      '-r',
-      revset,
-      '--no-graph',
-      ...(limit !== undefined ? ['--limit', String(limit)] : []),
-      '-T',
-      template,
-    ];
+    const argv = logArgv(revset, template, limit);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecords(result.stdout, argv);
   }

@@ -371,7 +371,7 @@ test('JjService: the detect cache is pruned to a bounded size', async (t) => {
 });
 
 test('JjService: cache keys normalize a relative cwd against process.cwd()', async (t) => {
-  // Regression: `resolveKey` returned a relative path verbatim, so `detect('repo')`
+  // Regression: the cache key kept a relative cwd verbatim, so `detect('repo')`
   // after a `chdir` hit the first directory's cached descriptor (cross-talk).
   const first = makeTempRoot('dsh-jj-service-relative-a');
   const second = makeTempRoot('dsh-jj-service-relative-b');

@@ -180,13 +180,6 @@ function readCollected(reader: { readFrom(fromByte: number): { text: string; los
   }
 }
 
-/** Effective limits for one spawn-based run (per-call overrides win over config). */
-interface SpawnLimits {
-  readonly timeoutMs: number;
-  readonly graceMs: number;
-  readonly maxOutputBytes: number;
-}
-
 /** Read `error` as a message without leaking `unknown` through the adapter. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -216,7 +209,8 @@ async function runSpawned(
   env: NodeJS.ProcessEnv,
 ): Promise<JjRunResult> {
   if (options.signal?.aborted === true) return emptyResult();
-  const limits: SpawnLimits = {
+  // Per-call overrides win over config.
+  const limits = {
     timeoutMs: options.timeoutMs || config.timeoutMs,
     graceMs: options.graceMs || config.graceMs,
     maxOutputBytes: options.maxOutputBytes || config.maxOutputBytes,
@@ -287,17 +281,23 @@ export function createRunJj(ctx: Context, config: ResolvedJjConfig): RunJj {
 }
 
 /**
- * Runner over an injected {@link RunCommand} (task-4 runner shape). Used by tests
- * and by embedders that already own a process runner; argv[0] is `jjCommand`.
+ * Shared ladder for both injected-`{@link RunCommand}` adapters.
+ *
+ * An injected runner owns the process, so there is no collected output to track
+ * (see `truncated` below); everything else — program default, the jj-only
+ * global flags, per-call limits, non-interactive env — is the same for the jj and
+ * the Git shape and lives here so the two cannot drift.
  *
  * @param run - the injected runner.
  * @param config - resolved plugin configuration.
+ * @param kind - which program default to use and whether to prepend the jj globals.
  * @returns a {@link RunJj}.
  */
-export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): RunJj {
+function commandRun(run: RunCommand, config: ResolvedJjConfig, kind: 'jj' | 'git'): RunJj {
   return async (options: RunJjOptions): Promise<JjRunResult> => {
-    const program = options.jjCommand || config.jjCommand;
-    const result = await run([program, '--no-pager', '--color=never', ...options.argv], {
+    const program = options.jjCommand || (kind === 'jj' ? config.jjCommand : config.gitCommand);
+    const prefix = kind === 'jj' ? ['--no-pager', '--color=never'] : [];
+    const result = await run([program, ...prefix, ...options.argv], {
       cwd: options.cwd,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       timeoutMs: options.timeoutMs || config.timeoutMs,
@@ -314,6 +314,18 @@ export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): R
       killedByTimeout: result.timedOut,
     };
   };
+}
+
+/**
+ * Runner over an injected {@link RunCommand} (task-4 runner shape). Used by tests
+ * and by embedders that already own a process runner; argv[0] is `jjCommand`.
+ *
+ * @param run - the injected runner.
+ * @param config - resolved plugin configuration.
+ * @returns a {@link RunJj}.
+ */
+export function createCommandRunJj(run: RunCommand, config: ResolvedJjConfig): RunJj {
+  return commandRun(run, config, 'jj');
 }
 
 /**
@@ -341,27 +353,9 @@ export function createRunGit(ctx: Context, config: ResolvedJjConfig): RunJj {
   };
 }
 
-/** Runner used for the version probes (`git --version` is the only git call dsh-jj allows). */
+/** Git shape of {@link commandRun}: `git --version` is the only git call dsh-jj allows. */
 export function createCommandRunGit(run: RunCommand, config: ResolvedJjConfig): RunJj {
-  return async (options: RunJjOptions): Promise<JjRunResult> => {
-    const program = options.jjCommand || config.gitCommand;
-    const result = await run([program, ...options.argv], {
-      cwd: options.cwd,
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      timeoutMs: options.timeoutMs || config.timeoutMs,
-      env: { NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...options.env },
-    });
-    return {
-      exitCode: result.errorCode !== undefined ? null : result.exitCode,
-      signal: result.signal,
-      stdout: result.stdout,
-      stderr: result.errorCode !== undefined ? `${result.errorCode}: ${result.stderr}` : result.stderr,
-      // The injected `RunCommand` shape has no truncation signal; the spawn-based
-      // adapter (`createRunJj`/`createRunGit`) is the one that tracks lossy output.
-      truncated: false,
-      killedByTimeout: result.timedOut,
-    };
-  };
+  return commandRun(run, config, 'git');
 }
 
 /** Run one jj command and throw a {@link JjError} on failure (contract §5.7). */

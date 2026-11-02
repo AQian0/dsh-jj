@@ -24,33 +24,14 @@ import type { VcsDescriptor, VcsKind } from './types.ts';
  * Disposal aborts the lifetime controller, so merging it into every runner call is
  * what makes the documented disposal ladder ("abort → settle pending → clear cache")
  * actually cancel in-flight `jj`/`git` work instead of awaiting it until its timeout.
- * `AbortSignal.any` is available on the supported Node versions; the fallback keeps
- * older hosts working by forwarding both sources into one controller.
+ * `AbortSignal.any` is part of the supported Node baseline (Node ≥ 24).
  *
  * @param lifetime - controller aborted by {@link JjService} disposal.
  * @param caller - per-call cancellation signal, when the caller supplied one.
  * @returns a signal that aborts when either source aborts.
  */
 function mergeAbortSignals(lifetime: AbortSignal, caller?: AbortSignal): AbortSignal {
-  if (caller === undefined) return lifetime;
-  const anyOf = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (typeof anyOf === 'function') return anyOf([lifetime, caller]);
-  const controller = new AbortController();
-  const onLifetime = (): void => controller.abort(lifetime.reason);
-  const onCaller = (): void => controller.abort(caller.reason);
-  if (lifetime.aborted) onLifetime();
-  else lifetime.addEventListener('abort', onLifetime, { once: true });
-  if (caller.aborted) onCaller();
-  else caller.addEventListener('abort', onCaller, { once: true });
-  controller.signal.addEventListener(
-    'abort',
-    () => {
-      lifetime.removeEventListener('abort', onLifetime);
-      caller.removeEventListener('abort', onCaller);
-    },
-    { once: true },
-  );
-  return controller.signal;
+  return caller === undefined ? lifetime : AbortSignal.any([lifetime, caller]);
 }
 
 /**
@@ -184,9 +165,21 @@ export class JjService extends Service {
     return `${descriptor.kind} workspace "${descriptor.workspaceName ?? 'unknown'}" at ${descriptor.root} (${descriptor.jjVersion ?? 'jj version unknown'})`;
   }
 
+  /**
+   * Normalize a cwd into a cache key.
+   *
+   * `path.resolve` without realpath: the guard's sync path must stay I/O-free, but a
+   * *relative* cwd must still be normalized against `process.cwd()` — keeping it
+   * verbatim keyed `repo` in two different directories to one cache entry, so after
+   * a `chdir` the guard/`detect()` returned the other directory's descriptor.
+   * Symlink spellings remain separate keys (intentional: `realpath` is I/O and the
+   * async detection path canonicalizes the descriptor itself); that only costs one
+   * extra probe per spelling, never a wrong descriptor. The catch keeps the guard's
+   * synchronous path fail-open even for a malformed host-supplied cwd.
+   */
   private cacheKey(cwd: string): string {
     try {
-      return resolveKey(cwd);
+      return resolve(cwd);
     } catch {
       return cwd;
     }
@@ -202,15 +195,4 @@ export class JjService extends Service {
       timeoutMs: resolved.timeoutMs,
     };
   }
-}
-
-function resolveKey(cwd: string): string {
-  // path.resolve without realpath: the guard's sync path must stay I/O-free, but a
-  // *relative* cwd must still be normalized against `process.cwd()`. Returning it
-  // verbatim keyed `repo` in two different directories to one cache entry, so after
-  // a `chdir` the guard/`detect()` returned the other directory's descriptor.
-  // Symlink spellings remain separate keys (intentional: `realpath` is I/O and the
-  // async detection path canonicalizes the descriptor itself); that only costs one
-  // extra probe per spelling, never a wrong descriptor.
-  return resolve(cwd);
 }
