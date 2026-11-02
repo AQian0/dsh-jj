@@ -57,7 +57,6 @@ test('colocated repository: kind, roots, versions, remote list, and CLI evidence
   assert.match(descriptor.gitVersion ?? '', /^git version \d+/);
   assert.equal(descriptor.verified, true);
   assert.equal(descriptor.confidence, 'high');
-  assert.deepEqual(descriptor.remotes, []);
   assert.equal(descriptor.jjAvailable, true);
   assert.equal(descriptor.gitAvailable, true);
   assert.equal(descriptor.gitCeilingApplied, false);

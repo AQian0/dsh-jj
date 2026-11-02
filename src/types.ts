@@ -84,12 +84,6 @@ export interface JjOperation {
   readonly tags: readonly string[];
 }
 
-/** One jj remote, as reported by `jj git remote list`. */
-export interface JjRemote {
-  readonly name: string;
-  readonly url: string;
-}
-
 /** Stable diagnostic codes; each maps to one detection failure mode (contract §2.10). */
 export type VcsNoticeCode =
   // contract codes
@@ -233,7 +227,6 @@ export interface VcsDescriptor {
   readonly gitDir: string | undefined;
   readonly jjVersion: string | undefined;
   readonly gitVersion: string | undefined;
-  readonly remotes: readonly JjRemote[];
   /** False when only the filesystem-sniff fast path succeeded (jj CLI missing, timed out, or unusable). */
   readonly verified: boolean;
   readonly notices: readonly VcsNotice[];

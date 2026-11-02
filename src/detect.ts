@@ -27,7 +27,6 @@ import {
   type DetectionConfidence,
   type DetectDeps,
   type DetectInput,
-  type JjRemote,
   type JjRunResult,
   type JjWorkspaceInfo,
   type RunCommand,
@@ -85,8 +84,6 @@ export interface DetectVcsOptions {
   readonly timeoutMs?: number;
   /** Extra environment entries layered onto every probe. */
   readonly env?: Readonly<Record<string, string>>;
-  /** When false, skip `jj git remote list` (default true). */
-  readonly probeRemotes?: boolean;
 }
 
 interface EntryInfo {
@@ -349,30 +346,7 @@ export function parseWorkspaceList(stdout: string): JjWorkspaceInfo[] {
   return entries;
 }
 
-/**
- * Parse `jj git remote list` output (`<name> <url>` per line).
- *
- * @param stdout - raw command output.
- * @returns parsed remotes.
- */
-export function parseRemoteList(stdout: string): JjRemote[] {
-  const remotes: JjRemote[] = [];
-  for (const line of stdout.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const space = trimmed.search(/\s/);
-    if (space <= 0) continue;
-    remotes.push({ name: trimmed.slice(0, space), url: trimmed.slice(space + 1).trim() });
-  }
-  return remotes;
-}
-
 function outputTail(text: string, limit = 200): string {
-  const trimmed = text.trim();
-  return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit)}…`;
-}
-
-function shorten(text: string, limit = 200): string {
   const trimmed = text.trim();
   return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit)}…`;
 }
@@ -474,7 +448,6 @@ interface AssembleInput {
   gitDir?: string;
   jjVersion?: string;
   gitVersion?: string;
-  remotes?: readonly JjRemote[];
   verified: boolean;
   confidence: DetectionConfidence;
   confirmedBy: VcsEvidenceSource[];
@@ -569,7 +542,6 @@ export async function detectVcs(
       gitDir: fields.gitDir ?? undefined,
       jjVersion: fields.jjVersion ?? undefined,
       gitVersion: fields.gitVersion ?? undefined,
-      remotes: Object.freeze([...(fields.remotes ?? [])]),
       verified: fields.verified,
       notices: Object.freeze([...notices]),
       probedAt,
@@ -766,7 +738,6 @@ export async function detectVcs(
   let workspaces: JjWorkspaceInfo[] = [];
   let jjWorkspaceRoot: string | undefined;
   let workspaceName: string | undefined;
-  let remotes: JjRemote[] = [];
   let verified = false;
   let jjStore = readJjStore(jjRoot, sniff.jjRepoPath);
 
@@ -991,14 +962,6 @@ export async function detectVcs(
   const kind: VcsKind = colocated ? 'jj-colocated' : 'jj-native';
   jjStore = readJjStore(jjRoot, sniff.jjRepoPath);
 
-  if (options.probeRemotes !== false) {
-    const remoteProbe = await probe(runJj, jjRoot, [...JJ_GLOBAL_ARGS, 'git', 'remote', 'list'], signal, timeoutMs, {
-      ...JJ_PROBE_ENV,
-      ...extraEnv,
-    });
-    if (remoteProbe.result !== undefined && !remoteProbe.failed) remotes = parseRemoteList(remoteProbe.result.stdout);
-  }
-
   // F13: a jj-native workspace that sits inside a parent Git repository — Git
   // would act on that unrelated repository (the root cause of the git-only
   // workspace-changes card describing `.jj` metadata as "changes").
@@ -1043,7 +1006,6 @@ export async function detectVcs(
     ...(gitDir !== undefined ? { gitDir } : {}),
     ...(jjVersion !== undefined ? { jjVersion } : {}),
     ...(gitVersion !== undefined ? { gitVersion } : {}),
-    remotes,
     verified,
     confidence: authorityConfidence,
     confirmedBy,
@@ -1053,6 +1015,3 @@ export async function detectVcs(
     probedAt,
   });
 }
-
-/** Re-exported for callers that need the notice shortener. */
-export { shorten as boundedText };
