@@ -1,5 +1,5 @@
 /**
- * The 17 `jj_*` tool definitions (design contract §7.3).
+ * The 18 `jj_*` tool definitions (design contract §7.3).
  *
  * Every tool is jj-native: it names "Jujutsu (jj)" in its first sentence, states
  * that it is *not* git, and never falls back to Git commands. Outside a usable jj
@@ -14,12 +14,14 @@ import {
   COMMIT_STYLE_CHOICES,
   COMMIT_STYLE_IDS,
   CONCRETE_COMMIT_STYLE_IDS,
+  commitCorrectionHint,
   detectCommitStyle,
   resolveCommitStylePolicy,
 } from './commit-style.ts';
 import { isRewritableChange } from './jj-templates.ts';
 import { CHANGE_PROPERTIES, CHANGE_SCHEMA, changeView, textRender, workspaceFields } from './tool-schemas.ts';
 import {
+  amendNextSteps,
   canonicalWorkspacePath,
   handoffNextSteps,
   isRootWorkspace,
@@ -31,7 +33,7 @@ import {
  * Build every `jj_*` tool definition (contract §7.3).
  *
  * @param context - service access, resolved config, host, and the cwd resolver.
- * @returns the 17 tool definitions in a stable order.
+ * @returns the 18 tool definitions in a stable order.
  */
 export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   const { service, config } = context;
@@ -261,6 +263,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             committedPaths: { type: 'array', items: { type: 'string' }, required: true },
             workingCopyPaths: { type: 'array', items: { type: 'string' }, required: true },
             warnings: { type: 'array', items: { type: 'string' }, required: true },
+            nextStep: {
+              type: 'string',
+              required: true,
+              description:
+                'Correction hint for the committed change: while it remains unpushed, corrections belong in it via jj_amend; once published they must be new commits.',
+            },
           },
         },
         render: (_args, value) => textRender(value),
@@ -275,6 +283,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           committedPaths: [...result.committed.paths],
           workingCopyPaths: [...result.workingCopy.paths],
           warnings: [...result.warnings],
+          nextStep: commitCorrectionHint({
+            changeId: result.committed.changeId,
+            rewritable: isRewritableChange(result.committed),
+          }),
         };
       },
     }),
@@ -403,7 +415,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_squash',
       description:
-        'Move changes from one Jujutsu (jj) revision into another; by default from @ into @-. This is jj, not git: it replaces git commit --amend and interactive staging, and descendants are rebased automatically.',
+        'Move changes from one Jujutsu (jj) revision into another; by default from @ into @-. This is jj, not git: it replaces git commit --amend and interactive staging, and descendants are rebased automatically. For a correction to a change you made in this session that is not pushed yet, prefer jj_amend: it validates the target (published changes are refused) and reports the rebased descendants.',
       parameters: {
         from: { type: 'string', description: "jj revset to move changes out of; defaults to '@'." },
         into: { type: 'string', description: "jj revset to move changes into; defaults to '@-'." },
@@ -412,6 +424,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           description: 'New description for the destination change. Mutually exclusive with useDestinationMessage.',
         },
         useDestinationMessage: { type: 'boolean', description: "Keep the destination change's existing description." },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Optional repository-relative paths to move only those changes; the remaining changes stay in the source.',
+        },
       },
       output: { schema: CHANGE_SCHEMA, render: (_args, value) => textRender(value) },
       async execute(args, exec) {
@@ -423,10 +441,94 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           args.into ?? '@-',
           args.message,
           args.useDestinationMessage ?? false,
-          [],
+          args.paths ?? [],
           exec.signal,
         );
         return changeView(change);
+      },
+    }),
+
+    defineTool({
+      name: 'jj_amend',
+      description:
+        'Fold a correction into an earlier Jujutsu (jj) change instead of appending a new commit. This is jj, not git: it is `jj squash --from … --into …`, not `git commit --amend`; the target change is rewritten in place, its descendants are rebased, local bookmarks follow it, and its change id stays stable. Use it while the target is still unpushed (rewritable: true in jj_log): it refuses a change that a remote bookmark, trunk or tag already reaches, because rewriting that would need a forced push (dsh-jj never does that), and it only folds into changes in this workspace’s own stack. A correction that is a new increment, or a target that is ambiguous, should stay a new commit.',
+      parameters: {
+        into: {
+          type: 'string',
+          required: true,
+          description:
+            'Change the correction belongs to: exactly one revision (a change id from jj_log, or @-/@--). It must be an ancestor of the source and still rewritable.',
+        },
+        from: {
+          type: 'string',
+          description:
+            "Source of the correction; defaults to '@' (the working copy). Pass the correction commit's change id when the fix was already committed — jj abandons that change after folding it.",
+        },
+        message: {
+          type: 'string',
+          description:
+            "Replace the target's description with this one (follow the repository style). Omit to keep the target's existing description.",
+        },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Optional repository-relative paths to fold only those changes; the remaining changes stay in the source.',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            amended: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
+            workingCopy: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
+            sourceAbandoned: {
+              type: 'boolean',
+              required: true,
+              description: 'True when the source was a committed change that jj removed after folding it.',
+            },
+            rewritten: {
+              type: 'array',
+              required: true,
+              description: 'Descendants rebased by the rewrite, newest first (target and @ excluded).',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  changeId: { type: 'string', required: true },
+                  description: { type: 'string', required: true },
+                  conflict: { type: 'boolean', required: true },
+                },
+              },
+            },
+            warnings: { type: 'array', items: { type: 'string' }, required: true },
+            nextStep: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const cwd = await context.cwdFor(exec);
+        await requireWorkspace(context, cwd, exec.signal);
+        const result = await operations.amend(
+          cwd,
+          {
+            into: args.into,
+            ...(args.from !== undefined ? { from: args.from } : {}),
+            ...(args.message !== undefined ? { message: args.message } : {}),
+            ...(args.paths !== undefined ? { paths: args.paths } : {}),
+          },
+          exec.signal,
+        );
+        return {
+          amended: changeView(result.amended),
+          workingCopy: changeView(result.workingCopy),
+          sourceAbandoned: result.sourceAbandoned,
+          rewritten: result.rewritten.map((change) => ({ ...change })),
+          warnings: [...result.warnings],
+          nextStep: amendNextSteps(result),
+        };
       },
     }),
 

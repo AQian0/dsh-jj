@@ -12,7 +12,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { ResolvedJjConfig } from './config.ts';
-import type { JjHandoffResult, JjOperations } from './service.ts';
+import type { JjAmendResult, JjHandoffResult, JjOperations } from './service.ts';
 import type { VcsDescriptor } from './types.ts';
 
 /** Structural view of the service the tools need (a live `JjService` satisfies it). */
@@ -169,4 +169,30 @@ export function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescrip
     return `Nothing to rebase and no conflicts: the stack already sits on ${result.destination}. Report the destination, the change ids and any bookmark outcome to the user.${cleanupNote} ${cleanup}`;
   }
   return `Rebase finished and verified: the stack now sits directly on ${result.destination}. Report the rebased change ids, the destination, and the resolved-by-fallback provenance (destinationSource) to the user.${cleanupNote} ${cleanup}`;
+}
+
+/**
+ * Model-facing next step for one `jj_amend` result.
+ *
+ * A successful fold keeps the target change id stable, so the only follow-up that
+ * needs instructions is conflict resolution (the model resolves them itself, never
+ * the user). A published target never reaches this helper: {@link
+ * JjOperations.amend} refuses it before rewriting anything.
+ *
+ * @param result - the amend result.
+ * @returns the next-step text (never empty).
+ */
+export function amendNextSteps(result: JjAmendResult): string {
+  const conflicted = result.rewritten.filter((change) => change.conflict).map((change) => change.changeId);
+  if (conflicted.length > 0) {
+    return [
+      `The correction is folded into ${result.amended.changeId}, but the rewrite left conflicts in ${conflicted.join(', ')}.`,
+      'Resolve them yourself: edit the files to their final content, remove the `<<<<<<<` / `%%%%%%%` / `>>>>>>>` marker blocks, run jj_status, then call jj_amend again with the same `into` to verify. Report only a conflict you cannot resolve safely.',
+    ].join(' ');
+  }
+  const note = result.warnings.length > 0 ? ` Warnings: ${result.warnings.join(' ')}` : '';
+  const workingCopy = result.workingCopy.empty
+    ? 'the working copy is a fresh empty change'
+    : 'the working copy still holds the changes outside `paths`';
+  return `The correction is now part of ${result.amended.changeId} (change id unchanged); ${result.rewritten.length} descendant${result.rewritten.length === 1 ? '' : 's'} were rebased and ${workingCopy}. Report the amended change id and the rebased changes; later corrections can target the same change until it is pushed.${note}`;
 }

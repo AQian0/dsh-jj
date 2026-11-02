@@ -384,3 +384,29 @@ export function commitStylePromptText(options: CommitStylePromptOptions = {}): s
   if (options.preferSplitCommits !== false) sections.push(SPLIT_COMMITS_GUIDANCE);
   return sections.join('\n');
 }
+
+/** Options for {@link commitCorrectionHint}. */
+export interface CommitCorrectionHintOptions {
+  /** Change id of the commit that was just created. */
+  readonly changeId: string;
+  /** Whether that change is still unpushed (see `isRewritableChange`). */
+  readonly rewritable: boolean;
+}
+
+/**
+ * Model-facing hint attached to a fresh `jj_commit` result.
+ *
+ * The correction policy is a decision the model makes right after a commit, so the
+ * answer is returned with the commit itself instead of being left to the (much
+ * longer) session guidance: while the change is unpushed, a correction belongs in
+ * it; once it is published, only a new commit is safe.
+ *
+ * @param options - the committed change id and its `rewritable` flag.
+ * @returns one model-facing line, always non-empty.
+ */
+export function commitCorrectionHint(options: CommitCorrectionHintOptions): string {
+  if (!options.rewritable) {
+    return `Change ${options.changeId} is already published (a remote bookmark, trunk or tag reaches it): later corrections must be new commits. Never rewrite it and never force-push.`;
+  }
+  return `Change ${options.changeId} is still unpushed (rewritable): if the user asks for a correction to this step, edit the files and call jj_amend with into: ${JSON.stringify(options.changeId)} instead of starting a new commit.`;
+}

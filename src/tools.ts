@@ -4,7 +4,7 @@
  * The implementation is split by responsibility:
  * - `tool-schemas.ts`: shared output schemas and pure result views;
  * - `tool-shared.ts`: context types, refusal text, hand-off next steps, workspace ownership;
- * - `tool-definitions.ts`: the 17 `defineTool` definitions;
+ * - `tool-definitions.ts`: the 18 `defineTool` definitions;
  * - `tool-entry.ts`: `registerJjTools` and the `jj-tools` plugin entry.
  *
  * The exported names below are unchanged for `src/index.ts`, the other entries,

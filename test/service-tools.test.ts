@@ -238,7 +238,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
-test('all 17 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
+test('all 18 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-defs');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   fx.cwd = repo;
@@ -256,6 +256,7 @@ test('all 17 jj_* tools are defined with contract names, descriptions, and schem
     'jj_describe',
     'jj_commit_style',
     'jj_squash',
+    'jj_amend',
     'jj_undo',
     'jj_op_log',
     'jj_workspace_add',
@@ -440,7 +441,7 @@ test('registerJjTools registers and disposes every tool', async (t) => {
     },
   };
   const dispose = registerJjTools(host, { service: toolService(fx, operations), config: {} });
-  assert.equal(registered.length, 17);
+  assert.equal(registered.length, 18);
   dispose();
   assert.equal(registered.length, 0);
   dispose();
@@ -519,6 +520,7 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
     readonly committedPaths: readonly string[];
     readonly workingCopyPaths: readonly string[];
     readonly warnings: readonly string[];
+    readonly nextStep: string;
   };
   assert.equal(result.committed.description, 'feat: tool commit');
   assert.equal(result.committed.currentWorkingCopy, false);
@@ -527,6 +529,8 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
   assert.deepEqual([...result.committedPaths], ['one.txt']);
   assert.deepEqual([...result.workingCopyPaths], ['two.txt']);
   assert.deepEqual([...result.warnings], []);
+  assert.match(result.nextStep, /unpushed|rewritable/);
+  assert.match(result.nextStep, /jj_amend/);
   const status = await operations.status(repo);
   assert.deepEqual([...status.changedPaths], ['two.txt']);
 
@@ -1811,5 +1815,47 @@ test('operation layer: jj_squash moves only the given paths and reports publishe
     () => operations.squash(repo, '@', three, undefined, true, []),
     (error: unknown) =>
       error instanceof JjError && error.code === 'JJ_BAD_INPUT' && /published change/.test(error.message),
+  );
+});
+
+test('jj_amend tool folds the correction, reports descendants, and validates its own output schema', async (t) => {
+  const { fx, repo, operations, one, two, three } = await makeAmendFixture(t, 'dsh-jj-tool-amend');
+  fx.cwd = repo;
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  await writeFixtureFile(fx, repo, 'one.txt', 'one fixed');
+
+  const value = (await definitions.get('jj_amend')!.execute({ into: one }, fakeExec())) as {
+    readonly amended: { readonly changeId: string; readonly rewritable: boolean };
+    readonly workingCopy: { readonly empty: boolean };
+    readonly sourceAbandoned: boolean;
+    readonly rewritten: readonly { readonly changeId: string; readonly conflict: boolean }[];
+    readonly warnings: readonly string[];
+    readonly nextStep: string;
+  };
+  assert.equal(value.amended.changeId, one);
+  assert.equal(value.sourceAbandoned, false);
+  assert.deepEqual(
+    value.rewritten.map((change) => change.changeId),
+    [three, two],
+  );
+  assert.equal(value.workingCopy.empty, true);
+  assert.match(value.nextStep, new RegExp(one));
+
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  assert.deepEqual(
+    validateJsonSchemaValue(definitions.get('jj_amend')!.output.schema, value),
+    [],
+    'the jj_amend output satisfies its own schema',
+  );
+
+  // Published targets fail closed through the tool as well.
+  await addBareRemote(fx, repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'main', '-r', three], repo);
+  await mustRun(fx.run, ['jj', 'git', 'push', '--bookmark', 'main'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'fetch'], repo);
+  await writeFixtureFile(fx, repo, 'two.txt', 'two fixed');
+  await assert.rejects(
+    () => definitions.get('jj_amend')!.execute({ into: two }, fakeExec()),
+    (error: unknown) => error instanceof JjError && /published change/.test(error.message),
   );
 });
