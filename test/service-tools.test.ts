@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj } from '../src/jj-command.ts';
-import { JjOperations, TPL_CHANGE, TPL_STATUS } from '../src/service.ts';
+import { JjOperations, TPL_CHANGE, TPL_STATUS, changeFromRecord, isRewritableChange } from '../src/service.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
 import {
   assertToolchain,
@@ -736,6 +736,8 @@ test('TPL_STATUS is the contract template and parses into a change', async (t) =
   );
   assert.match(result.stdout, /"change_id":/);
   assert.match(result.stdout, /"paths":/);
+  assert.match(result.stdout, /"immutable":/);
+  assert.match(result.stdout, /"remote_bookmarks":/);
   assert.match(result.stdout, /\n$/, 'the template ends every record with a newline');
 });
 
@@ -752,9 +754,37 @@ test('TPL_CHANGE is the lightweight change template without diff paths', async (
   );
   assert.match(result.stdout, /"change_id":/);
   assert.match(result.stdout, /"current_working_copy":/);
+  assert.match(result.stdout, /"immutable":/);
+  assert.match(result.stdout, /"remote_bookmarks":/);
   assert.doesNotMatch(result.stdout, /"paths":/);
   assert.doesNotMatch(result.stdout, /self\.diff\(\)/);
   assert.match(result.stdout, /\n$/, 'the template ends every record with a newline');
+});
+
+test('change records expose the correction window (immutable + remote bookmarks)', () => {
+  const local = changeFromRecord({
+    change_id: 'abc',
+    commit_id: 'def',
+    description: 'feat: x',
+    bookmarks: ['main'],
+    immutable: false,
+    remote_bookmarks: [],
+    author: 'a@example.invalid',
+  });
+  assert.equal(local.immutable, false);
+  assert.deepEqual([...local.remoteBookmarks], []);
+  assert.equal(isRewritableChange(local), true, 'a local bookmark alone leaves the window open');
+
+  const tracked = changeFromRecord({ immutable: false, remote_bookmarks: ['feat'] });
+  assert.deepEqual([...tracked.remoteBookmarks], ['feat']);
+  assert.equal(isRewritableChange(tracked), false, 'a pushed tracked bookmark closes the window');
+
+  const trunk = changeFromRecord({ immutable: true, remote_bookmarks: [] });
+  assert.equal(isRewritableChange(trunk), false);
+
+  const legacy = changeFromRecord({ change_id: 'x' });
+  assert.equal(legacy.immutable, false, 'a record without the field is treated as mutable');
+  assert.deepEqual([...legacy.remoteBookmarks], []);
 });
 
 // ---------------------------------------------------------------------------

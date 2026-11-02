@@ -8,6 +8,7 @@
  *
  * @module dsh-jj/tool-schemas
  */
+import { isRewritableChange } from './jj-templates.ts';
 import type { VcsDescriptor } from './types.ts';
 
 export function textRender(value: unknown): { type: 'text'; text: string }[] {
@@ -29,6 +30,19 @@ export const CHANGE_PROPERTIES = {
     type: 'array',
     description: 'Local bookmarks pointing at this change.',
     items: { type: 'string' },
+    required: true,
+  },
+  remoteBookmarks: {
+    type: 'array',
+    description:
+      'Names of remote bookmarks pointing at this change; non-empty means the change is already published and must not be rewritten.',
+    items: { type: 'string' },
+    required: true,
+  },
+  rewritable: {
+    type: 'boolean',
+    description:
+      'True while a correction may be folded into this change (jj_amend): no remote bookmark, trunk or tag reaches it. Local bookmarks do not close this window.',
     required: true,
   },
   author: { type: 'string', description: 'Author email.', required: true },
@@ -56,6 +70,8 @@ export interface ChangeView {
   readonly conflict: boolean;
   readonly currentWorkingCopy: boolean;
   readonly bookmarks: string[];
+  readonly remoteBookmarks: string[];
+  readonly rewritable: boolean;
   readonly author: string;
 }
 
@@ -67,6 +83,8 @@ export function changeView(change: {
   conflict: boolean;
   currentWorkingCopy: boolean;
   bookmarks: readonly string[];
+  immutable: boolean;
+  remoteBookmarks: readonly string[];
   author: string;
 }): ChangeView {
   return {
@@ -77,6 +95,8 @@ export function changeView(change: {
     conflict: change.conflict,
     currentWorkingCopy: change.currentWorkingCopy,
     bookmarks: [...change.bookmarks],
+    remoteBookmarks: [...change.remoteBookmarks],
+    rewritable: isRewritableChange(change),
     author: change.author,
   };
 }

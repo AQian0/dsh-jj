@@ -17,6 +17,7 @@ import {
   detectCommitStyle,
   resolveCommitStylePolicy,
 } from './commit-style.ts';
+import { isRewritableChange } from './jj-templates.ts';
 import { CHANGE_PROPERTIES, CHANGE_SCHEMA, changeView, textRender, workspaceFields } from './tool-schemas.ts';
 import {
   canonicalWorkspacePath,
@@ -80,6 +81,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             empty: { type: 'boolean', required: true },
             conflict: { type: 'boolean', required: true },
             bookmarks: { type: 'array', items: { type: 'string' }, required: true },
+            remoteBookmarks: { type: 'array', items: { type: 'string' }, required: true },
+            rewritable: { type: 'boolean', required: true },
             changedPaths: { type: 'array', items: { type: 'string' }, required: true },
             diffStat: { type: 'string', required: true },
             statusText: { type: 'string', required: true },
@@ -99,6 +102,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           empty: status.change.empty,
           conflict: status.change.conflict,
           bookmarks: [...status.change.bookmarks],
+          remoteBookmarks: [...status.change.remoteBookmarks],
+          rewritable: isRewritableChange(status.change),
           changedPaths: [...status.changedPaths],
           diffStat: status.diffStat,
           statusText: status.truncated ? `[truncated]\n${status.raw}` : status.raw,
@@ -147,6 +152,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             conflict: change.conflict,
             currentWorkingCopy: change.currentWorkingCopy,
             bookmarks: [...change.bookmarks],
+            remoteBookmarks: [...change.remoteBookmarks],
+            rewritable: isRewritableChange(change),
             author: change.author,
           })),
         };

@@ -47,6 +47,21 @@ export interface JjChange {
   readonly conflict: boolean;
   readonly currentWorkingCopy: boolean;
   readonly bookmarks: readonly string[];
+  /**
+   * True when jj treats this change as immutable
+   * (`immutable_heads()`: trunk, tags, and untracked remote bookmarks by default).
+   *
+   * Rewriting an immutable change is refused by jj unless `--ignore-immutable` is
+   * passed, which dsh-jj never does.
+   */
+  readonly immutable: boolean;
+  /**
+   * Names of remote bookmarks that point at this change.
+   *
+   * A pushed tracked bookmark keeps `immutable` false under jj's default
+   * configuration, so this list is what marks the change as published.
+   */
+  readonly remoteBookmarks: readonly string[];
   readonly author: string;
 }
 

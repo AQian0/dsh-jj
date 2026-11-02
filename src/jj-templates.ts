@@ -12,9 +12,18 @@
 
 import type { JjChange } from './types.ts';
 
-/** `jj log -r <rev> --no-graph -T <TPL_STATUS>` template (contract §2.8, verbatim). */
+/**
+ * `jj log -r <rev> --no-graph -T <TPL_STATUS>` template (contract §2.8, plus the
+ * rewrite-window fields added with the correction policy).
+ *
+ * `immutable` is jj's own "never rewrite this" marker (trunk, tags, and by default
+ * untracked remote bookmarks) and `remote_bookmarks` names every remote ref that
+ * reaches the change. Both are needed: a pushed *tracked* bookmark (for example a
+ * feature branch) keeps `immutable` false under jj's default `immutable_heads()`,
+ * yet rewriting it diverges the local bookmark from the remote.
+ */
 export const TPL_STATUS =
-  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ ",\\"paths\\":" ++ json(self.diff().files().map(|f| f.path())) ++ "}\\n"';
+  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"immutable\\":" ++ json(immutable) ++ ",\\"remote_bookmarks\\":" ++ json(remote_bookmarks.filter(|b| b.remote() != "git").map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ ",\\"paths\\":" ++ json(self.diff().files().map(|f| f.path())) ++ "}\\n"';
 
 /**
  * `jj log` change template **without** the diff `paths` field (`TPL_STATUS` minus
@@ -26,7 +35,7 @@ export const TPL_STATUS =
  * `status()` (and `commit()`'s path reporting) needs the `paths` field.
  */
 export const TPL_CHANGE =
-  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
+  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"immutable\\":" ++ json(immutable) ++ ",\\"remote_bookmarks\\":" ++ json(remote_bookmarks.filter(|b| b.remote() != "git").map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
 
 /**
  * `jj log` template returning only the commit id of every selected revision.
@@ -36,9 +45,9 @@ export const TPL_CHANGE =
  */
 export const TPL_COMMIT_IDS = 'commit_id ++ "\\n"';
 
-/** `jj log` per-change template (contract §2.8, verbatim). */
+/** `jj log` per-change template (contract §2.8, plus the rewrite-window fields). */
 export const TPL_LOG =
-  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description.first_line()) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
+  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"description\\":" ++ json(description.first_line()) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"immutable\\":" ++ json(immutable) ++ ",\\"remote_bookmarks\\":" ++ json(remote_bookmarks.filter(|b| b.remote() != "git").map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.email()) ++ "}\\n"';
 
 /**
  * `jj workspace list` template used by the tools (tab-separated; both fields JSON).
@@ -137,9 +146,37 @@ export function parseJsonLine(stdout: string, argv: readonly string[]): Record<s
   }
 }
 
+/**
+ * Whether a correction may rewrite this change (the correction "window").
+ *
+ * A change is rewritable only while it has not reached a remote:
+ * - `immutable` is jj's own marker (trunk, tags, untracked remote bookmarks);
+ * - `remoteBookmarks` catches the case jj still allows rewriting — a pushed
+ *   *tracked* bookmark stays outside the default `immutable_heads()`, and folding
+ *   into it would diverge the local bookmark from its remote (a force push).
+ *
+ * Local bookmarks alone never close the window: jj rebases the following changes
+ * and moves the bookmark along with them.
+ *
+ * @param change - any parsed change record.
+ * @returns true when a correction may be folded into the change in place.
+ */
+export function isRewritableChange(change: {
+  readonly immutable: boolean;
+  readonly remoteBookmarks: readonly string[];
+}): boolean {
+  return !change.immutable && change.remoteBookmarks.length === 0;
+}
+
 /** Convert one parsed template record into a {@link JjChangeRecord}. */
 export function changeFromRecord(record: Record<string, unknown>): JjChangeRecord {
   const bookmarks = Array.isArray(record['bookmarks']) ? record['bookmarks'].map((entry) => String(entry)) : [];
+  // Two remotes can carry the same bookmark name (`main@origin` + `main@upstream`);
+  // the template already drops the colocated repository's `@git` mirror, and the
+  // remaining names are deduplicated so the model sees one entry per bookmark.
+  const remoteBookmarks = Array.isArray(record['remote_bookmarks'])
+    ? [...new Set(record['remote_bookmarks'].map((entry) => String(entry)))]
+    : [];
   const paths = Array.isArray(record['paths']) ? record['paths'].map((entry) => String(entry)) : [];
   return {
     changeId: String(record['change_id'] ?? ''),
@@ -149,6 +186,8 @@ export function changeFromRecord(record: Record<string, unknown>): JjChangeRecor
     conflict: record['conflict'] === true,
     currentWorkingCopy: record['current_working_copy'] === true,
     bookmarks,
+    immutable: record['immutable'] === true,
+    remoteBookmarks,
     author: String(record['author'] ?? ''),
     paths,
   };
