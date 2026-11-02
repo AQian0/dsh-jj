@@ -6,8 +6,9 @@
 
 - **仓库识别**：自动区分 git 仓库、jj-colocated、jj-native 与非仓库；jj 与 git 嵌套时也能判断真正的归属。
 - **防 git 混淆**：在 jj 仓库里执行 `git commit`、`git reset` 等命令时，默认放行并在结果中提示等价的 jj 命令，也可以配置为直接拒绝。
-- **jj 原生工具**：提供 17 个 `jj_*` 工具，覆盖状态查看、提交、撤销、workspace、bookmark 与收尾集成。
+- **jj 原生工具**：提供 18 个 `jj_*` 工具，覆盖状态查看、提交、撤销、workspace、bookmark 与收尾集成。
 - **提交习惯**：默认沿用仓库最近的提交描述风格，风格不明确时先询问你；同时引导模型分步骤小步提交。
+- **修正折叠**：本会话已做的提交在你推送之前仍可改写；你要求修正时，模型把改动折进原提交（`jj_amend`），而不是追加一个 `fix:` 提交。
 - **会话上下文**：在 jj 仓库里自动提示模型优先用 jj；检测到并行会话时，引导模型先隔离 workspace，收尾时用 `jj_handoff` 完成集成。
 - **变更卡片（行数与文件列表）**：Web 端每轮回复末尾的「已编辑 N 个文件 +X −Y」默认改用 jj 的工作副本快照计算，jj-native 仓库与 linked workspace 也能正确显示；不在 jj workspace 的会话继续沿用内置的 Git 快照 / 文件工具捕获记录。
 - **项目根识别**：让 `agent-instructions` 把 `.jj` 也当作项目根（headless / CLI profile 生效）。
@@ -38,6 +39,7 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 | “看下当前 jj 状态”                | `jj_status`        |
 | “列出最近 10 个提交”              | `jj_log`           |
 | “把当前改动并进上一个提交”        | `jj_squash`        |
+| “把这个修正并进刚才那个提交”      | `jj_amend`         |
 | “改一下当前 change 的描述”        | `jj_describe`      |
 | “把这步提交了，继续下一项”        | `jj_commit`        |
 | “这个仓库的提交信息是什么风格？”  | `jj_commit_style`  |
@@ -70,6 +72,13 @@ Use the jj equivalent instead:
 对话里明确指定的风格优先于配置与历史，但只对当前会话有效；想长期固定就写进配置。
 
 默认 `preferSplitCommits: true`：模型每完成一个独立步骤（一个功能、一次修复、一次重构或一次文档调整）就用 `jj_commit` 提交，再开始下一步。只提交混杂改动中的部分文件时，给 `jj_commit` 传 `paths`。
+
+**修正近期提交**：默认 `preferAmendCorrections: true`。你对本次会话刚做的某个提交提出修正时，模型会把改动直接折进那个提交（`jj_amend`），而不是再追加一个 `fix:` 提交。能否改写由 `jj_log` 返回的 `rewritable` 决定：
+
+- 只要提交还没进入远端（没有 remote bookmark，也不在 trunk / tag 上）就仍可改写；把本地 `main` 移到最新提交不算关闭窗口——jj 会自动 rebase 后续提交，并把本地 bookmark 一起带过去。
+- 一旦推送过（或提交已在 trunk / tag 上），`rewritable` 变为 `false`：再改写就需要 force push，插件不会这么做，模型会改为新建提交并向你说明。
+- 修正还在工作副本里：`jj_amend` 传 `into: <目标 change id>`；修正已经误提交：传 `from: <修正提交>` 与 `into: <目标>`，jj 会把变空的修正提交删掉。只想折叠部分文件时传 `paths`。
+- 模型只折叠本会话、本 workspace 内自己做过的提交；目标不明确时会先问你。
 
 ### 多会话协作
 
@@ -105,7 +114,8 @@ Use the jj equivalent instead:
 | `jj_commit`                              | 描述当前 change 并新建 change；传 `paths` 可只提交部分文件                 |
 | `jj_describe`                            | 修改当前 change 的描述（相当于 `git commit --amend`）                      |
 | `jj_commit_style`                        | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项                     |
-| `jj_squash`                              | 把改动合并进另一个提交                                                     |
+| `jj_squash`                              | 把改动合并进另一个提交；传 `paths` 可只合并部分文件                        |
+| `jj_amend`                               | 把修正折叠进之前的提交（未推送时），并报告被 rebase 的后代                 |
 | `jj_undo` / `jj_op_log`                  | 撤销操作 / 查看 operation 历史                                             |
 | `jj_workspace_add` / `jj_workspace_list` | 新建 / 列出 jj workspace                                                   |
 | `jj_bookmark_list` / `jj_bookmark_set`   | 列出 / 设置 bookmark                                                       |
@@ -154,11 +164,12 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 | `commitStyle`                     | `auto`                            | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom`                                            |
 | `commitStyleCustom`               | `''`                              | `commitStyle: custom` 时的风格规则（该模式下必填）                                                                                   |
 | `preferSplitCommits`              | `true`                            | 是否注入「按独立步骤拆成小提交」的指引                                                                                               |
+| `preferAmendCorrections`          | `true`                            | 是否注入「把修正折进原提交」的指引（`jj_amend` 工具始终可用）                                                                        |
 | `commitStyleSampleLimit`          | `30`                              | `jj_commit_style` 最多沿用的非空描述条数                                                                                             |
 | `defaultLogLimit` / `maxLogLimit` | `30` / `200`                      | `jj_log` 的默认与最大返回条数                                                                                                        |
 | `defaultCwd`                      | `''`                              | 无 agent 调用或无法解析会话目录时的回退目录（`jj-tools` 与 `jj-guard` 两行读取；空 = 进程 cwd）                                      |
 
-> `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `commitStyleSampleLimit` /
+> `commitGuidance` / `commitStyle` / `commitStyleCustom` / `preferSplitCommits` / `preferAmendCorrections` / `commitStyleSampleLimit` /
 > `multiSessionGuidance` / `rebaseTarget` / `preferJjContext` / `jjCommand` / `gitCommand` / `timeoutMs` / `graceMs` /
 > `maxOutputBytes` / `detectCacheTtlMs` 由 `jj-runtime` 行读取（超时、截断与命令名经 `ctx.jj` 作用于全部工具）；
 > `guard*` 开头的键和 `readOnlyGitNotice` 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` 由 `jj-tools`
@@ -202,6 +213,7 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 - **`.jj` 项目根标记仅部分 profile 生效**：Web profile 在 bundle 层禁用了该行，headless / CLI profile 才会把 `.jj` 当作项目根。
 - **jj-native 下项目级 skill 定位可能不准**：项目级 skill 根按最近的 `.git` 祖先查找（上游硬编码）；jj-native 仓库没有 `.git` 时会退回当前会话目录，通常只有会话正好位于仓库根时才符合预期。
 - **不自动推送**：`jj_handoff` 只保证本地集成到目标，推送仍需你执行 `jj git push --bookmark <name>`。
+- **已推送的提交不折叠**：`jj_amend` 只改写尚未进入远端的提交（`immutable()` 或任意 remote bookmark 命中即拒绝），改写已推送提交需要 force push，插件不会传 `--ignore-immutable`。shell 里的 `jj squash --into <revision>` 仍会按既有规则触发 `guardJjRepositoryWide` 的仓库级告警；用 `jj_amend` 工具不会触发该告警。
 - **超大新文件只有「过大」条目**：jj 默认不追踪超过 `snapshot.max-new-file-size`（默认 1 MiB）的新文件；插件会把这类文件列进卡片并标记「过大」，但没有行数与逐行对比；colocated 仓库里内置记录器虽然能从 Git 视角看到该文件，合并仍以 jj 数据优先，所以卡片统一显示「过大」。需要真正纳管时调大该 jj 配置。shell 命令写到 jj workspace 之外的文件只在文件工具捕获能覆盖时出现。多文件超 `maxFiles` 时，合并视图的 `total` 与总行数是近似值（内置记录器对超出自身上限的文件不再保留行数明细）。
 - **变更卡片只在有工具调用的回合出现**：与 DSH 内置记录器一致，纯聊天不产生「已编辑」卡片；被中断或失败的 jj 快照只影响该轮卡片，不影响回合。
 

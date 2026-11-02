@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Jujutsu (jj) tools",
-    "description": "jj-native model tools: status, log, diff, new, commit, describe, commit-style detection, squash, undo, operation log, workspaces, bookmarks, rebase, plus a one-shot hand-off and session-owned workspace cleanup."
+    "description": "jj-native model tools: status, log, diff, new, commit, describe, commit-style detection, squash, amend (fold a correction into an unpushed change), undo, operation log, workspaces, bookmarks, rebase, plus a one-shot hand-off and session-owned workspace cleanup."
   }
 }

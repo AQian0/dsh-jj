@@ -9,7 +9,7 @@
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
 - 四个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
-  - `dsh-jj/tools`(`jj-tools`):17 个 `jj_*` 模型工具;
+  - `dsh-jj/tools`(`jj-tools`):18 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护;
   - `dsh-jj/changes`(`jj-changes`):用 jj 工作副本快照实现每轮「已编辑 N 个文件」变更卡片,并通过 bundle patch
     禁用 DSH 内置的 Git-only `workspace-changes` 行、在隔离 service scope 里复用它的记录器。
@@ -72,13 +72,13 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | 路径                                                           | 内容                                                                                                                                                                                    |
 | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/index.ts`                                                 | 运行时入口:`JjService` 注册 + 全局 prompt context;`assembleBaseLayer` 供测试                                                                                                            |
-| `src/service.ts`                                               | `JjOperations`(17 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                               |
+| `src/service.ts`                                               | `JjOperations`(18 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                               |
 | `src/jj-templates.ts`                                          | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess)                                                                                                                  |
 | `src/jj-service.ts`                                            | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                              |
 | `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
 | `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
 | `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
-| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 17 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
+| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 18 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
 | `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
 | `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
 | `src/git-command.ts`                                           | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
@@ -89,9 +89,9 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/guard.ts`                                                 | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案                                                                                                                                         |
 | `src/jj-command.ts`                                            | jj/git 子进程适配、非交互 env、错误归类                                                                                                                                                 |
 | `src/config.ts`                                                | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验                                                                                                                       |
-| `src/commit-style.ts`                                          | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)与拆分提交指引(纯模块,无 I/O)                                                                                                       |
+| `src/commit-style.ts`                                          | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)、拆分提交与修正折叠指引(纯模块,无 I/O)                                                                                             |
 | `src/types.ts`                                                 | 共享类型与词汇(纯声明)                                                                                                                                                                  |
-| `src/prompt-context.ts`                                        | 会话开始时注入「优先用 jj」、提交描述/拆分提交与多会话/收尾 rebase 的模型可见上下文                                                                                                     |
+| `src/prompt-context.ts`                                        | 会话开始时注入「优先用 jj」、提交描述/拆分提交/修正折叠与多会话/收尾 rebase 的模型可见上下文                                                                                            |
 | `src/multi-session.ts`                                         | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess)                                                            |
 | `test/**/*.test.ts`                                            | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
 | `test/multi-session.test.ts`                                   | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
@@ -236,6 +236,26 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       四个 entry、`REQUIRED_EXPORTS`、patch 断言)、`package.json` 的 `exports`/`files`、`changes/locale/*.json`
       与 README「变更卡片」「配置」。
 
+15. **修正折叠(`jj_amend` / 修正窗口)**:
+    - 窗口判定只有一处:`jj-templates.ts` 的 `isRewritableChange` = `!immutable && remoteBookmarks.length === 0`。
+      只看 `immutable()` 不够——jj 默认 `immutable_heads()` 不覆盖已推送的 tracked bookmark,改写它会让本地与远端
+      分叉;只看 remote bookmark 也不够(trunk / tag 可能没有 remote bookmark)。模板里的 `remote_bookmarks` 必须
+      过滤 `@git`(colocated 仓库的本地镜像),否则任何带本地 bookmark 的提交都会被误判为已发布。
+    - `JjOperations.amend()` 是唯一的折叠入口:先解析目标/源各为唯一 revision、目标必须是源的祖先,再检查改写范围
+      `into::@`(**不是** `into::from`——`jj squash --into` 会把后代一直 rebase 到工作副本)内没有已发布提交,最后
+      拒绝 merge 目标、空源与冲突源。任何校验失败都是 `JJ_BAD_INPUT`,执行前绝不落一次 squash。目标描述默认用
+      `--use-destination-message` 保留(永不打开编辑器),需要时用 `message` 改写;stale 时 `updateStale()` 后重跑一次
+      (与 handoff 相同),不要只在外层重试。
+    - `jj_amend` 工具只做参数映射与 `nextStep` 文案;`jj_commit` 的输出必须带 `commitCorrectionHint`,把规则放在
+      「刚提交完」这个决策点上;`jj_squash` 不做完整预校验,但要把 jj 的 immutable 拒绝映射成 `JJ_BAD_INPUT`。
+    - 指引在 `commit-style.ts` 的 `CORRECTION_GUIDANCE`(与 `SPLIT_COMMITS_GUIDANCE` 分开),受 `preferAmendCorrections`
+      (默认 true,runtime 行)控制;`false` 只关指引,不禁用工具。默认不要改成「所有后续改动都追加提交」或
+      「自动改写」——修正只由用户指令触发。
+    - 测试在 `test/service-tools.test.ts`(工作区/已提交修正、`paths`、`message`、trunk 与 tracked bookmark 两种
+      发布边界、非祖先/merge/空源/冲突源、`jj_amend` 输出 schema 自校验)、`test/commit-style.test.ts`、
+      `test/prompt-context.test.ts` 与 `test/config.test.ts`;改窗口判定或文案时同步 README「修正近期提交」「工具一览」
+      与 `locale/*.json`、`tools/locale/*.json`。
+
 ## 代码约定
 
 - 任何改动都必须让 `pnpm test` 全绿(`vp check --deny-warnings` → `tsc` 类型检查 → `node --test`);改行为先补测试。
@@ -278,7 +298,9 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 `test/service-tools.test.ts`;默认保持 `auto`(继承历史、无法确定时询问用户),不要改成静默固定风格,
 也不要让默认 `preferSplitCommits` 退化回「只改当前工作区」。提交策略以 `ctx.jj`(runtime 行)的配置为
 唯一来源:`jj_commit_style` 读 `service.operations.config`,不要改回读 tools 行配置,否则 prompt 与工具
-会给出互相矛盾的风格。
+会给出互相矛盾的风格。修正折叠与描述风格是两条独立策略:指引在 `CORRECTION_GUIDANCE`、`commitCorrectionHint`
+与 `preferAmendCorrections`,动作为 `JjOperations.amend()` 与 `jj_amend`,窗口判定在 `isRewritableChange`;
+改其中任何一处都要同时看本文件规则 15 的测试清单。
 
 **修改 guard 行为**:命令分类表在 `git-rules.ts` / `jj-rules.ts`(解析原语在 `git-tokenize.ts`,均保持纯函数)→
 `guard.ts` 文案与策略 → `test/guard*.test.ts` 与 `test/git-command.test.ts`;
