@@ -53,7 +53,9 @@ import type {
   WorkspaceFileDiff,
 } from '@deepseek-ai/dsh-workspace-changes/types';
 
-import { absoluteSummaryPath, compareDisplay } from './changes-paths.ts';
+import { resolve } from 'node:path';
+
+import { compareDisplay } from './changes-paths.ts';
 import type { TurnChangesRecorder } from './changes-recorder.ts';
 
 /** The Host-facing shape of the `workspaceChanges` service (a subset of DSH's `WorkspaceChanges`). */
@@ -291,7 +293,7 @@ function mergeView(own: WorkspaceChangesSummary | undefined, base: UpstreamSumma
   if (own !== undefined) {
     for (let index = 0; index < own.files.length; index += 1) {
       const file = own.files[index] as WorkspaceChangedFile;
-      ownPaths.add(absoluteSummaryPath(file.path, own.cwd));
+      ownPaths.add(resolve(own.cwd, file.path));
       files.push({ file, entry: { source: 'own', index } });
     }
   }
@@ -301,7 +303,7 @@ function mergeView(own: WorkspaceChangesSummary | undefined, base: UpstreamSumma
   if (base !== undefined) {
     for (let index = 0; index < base.summary.files.length; index += 1) {
       const file = base.summary.files[index] as WorkspaceChangedFile;
-      if (ownPaths.has(absoluteSummaryPath(file.path, base.summary.cwd))) continue;
+      if (ownPaths.has(resolve(base.summary.cwd, file.path))) continue;
       upstreamOnlyCount += 1;
       upstreamOnlyAdded += file.added;
       upstreamOnlyDeleted += file.deleted;

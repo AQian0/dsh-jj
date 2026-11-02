@@ -12,15 +12,15 @@
  * @module dsh-jj/changes-paths
  */
 
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, relative, sep } from 'node:path';
 
 /** Slash-separated form of a native relative path. */
-export function toPosix(path: string): string {
+function toPosix(path: string): string {
   return path.split(sep).join('/');
 }
 
 /** Whether `path` is `root` itself or lies under it. */
-export function isInside(root: string, path: string): boolean {
+function isInside(root: string, path: string): boolean {
   const rel = relative(root, path);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
@@ -58,15 +58,4 @@ export function displayPathOf(absolute: string, cwd: string, root: string, home:
  */
 export function compareDisplay(a: { readonly display: string }, b: { readonly display: string }): number {
   return a.display < b.display ? -1 : a.display > b.display ? 1 : 0;
-}
-
-/**
- * Absolute form of one summary path, used to merge two recorders' file lists.
- *
- * @param path - a summary `path`: relative to `cwd`, or absolute outside it.
- * @param cwd - the working directory the summary's relative paths resolve against.
- * @returns the normalized absolute path.
- */
-export function absoluteSummaryPath(path: string, cwd: string): string {
-  return resolve(cwd, path);
 }

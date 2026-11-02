@@ -128,7 +128,7 @@ export async function requireWorkspace(
  * cleaned by `jj_workspace_cleanup`; anything else (user-created or another
  * session's workspace) stays a user action, with the exact command quoted.
  */
-export function workspaceCleanupText(descriptor: VcsDescriptor, cleanupOwned: boolean): string {
+function workspaceCleanupText(descriptor: VcsDescriptor, cleanupOwned: boolean): string {
   const workspaceName = descriptor.workspaceName ?? 'default';
   if (workspaceName === 'default') return 'This is the default workspace; there is no temporary workspace to clean up.';
   if (cleanupOwned) {

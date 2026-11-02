@@ -16,7 +16,14 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { VcsKind } from './types.ts';
 // Type-only: loads the `@deepseek-ai/dsh-tools` module augmentation that adds `ctx.tools`.
 import type {} from '@deepseek-ai/dsh-tools';
-import { assertServiceableConfig, Config, resolveConfig, warnMisplacedConfig, type JjPluginConfig } from './config.ts';
+import {
+  assertServiceableConfig,
+  Config,
+  readHostLogger,
+  resolveConfig,
+  warnMisplacedConfig,
+  type JjPluginConfig,
+} from './config.ts';
 import {
   installGitConfusionGuard,
   type GitConfusionGuardHandle,
@@ -133,18 +140,8 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
     }
   };
   // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
-  // Warn (never fail) so a key placed on the wrong bundle row is visible. `logger` is
-  // a built-in context member (not an injected service), so try the property first.
-  const readLogger = (): unknown => {
-    try {
-      const logger = (ctx as unknown as { logger?: unknown }).logger;
-      if (logger !== undefined) return logger;
-    } catch {
-      // Fall through to the service-style lookup.
-    }
-    return readService<unknown>('logger');
-  };
-  warnMisplacedConfig(readLogger(), config, 'runtime');
+  // Warn (never fail) so a key placed on the wrong bundle row is visible.
+  warnMisplacedConfig(readHostLogger(ctx), config, 'runtime');
   /**
    * Whether one live session's agent is inside an open turn right now.
    *

@@ -266,6 +266,31 @@ function ownerRowsText(owners: readonly ConfigOwner[]): string {
 }
 
 /**
+ * Read the host logger from a live or bare context.
+ *
+ * Every entry warns through `ctx.logger`, and plugin startup must survive a bare
+ * test context (no `logger`, no `get`) as well as a Cordis context whose service
+ * property access throws. The built-in context member is tried first, then the
+ * service-style lookup; anything unusable is left to {@link warnMisplacedConfig}.
+ *
+ * @param ctx - host context (Cordis context or a structural test double).
+ * @returns whatever the context exposes as its logger, or `undefined`.
+ */
+export function readHostLogger(ctx: unknown): unknown {
+  const view = ctx as { logger?: unknown; get?: (name: string, strict?: boolean) => unknown } | null | undefined;
+  try {
+    if (view?.logger !== undefined) return view.logger;
+  } catch {
+    // Fall through to the service-style lookup.
+  }
+  try {
+    return typeof view?.get === 'function' ? view.get.call(ctx, 'logger') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Warn once per key that belongs to another bundle row, and once per unknown key.
  *
  * Observability must never block startup: a missing, malformed, or throwing logger is
