@@ -1588,6 +1588,58 @@ test('operation layer: jj_handoff does not move a bookmark that points at shared
   assert.equal(mainAfter, mainBefore, 'the shared main bookmark was not moved');
 });
 
+test('operation layer: a conflicted bookmark with an absent side lists a real target and is not moved by a hand-off', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-conflicted-bookmark');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'feature', '-r', '@-'], ws);
+  // Two concurrent operations from the same base: one deletes `feature`, the other
+  // moves it to main. jj records the conflict as [absent, old tip, main] — the
+  // first added side is `null` in json(self) and "(absent)" in `jj bookmark list`.
+  const baseOp = (await mustRun(fx.run, ['jj', 'op', 'log', '-n', '1', '--no-graph', '-T', 'id'], repo)).stdout.trim();
+  await mustRun(fx.run, ['jj', 'bookmark', 'delete', 'feature'], repo);
+  await mustRun(
+    fx.run,
+    ['jj', '--at-op', baseOp, 'bookmark', 'set', 'feature', '-r', 'main', '--allow-backwards'],
+    repo,
+  );
+  const mainCommit = (await mustRun(fx.run, ['jj', 'log', '-r', 'main', '--no-graph', '-T', 'commit_id'], repo)).stdout;
+
+  const listed = (await operations.bookmarkList(repo, false, undefined)).find(
+    (bookmark) => bookmark.name === 'feature' && bookmark.remote === null,
+  );
+  assert.ok(listed !== undefined, 'the conflicted bookmark is listed');
+  assert.equal(listed.conflicted, true);
+  assert.notEqual(listed.target, 'null', 'an absent side must never become the literal revset "null"');
+  assert.equal(listed.target, mainCommit, 'the first present added side is reported');
+  const plain = (await operations.bookmarkList(repo, false, undefined)).find((bookmark) => bookmark.name === 'main');
+  assert.equal(plain?.conflicted, false);
+
+  // The tool output carries the flag and still validates against its own schema.
+  fx.cwd = repo;
+  const tool = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get(
+    'jj_bookmark_list',
+  )!;
+  const value = (await tool.execute({}, fakeExec())) as { bookmarks: { name: string; conflicted: boolean }[] };
+  assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  assert.equal(value.bookmarks.find((bookmark) => bookmark.name === 'feature')?.conflicted, true);
+
+  // Make the hand-off rebase-worthy, then request the conflicted bookmark.
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const result = await operations.handoff(ws, { bookmark: 'feature', fetch: false });
+  assert.equal(result.rebased, true, 'the rebase result survives the skipped bookmark');
+  assert.equal(result.bookmark, undefined, 'a conflicted bookmark is not resolved by picking a side');
+  assert.match(result.bookmarkSkipped ?? '', /is conflicted/);
+  const after = (await operations.bookmarkList(repo, false, undefined)).find(
+    (bookmark) => bookmark.name === 'feature' && bookmark.remote === null,
+  );
+  assert.equal(after?.conflicted, true, 'the bookmark is still conflicted after the hand-off');
+});
+
 // ---------------------------------------------------------------------------
 // Correction folding (amend): rewrite an unpushed target instead of appending.
 // Policy: the window stays open until a remote bookmark, trunk or tag reaches

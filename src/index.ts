@@ -435,6 +435,7 @@ export type {
 export type { JjChange, JjOperation } from './types.ts';
 export type { JjErrorCode } from './jj-command.ts';
 export type {
+  JjBookmarkEntry,
   JjCommitResult,
   JjFetchResult,
   JjHandoffBookmark,

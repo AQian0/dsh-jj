@@ -250,6 +250,20 @@ export interface JjHandoffConflict {
   readonly description: string;
 }
 
+/** One `jj bookmark list` entry. */
+export interface JjBookmarkEntry {
+  readonly name: string;
+  /**
+   * Commit id the bookmark points at; for a conflicted bookmark the first present
+   * added side, and `''` when every side is absent.
+   */
+  readonly target: string;
+  /** Remote name for a remote-tracking entry, `null` for the local bookmark. */
+  readonly remote: string | null;
+  /** True when concurrent operations left the bookmark with several (or absent) targets. */
+  readonly conflicted: boolean;
+}
+
 /** Result of a bookmark move requested by a hand-off. */
 export interface JjHandoffBookmark {
   readonly name: string;
@@ -1019,23 +1033,33 @@ export class JjOperations {
     return bound(result.stdout.trim() || result.stderr.trim(), 1024).text;
   }
 
-  /** `jj bookmark list [--all-remotes] -T 'json(self) ++ "\n"'`. */
-  async bookmarkList(
-    cwd: string,
-    allRemotes: boolean,
-    signal?: AbortSignal,
-  ): Promise<readonly { name: string; target: string; remote: string | null }[]> {
+  /**
+   * `jj bookmark list [--all-remotes] -T 'json(self) ++ "\n"'`.
+   *
+   * `json(self).target` is jj's merge form `[add, remove, add, …]`: one commit id for
+   * a normal bookmark, several for a conflicted one, and `null` for an *absent* side
+   * (one concurrent operation deleted the bookmark while another moved it; the plain
+   * `jj bookmark list` shows that side as `(absent)`). The reported `target` is the
+   * first present added side, never the literal revset `"null"`, and `conflicted`
+   * tells callers that no single target exists, so nothing may treat that id as the
+   * bookmark's position.
+   */
+  async bookmarkList(cwd: string, allRemotes: boolean, signal?: AbortSignal): Promise<readonly JjBookmarkEntry[]> {
     const argv = ['bookmark', 'list', '--ignore-working-copy'];
     if (allRemotes) argv.push('--all-remotes');
     argv.push('-T', TPL_BOOKMARK_LIST);
     const result = await this.run(cwd, argv, signal);
-    const bookmarks: { name: string; target: string; remote: string | null }[] = [];
+    const bookmarks: JjBookmarkEntry[] = [];
     for (const record of jsonRecords(argv, result.stdout)) {
-      const target = Array.isArray(record['target']) ? record['target'] : [];
+      const terms: unknown[] = Array.isArray(record['target']) ? record['target'] : [];
+      const isPresent = (term: unknown): term is string => typeof term === 'string' && term.length > 0;
+      const added = terms.filter((_term, index) => index % 2 === 0);
+      const target = added.find(isPresent) ?? terms.find(isPresent) ?? '';
       bookmarks.push({
         name: String(record['name'] ?? ''),
-        target: target.length > 0 ? String(target[0]) : '',
+        target,
         remote: record['remote'] === undefined || record['remote'] === null ? null : String(record['remote']),
+        conflicted: terms.length > 1,
       });
     }
     return bookmarks;
@@ -1486,6 +1510,9 @@ export class JjOperations {
    * being integrated (`firstChangeId::@`): a bookmark on shared history (for example
    * the shared trunk `main`) must not be dragged to the session tip by a model
    * mistake (A2-F4). Such a request is reported as `bookmarkSkipped`, not as failure.
+   * A conflicted bookmark (concurrent operations moved or deleted it differently) is
+   * skipped too: it has no single position to check ownership against, and setting
+   * it would silently pick a side for whoever else moved it.
    *
    * @param cwd - workspace directory.
    * @param requested - bookmark name requested by the caller, when any.
@@ -1516,6 +1543,11 @@ export class JjOperations {
     try {
       const bookmarks = await this.bookmarkList(cwd, false, signal);
       const existing = bookmarks.find((bookmark) => bookmark.name === name && bookmark.remote === null);
+      if (existing?.conflicted === true) {
+        return {
+          bookmarkSkipped: `Bookmark ${name} is conflicted (concurrent operations moved or deleted it differently), so jj_handoff does not pick a side. Report the rebased stack instead; once the intended target is clear the bookmark can be resolved with jj_bookmark_set.`,
+        };
+      }
       if (existing !== undefined && existing.target.length > 0) {
         const inside = await this.readCommitIds(cwd, `(${existing.target}) & ((${firstChangeId})::@)`, signal, 1);
         if (inside.length === 0) {

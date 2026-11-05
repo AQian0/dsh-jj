@@ -724,6 +724,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
                   name: { type: 'string', required: true },
                   target: { type: 'string', required: true },
                   remote: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+                  conflicted: {
+                    type: 'boolean',
+                    required: true,
+                    description:
+                      'True when concurrent operations left the bookmark with several or absent targets; target is then only one side. Resolve it with jj_bookmark_set.',
+                  },
                 },
               },
             },
@@ -739,6 +745,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             name: bookmark.name,
             target: bookmark.target,
             remote: bookmark.remote,
+            conflicted: bookmark.conflicted,
           })),
         };
       },

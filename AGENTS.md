@@ -187,7 +187,9 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       (唯一例外是本次 `bookmark` 参数请求移动、且它指向栈底之上的 bookmark),避免把共享 trunk 历史卷进
       source rebase;destination 解析回 `@` 本身直接拒绝。`roots(::@ ~ ::target)` 为空时是 workspace **落后**
       于 destination,返回 `rebased:false, alreadyIntegrated:false, onTarget:false`(不 rebase、不谎报成功)。
-      bookmark 已存在时只有指向被 rebase 的栈内才移动,否则 `bookmarkSkipped`;bookmark 名在 rebase 前校验,
+      bookmark 已存在时只有指向被 rebase 的栈内才移动,否则 `bookmarkSkipped`;冲突 bookmark(`conflicted`,
+      `json(self).target` 是 `[add, remove, add…]` 合并形式,缺席的一侧是 `null`)一律 `bookmarkSkipped`,不替人选边,
+      `bookmarkList` 的 `target` 取第一个存在的 add 侧,绝不能把 `null` 变成字面 revset `"null"`;bookmark 名在 rebase 前校验,
       rebase 后的 bookmark 失败收敛为 `bookmarkSkipped`(保留已成功的 rebase 结果)。
     - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(按 `exec.agent`
       记在 `WeakMap`,记录**名字+规范路径**)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的

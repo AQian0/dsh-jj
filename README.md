@@ -101,7 +101,7 @@ Use the jj equivalent instead:
 4. 用 `jj_workspace_cleanup` 注销本会话创建的临时 workspace；其它 workspace 需要你手动清理。
 5. 向你报告最终的 change id、集成目标、bookmark 移动与 workspace 清理结果。
 
-`jj_handoff` 只在确实找不到集成目标时才需要你指定 revision；它不会自动 push，推送仍由你执行。单会话默认不会自动收到这段收尾提示，需要时可以直接让模型调用 `jj_handoff`。
+`jj_handoff` 只在确实找不到集成目标时才需要你指定 revision；它不会自动 push，推送仍由你执行。请求移动的 bookmark 指向共享历史或处于冲突状态（并发操作分别移动/删除了它）时，`jj_handoff` 不会替你选边，只在结果里说明原因。单会话默认不会自动收到这段收尾提示，需要时可以直接让模型调用 `jj_handoff`。
 
 ### 工具一览
 
@@ -118,7 +118,7 @@ Use the jj equivalent instead:
 | `jj_amend`                               | 把修正折叠进之前的提交（未推送时），并报告被 rebase 的后代                 |
 | `jj_undo` / `jj_op_log`                  | 撤销操作 / 查看 operation 历史                                             |
 | `jj_workspace_add` / `jj_workspace_list` | 新建 / 列出 jj workspace                                                   |
-| `jj_bookmark_list` / `jj_bookmark_set`   | 列出 / 设置 bookmark                                                       |
+| `jj_bookmark_list` / `jj_bookmark_set`   | 列出（`conflicted` 标出并发操作留下的冲突 bookmark）/ 设置 bookmark        |
 | `jj_rebase`                              | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动               |
 | `jj_handoff`                             | 收尾集成：fetch、选择目标、整栈 rebase、工作副本过期恢复与冲突上报一次完成 |
 | `jj_workspace_cleanup`                   | 注销本会话创建的临时 workspace                                             |
