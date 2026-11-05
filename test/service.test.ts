@@ -123,7 +123,7 @@ function delay(ms: number): Promise<'timeout'> {
 test('JjService: detect caches for detectCacheTtlMs, warm always refreshes, and peek is a miss before any probe', async (t) => {
   const temp = makeTempRoot('dsh-jj-service-cache');
   t.after(() => temp.cleanup());
-  const subprocess = immediateSubprocess('jj 0.46.0\n');
+  const subprocess = immediateSubprocess('jj 0.47.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { detectCacheTtlMs: 40, timeoutMs: 5_000, graceMs: 50 });
 
@@ -325,7 +325,7 @@ test('JjService: concurrent detect/warm calls for one cwd share a single probe',
   t.after(() => temp.cleanup());
 
   // Baseline: one completed detection = one batch of probe spawns.
-  const baselineSubprocess = immediateSubprocess('jj 0.46.0\n');
+  const baselineSubprocess = immediateSubprocess('jj 0.47.0\n');
   const baseline = serviceContext(baselineSubprocess);
   const baselineService = new JjService(baseline.ctx, { timeoutMs: 5_000, graceMs: 50 });
   await baselineService.detect(temp.dir);
@@ -333,7 +333,7 @@ test('JjService: concurrent detect/warm calls for one cwd share a single probe',
   assert.ok(singleProbeSpawns > 0);
   await baseline.dispose();
 
-  const subprocess = immediateSubprocess('jj 0.46.0\n');
+  const subprocess = immediateSubprocess('jj 0.47.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { timeoutMs: 5_000, graceMs: 50 });
   const descriptors = await Promise.all([service.detect(temp.dir), service.detect(temp.dir), service.detect(temp.dir)]);
@@ -352,7 +352,7 @@ test('JjService: concurrent detect/warm calls for one cwd share a single probe',
 test('JjService: the detect cache is pruned to a bounded size', async (t) => {
   const temp = makeTempRoot('dsh-jj-service-prune');
   t.after(() => temp.cleanup());
-  const subprocess = immediateSubprocess('jj 0.46.0\n');
+  const subprocess = immediateSubprocess('jj 0.47.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { timeoutMs: 5_000, graceMs: 50 });
   const cap = JjService.DETECT_CACHE_MAX_ENTRIES;
@@ -379,7 +379,7 @@ test('JjService: cache keys normalize a relative cwd against process.cwd()', asy
   t.after(() => second.cleanup());
   mkdirSync(join(first.dir, 'repo'));
   mkdirSync(join(second.dir, 'repo'));
-  const subprocess = immediateSubprocess('jj 0.46.0\n');
+  const subprocess = immediateSubprocess('jj 0.47.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { detectCacheTtlMs: 60_000, timeoutMs: 5_000, graceMs: 50 });
   const original = process.cwd();

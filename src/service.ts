@@ -42,7 +42,7 @@ import {
 } from './jj-templates.ts';
 import type { JjOperation, JjRunResult } from './types.ts';
 
-/** How `jj rebase` selects the revisions to move (jj 0.46). */
+/** How `jj rebase` selects the revisions to move. */
 export type JjRebaseMode = 'revisions' | 'source' | 'branch';
 
 /** `JjRebaseMode` → jj command-line flag. */
@@ -376,10 +376,11 @@ function readChangeRecord(stdout: string, argv: readonly string[]): JjChangeReco
 /**
  * Format one `jj op log` timestamp.
  *
- * jj 0.46 serializes `json(self).time` as an object (`{ start, end }`), so the old
- * `String(record.time)` produced the useless literal `[object Object]`. The model
- * needs one parseable instant, so the operation's start time is reported; a plain
- * string shape (other jj builds) is passed through unchanged.
+ * jj serializes `json(self).time` as an object (`{ start, end }`) of RFC 3339
+ * instants with an explicit offset (UTC is written `+00:00`), so
+ * `String(record.time)` would produce the useless literal `[object Object]`. The
+ * model needs one parseable instant, so the operation's start time is reported
+ * verbatim; a plain string shape is passed through unchanged.
  */
 function operationTime(record: Record<string, unknown>): string {
   const value = record['time'];
@@ -986,7 +987,7 @@ export class JjOperations {
   /**
    * `jj workspace list -T '<JSON name>\t<JSON root>\n'`; roots are absolute.
    *
-   * Both fields are JSON-encoded because jj 0.46 decorates names that need quoting
+   * Both fields are JSON-encoded because jj decorates names that need quoting
    * (`my session` → `"my session"`) when the template prints the bare `name`, which
    * made `workspaceAdd` return a quoted name and the session-ownership comparison in
    * `jj_workspace_cleanup` fail. JSON also keeps names containing a literal tab
@@ -1106,7 +1107,7 @@ export class JjOperations {
   /**
    * `jj rebase (-r|-s|-b) <revision> -d <destination>`.
    *
-   * jj 0.46 distinguishes the selection modes sharply: `-r` moves only the named
+   * jj distinguishes the selection modes sharply: `-r` moves only the named
    * revisions and leaves their descendants behind (re-parented onto the old
    * parents), while `-s` moves the revision together with all of its descendants.
    * Moving a whole stack (the multi-session hand-off) therefore needs

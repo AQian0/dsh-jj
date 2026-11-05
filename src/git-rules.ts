@@ -418,7 +418,7 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
   },
   init: mutateRule(
     'subcommand `init` creates Git metadata jj will not own',
-    'jj git init --colocate (jj 0.46 default) or `jj git init --no-colocate`',
+    'jj git init --colocate (the default) or `jj git init --no-colocate`',
   ),
   clone: mutateRule('subcommand `clone` creates a plain Git checkout jj cannot manage', 'jj git clone <url>'),
   worktree: {
@@ -510,7 +510,7 @@ export const GIT_SUBCOMMAND_RULES: Readonly<Record<string, SubcommandRule>> = Ob
     contextual: true,
     ...mutateRule(
       'subcommand `tag` creates, edits, or deletes Git tags',
-      'jj tag (0.46 has `jj tag`; `jj bookmark` also works for named pointers)',
+      'jj tag (`jj bookmark` also works for named pointers)',
     ),
     refine: ({ flags, positionals }) => {
       const listFlags = [

@@ -5,7 +5,7 @@
  * by the base layer (severity on notices, detection confidence, availability
  * flags). Pure declarations: no I/O, no subprocess.
  *
- * Terminology (jj 0.46): `jj root` is documented as a shortcut for
+ * Terminology: `jj root` is documented as a shortcut for
  * `jj workspace root`, so a jj "root" is a *workspace* root. `jjRoot` here is
  * the sniffed directory containing `.jj`; `jjWorkspaceRoot` is the workspace
  * root that `jj workspace list` reports for the workspace containing `cwd`.
@@ -16,7 +16,7 @@
 /**
  * Repository classification.
  *
- * - `jj-colocated`: `.jj` and a root `.git` in the same root (jj 0.46 default of
+ * - `jj-colocated`: `.jj` and a root `.git` in the same root (the default of
  *   `jj git init`).
  * - `jj-native`: `.jj` only; the Git backend lives inside `.jj/repo/store/git`
  *   (`jj git init --no-colocate`).
@@ -73,7 +73,7 @@ export interface JjOperation {
   /**
    * Operation start time as jj reports it (RFC 3339 with a UTC offset).
    *
-   * jj 0.46 serializes `json(self).time` as a `{ start, end }` object; the parsed
+   * jj serializes `json(self).time` as a `{ start, end }` object; the parsed
    * field is the `start` instant so the model always gets a parseable timestamp
    * instead of the stringified object.
    */

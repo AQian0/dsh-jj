@@ -156,7 +156,7 @@ export async function assertGitFixture(run: RunCommand, dir: string): Promise<vo
   }
 }
 
-/** `jj git init --colocate` — `.jj` + `.git` in the same root (jj 0.46 default). */
+/** `jj git init --colocate` — `.jj` + `.git` in the same root (the `jj git init` default). */
 export async function initJjColocated(run: RunCommand, dir: string): Promise<string> {
   await mustRun(run, ['jj', 'git', 'init', '--colocate'], dir);
   await assertJjFixture(run, dir);

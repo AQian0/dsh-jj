@@ -123,7 +123,7 @@ function readPointerPath(entry: EntryInfo): string | undefined {
 }
 
 /**
- * Read a `.jj/repo` pointer: jj 0.46 writes a raw relative path
+ * Read a `.jj/repo` pointer: jj writes a raw relative path
  * (`../../native/.jj/repo`), Git worktree `.git` files use `gitdir: <path>`.
  */
 function readJjRepoPointer(entry: EntryInfo): string | undefined {

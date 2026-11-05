@@ -1483,7 +1483,7 @@ test('operation layer: revset-shaped operation inputs cannot be parsed as option
   assert.ok(!calls.some((argv) => argv.includes('describe')), 'no describe ran for a multi-revision revset');
 });
 
-test('operation layer: jj_op_log returns a parseable operation timestamp (json time is an object in jj 0.46)', async (t) => {
+test('operation layer: jj_op_log returns a parseable operation timestamp (json time is a { start, end } object)', async (t) => {
   const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
   const fx = makeFixture(t, 'dsh-jj-oplog-time');
   await assertToolchain(fx.run, fx.root);

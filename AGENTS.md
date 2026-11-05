@@ -96,7 +96,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `test/**/*.test.ts`                                            | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
 | `test/multi-session.test.ts`                                   | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
 | `test/service.test.ts`                                         | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                            |
-| `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 0.46 输出 + 真实夹具 + 拒绝快照警告解析)                                                                                                         |
+| `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 输出 + 真实夹具 + 拒绝快照警告解析)                                                                                                              |
 | `test/changes-jj.test.ts`                                      | `changes-jj` 读取器测试(真实 jj-native/colocated 夹具 + fake runner 失败形态)                                                                                                           |
 | `test/changes-recorder.test.ts`                                | `changes-recorder` 状态机测试(fake reader:轮次、失败、上限、binary、oversized、拒绝快照的新文件、forget/dispose)                                                                        |
 | `test/changes-service.test.ts`                                 | `changes-service` 合并/路由测试(fake recorder + upstream)                                                                                                                               |
@@ -203,7 +203,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
       `workspace list` 模板对 `name`/`root` 都用 `json(...)`(名字可含空格/制表符);比较名字时用解码后的裸名。
     - 其它收尾输入的不变量:`jj new` 的位置参数前必须加 `--`;`describeChange` 只接受唯一 revision
-      (0 个/多个都报错,绝不批量改描述);`jj op log` 的 `time` 取 `json(self).time.start`(jj 0.46 的
+      (0 个/多个都报错,绝不批量改描述);`jj op log` 的 `time` 取 `json(self).time.start`(jj 的
       `time` 是 `{start,end}` 对象),不是 `String(object)`;`Cannot access` 只有指向 `.jj`/`.git` 元数据时
       才归为 `JJ_REPO_BROKEN`。
     - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端,含 stale、firstChange
@@ -317,7 +317,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    (共用工作副本先隔离到仓库外的独立 workspace、同仓库不同 workspace 不要改写别人的提交、收尾清单);
    收尾清单现在要求模型**调用一次 `jj_handoff`**,而不是手工串 `jj git fetch` / 选目标 / `jj_rebase` / 复核;
    目标解析、source 模式整栈 rebase、stale 恢复、冲突上报都在 `service.ts` 的 `handoff()` 里实现
-   (jj 0.46 的默认 `revisions`/`-r` 只移动指定提交,不会带走后代,所以整栈必须 `-s`);
+   (jj 的默认 `revisions`/`-r` 只移动指定提交,不会带走后代,所以整栈必须 `-s`);
    **shell 里的 `jj workspace forget` 仍不可要求模型执行**:只有 `jj_workspace_cleanup` 工具可以注销
    本会话通过 `jj_workspace_add` 创建的临时 workspace,其它情况清理交给用户(报告 `jj workspace list` 的名字/路径);
    并行会话一旦被检测到,收尾清单要在同一会话后续轮次继续注入(`parallelSeen` latch),子代理不注入;

@@ -52,7 +52,7 @@ export const TPL_LOG =
 /**
  * `jj workspace list` template used by the tools (tab-separated; both fields JSON).
  *
- * Both values are `json(...)`-encoded rather than printed bare: jj 0.46 renders a
+ * Both values are `json(...)`-encoded rather than printed bare: jj renders a
  * workspace name that needs quoting (`my session`) as `"my session"` when the
  * template prints the raw name, so the read-back name was quoted and the cleanup
  * ownership comparison failed. `json()` also escapes tabs inside names, keeping the

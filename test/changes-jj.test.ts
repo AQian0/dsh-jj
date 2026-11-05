@@ -1,7 +1,7 @@
 /**
  * Reader tests for the workspace-changes recorder.
  *
- * The reader is exercised against real jj 0.46 repositories (native and
+ * The reader is exercised against real jj repositories (native and
  * colocated), because the point of `readCommit`/`readDiff` is jj's own snapshot
  * and diff behaviour: no mocked repository can prove the turn-start commit id
  * changes after a file write or that a rename keeps its source path. A small set

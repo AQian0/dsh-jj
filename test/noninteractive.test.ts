@@ -76,7 +76,7 @@ test('V2 §5.9: the non-interactive environment shields every editor and prompt 
   assert.equal(
     env.JJ_EDITOR === 'false',
     false,
-    'the CLI --config ui.editor=false is rejected by jj 0.46; env is the supported shield',
+    'the CLI --config ui.editor=false is rejected by jj; env is the supported shield',
   );
   assert.equal(env.GIT_ASKPASS, '');
   assert.equal(env.SSH_ASKPASS, '');

@@ -59,7 +59,7 @@ export class JjError extends Error {
  * blocking editor or fail with an undiagnosable logging error. Every editor hook
  * (`JJ_EDITOR`, `GIT_EDITOR`, `EDITOR`, `VISUAL`) points at an immediately failing
  * command, and credential prompts are disabled. `--config ui.editor=false` is
- * deliberately NOT used: jj 0.46 rejects it with
+ * deliberately NOT used: jj rejects it with
  * `Config error: Invalid type or value for ui.editor`. Parameter validation (see
  * `JjOperations.squash`) is what prevents the editor path in the first place; this
  * environment only guarantees no hang.
