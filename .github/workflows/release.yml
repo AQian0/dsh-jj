@@ -70,14 +70,14 @@ jobs:
 
       - name: Install Jujutsu (jj) for the test fixtures
         env:
-          JJ_VERSION: '0.47.0'
-          # SHA-256 of jj-v0.47.0-x86_64-unknown-linux-musl.tar.gz, as published by
+          JJ_VERSION: '0.47.1'
+          # SHA-256 of jj-v0.47.1-x86_64-unknown-linux-musl.tar.gz, as published by
           # GitHub's release asset digest for
-          # https://github.com/jj-vcs/jj/releases/expanded_assets/v0.47.0 and
-          # re-verified locally by hashing the downloaded asset. jj 0.47.0 publishes
+          # https://github.com/jj-vcs/jj/releases/expanded_assets/v0.47.1 and
+          # re-verified locally by hashing the downloaded asset. jj 0.47.1 publishes
           # no SHA256SUMS asset, so this GitHub-displayed digest is the authoritative
           # checksum for the exact asset URL below. Bump it together with JJ_VERSION.
-          JJ_TARBALL_SHA256: '195b4e83e5c45b11e3f7a51a95168051f9a90970e581ca514c32c9cdbece5e9a'
+          JJ_TARBALL_SHA256: 'd4b657f622ee50929c8916466dfa3d6a6c17a0a32b50e7b2c793707ec9ebcad7'
         run: |
           archive="${RUNNER_TEMP}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
           mkdir -p "$HOME/.local/bin"
@@ -88,7 +88,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           actual="$("$HOME/.local/bin/jj" --version)"
           # Official release binaries report a git-hash suffix (e.g.
-          # "jj 0.47.0-edbca2f1e3e..."), so compare the version prefix only.
+          # "jj 0.47.1-d16ee1fc88a..."), so compare the version prefix only.
           case "${actual}" in
             "jj ${JJ_VERSION}"*)
               echo "jj version ok: ${actual}"
