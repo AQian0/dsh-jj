@@ -16,7 +16,7 @@
 
 ## 安装
 
-需要 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 Jujutsu CLI（见 [jj-vcs.dev](https://jj-vcs.dev)）：`jj` 需在 `PATH` 中（需要 jj 0.46.x：CI 以 0.46.0 验证，更低版本未测试），也可以用 `jjCommand` 配置指定路径。插件本身没有其他运行时依赖。
+需要 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 Jujutsu CLI（见 [jj-vcs.dev](https://jj-vcs.dev)）：`jj` 需在 `PATH` 中（需要 jj 0.47.x：CI 以 0.47.0 验证），也可以用 `jjCommand` 配置指定路径。插件本身没有其他运行时依赖。
 
 **从 npm 安装**：
 

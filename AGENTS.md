@@ -25,7 +25,7 @@
   依赖的唯一解析来源。
 - 首次准备:仓库根执行 `pnpm install`(仅首次需要网络,之后离线)。pnpm 会按 `peerDependencies` 自动安装公开的
   DSH 包——所有依赖(含 `tsc`)都从本地 `node_modules` 解析,不需要手工 `npm install` 或单独安装编译器。
-- 真实 `jj`(CI 固定 0.46.0)和 `git` 必须在 `PATH`:测试用真实仓库夹具,不 mock 二进制行为。
+- 真实 `jj`(CI 固定 0.47.0)和 `git` 必须在 `PATH`:测试用真实仓库夹具,不 mock 二进制行为。
 - `devDependencies` 只放工具链:`vite-plus@1.4.0`(提供 `vp` CLI / Oxfmt / Oxlint)、`typescript@7.0.2`
   (原生编译器:`tsc` 来自按平台解析的 optionalDependency `@typescript/typescript-<platform>`,lockfile 记录
   全部平台、安装只取当前平台;经典 JS API 已移除,本仓库只用 `tsc` CLI)、`@types/node@26.6.5`,以及测试专用的
@@ -356,7 +356,7 @@ git 嵌套 / 共享 workspace 等场景;同步 README「已知限制」。
 - 未经用户明确要求不要 push;推送用 `jj git push --bookmark main`。
 - `.gitignore` 由 jj/git 共用(没有 `.jjignore`);`lib/`、`node_modules/`、`scratch/`、`*.tgz`、`package-lock.json`、
   `yarn.lock`、`.npmrc` 均已忽略。**`pnpm-lock.yaml` 必须提交**,依赖变更时一起更新。
-- 发布:插件版本号只在 `package.json`。发版步骤(jj 0.46):
+- 发布:插件版本号只在 `package.json`。发版步骤(jj 0.47):
   1. `jj commit -m "chore(release): vX.Y.Z"`(或 `jj describe -m …` 后 `jj new`)提交版本号改动,再 `jj bookmark set main -r @-`;
   2. `jj tag set -r @- vX.Y.Z` 创建 tag,`jj tag list` 确认(移动已存在的 tag 需加 `--allow-move`);
   3. `jj git push --bookmark main` 推送提交,`jj git push --tag vX.Y.Z` 推送 tag(触发 `release.yml`);
@@ -365,7 +365,7 @@ git 嵌套 / 共享 workspace 等场景;同步 README「已知限制」。
      失败可用 `workflow_dispatch` 传入同一 tag 重跑。
 - 工具链 pin 集中在 `package.json`(`packageManager: pnpm@12.16.1` 与 `devDependencies`)、`pnpm-lock.yaml`、
   `.github/workflows/ci.yml` / `release.yml` 与本文件「环境与准备」:Node 24(CI;`vite-plus` 要求 24.11+)、
-  jj 0.46.0、`vite-plus` 1.4.0、`typescript` 7.0.2、`@types/node` 26.6.5;测试专用的
+  jj 0.47.0、`vite-plus` 1.4.0、`typescript` 7.0.2、`@types/node` 26.6.5;测试专用的
   `@deepseek-ai/dsh-session-projection` 跟随安装树里 `dsh-working-directory` 的 exact peer。升级时同步修改,
   lockfile 用 `pnpm install` 重算;不要手改插件版本号以外的 workflow 版本。
 
