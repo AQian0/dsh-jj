@@ -9,8 +9,8 @@
  *    parsed against it, so a path that needs quoting or renaming can never be
  *    misattributed.
  * 2. `jj diff --from <from> --to <to> --git` prints a Git-format unified diff
- *    with per-file hunks. jj 0.46 never C-quotes paths, but the Git quoting form
- *    is tolerated defensively because a future jj release may adopt it.
+ *    with per-file hunks. jj prints paths unquoted (spaces, quotes and non-ASCII
+ *    included); the Git C-quoting form is still tolerated defensively.
  *
  * The turn-boundary snapshot (`jj log -r @`) additionally reports files jj
  * refuses to snapshot because they are larger than
@@ -33,7 +33,12 @@ const SECTION_PREFIX = 'diff --git ';
 /** Marker Git uses for the "no newline at end of file" note (not hunk content). */
 const NO_NEWLINE_MARKER = '\\';
 
-/** Hunk header: `@@ -oldStart[,oldLines] +newStart[,newLines] @@`. */
+/**
+ * Hunk header: `@@ -oldStart[,oldLines] +newStart[,newLines] @@ [context]`.
+ *
+ * Deliberately not anchored at the end: jj prints the nearest enclosing symbol or
+ * heading after the closing `@@` for every file type, plain text included.
+ */
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /** Two C-quoted path tokens, as Git would print them in a `diff --git` header. */

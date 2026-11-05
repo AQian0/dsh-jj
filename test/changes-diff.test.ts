@@ -1,8 +1,8 @@
 /**
  * Unit tests for the pure `jj diff` parsers.
  *
- * The literal fixtures use the exact byte shapes jj 0.46 prints (verified against
- * the installed binary); one additional test runs a real jj repository so the
+ * The literal fixtures use the exact byte shapes jj prints (verified against the
+ * installed binary). One additional test runs a real jj repository so the
  * literals cannot quietly drift from the real format.
  */
 import { test } from 'node:test';
@@ -72,7 +72,7 @@ const RENAMED = diffOf([
 /** Pure rename: only the rename markers, no content hunks. */
 const PURE_RENAME = diffOf(['diff --git a/orig.txt b/renamed.txt', 'rename from orig.txt', 'rename to renamed.txt']);
 
-/** Copy (Git syntax; jj 0.46 does not emit it yet, but the parser tolerates it). */
+/** Copy (Git syntax; jj does not emit it, but the parser tolerates it). */
 const COPIED = diffOf(['diff --git a/src.txt b/dst.txt', 'copy from src.txt', 'copy to dst.txt']);
 
 /** Binary add. */
@@ -137,7 +137,7 @@ const MISSING_NEWLINE = diffOf([
   '\\ No newline at end of file',
 ]);
 
-/** Git-style quoting (jj 0.46 does not quote, but a future release might). */
+/** Git-style quoting (jj prints paths unquoted; the parser tolerates the Git form). */
 const QUOTED = diffOf([
   'diff --git "a/x y.txt" "b/x y.txt"',
   'index 1111111111..2222222222 100644',
@@ -345,6 +345,37 @@ test('parseGitFormatDiff parses multiple hunks with header starts and counts', (
   });
 });
 
+test('parseGitFormatDiff accepts symbol context after the hunk header', () => {
+  // jj appends the nearest enclosing symbol or heading after the closing `@@` for
+  // every file type, plain text included (`@@ -8,6 +8,6 @@ Section one`).
+  const changes = parseGitFormatDiff(
+    diffOf([
+      'diff --git a/notes.txt b/notes.txt',
+      'index 1111111111..2222222222 100644',
+      '--- a/notes.txt',
+      '+++ b/notes.txt',
+      '@@ -8,6 +8,6 @@ Section one',
+      '   line 7',
+      '   line 8',
+      '   line 9',
+      '-  line 10',
+      '+  line TEN',
+      '   line 11',
+      '   line 12',
+    ]),
+    ['notes.txt'],
+  );
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].added, 1);
+  assert.equal(changes[0].deleted, 1);
+  assert.equal(changes[0].hunks.length, 1);
+  assert.deepEqual(
+    { ...changes[0].hunks[0], lines: changes[0].hunks[0].lines.length },
+    { oldStart: 8, oldLines: 6, newStart: 8, newLines: 6, lines: 7 },
+    'the context text is not part of the counts or the hunk body',
+  );
+});
+
 test('parseGitFormatDiff ignores the missing-newline marker', () => {
   const changes = parseGitFormatDiff(MISSING_NEWLINE, []);
   assert.equal(changes.length, 1);
@@ -423,7 +454,7 @@ function jj(repo: string, env: NodeJS.ProcessEnv, argv: readonly string[]): stri
   return result.stdout;
 }
 
-test('parses a real jj 0.46 Git-format diff for a mixed change', (t) => {
+test('parses a real jj Git-format diff for a mixed change', (t) => {
   const root = makeTempRoot('dsh-jj-changes-diff');
   t.after(() => root.cleanup());
   const repo = join(root.dir, 'repo');
