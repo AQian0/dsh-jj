@@ -205,11 +205,11 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 - **平台支持**：当前仅在 macOS / Linux 验证；测试依赖 POSIX 工具链（`/bin/sh`、`bash -c`、`chmod` 等）。Windows 未验证也不支持，`guardTools` 默认包含 `pwsh` 只是工具名匹配，不代表 Windows 可用。
 - **guard 是启发式**：只做静态命令分类。嵌套/前导 shell wrapper（`bash -c 'bash -c …'`、`command` / `env` / `nohup` / `timeout` 等前缀、`bash -c --`、`env -S'…'`、`exec -a`）会被递归展开，可静态解析的 `cp` 类目录切换（`cd -P` / `cd --` / `pushd`、git 的累积 `-C`）也会跟随；仍无法静态求值的形态（外部 wrapper script、`bash <<< …` 这类 stdin 脚本、git alias、`eval`、`$VAR`、`find -exec` 等）按 fail-open 放行并附一次性提示；heredoc 正文按数据忽略，因此写在脚本/文档内容里的命令不会被分析。
 - **仓库归属按最近者判断**：jj workspace 内嵌套的独立 Git 仓库（最近的 `.git` 比 `.jj` 更深）按普通 Git 仓库处理——`git` 命令与 `create_worktree` 都不会被 jj guard 拦截；只有祖先 jj 的目录才受 guard 约束。
-- **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`。`-R/--repository` 写在 subcommand 前后都按同一规则处理（jj 全局选项两种位置都接受）。
+- **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`（多个名字逐个检查）/ 任何 `jj workspace remove`（它会把 workspace 连同目录从磁盘删除，stale workspace 也不例外；被忽略的文件不会被快照、无法恢复）。`-R/--repository` 写在 subcommand 前后都按同一规则处理（jj 全局选项两种位置都接受）。
 - **描述风格靠推断**：风格判定只看描述首行，历史太少或风格混杂时会请求你选择；Angular 与 Conventional Commits 语法相同，自动识别统一报 `conventional`，需要严格规则时可配置 `commitStyle: angular`。
 - **多会话检测限于本进程**：只能看到同一 DSH 进程内的顶层会话，多个 `dsh` CLI 进程之间互不可见；跨进程并行请配置 `multiSessionGuidance: always`。
 - **子代理不受多会话指引覆盖**：子代理与父会话共享工作副本，父会话继续运行时两者可能同时写文件；需要严格隔离时，由父会话为子任务指定独立 workspace。
-- **临时 workspace 清理有前提**：`jj_workspace_cleanup` 只能注销本会话通过 `jj_workspace_add` 创建、且没有未提交改动或冲突的 workspace；其它 workspace 需要你手动执行 `jj workspace forget <name>` 并删除目录，插件不会自动删除目录。
+- **临时 workspace 清理有前提**：`jj_workspace_cleanup` 只能注销本会话通过 `jj_workspace_add` 创建、且没有未提交改动或冲突的 workspace；其它 workspace 需要你手动执行 `jj workspace forget <name>` 并删除目录（或直接 `jj workspace remove <name>`），插件不会自动删除目录，shell 里的 `jj workspace remove` 也会被 guard 拒绝。
 - **`.jj` 项目根标记仅部分 profile 生效**：Web profile 在 bundle 层禁用了该行，headless / CLI profile 才会把 `.jj` 当作项目根。
 - **jj-native 下项目级 skill 定位可能不准**：项目级 skill 根按最近的 `.git` 祖先查找（上游硬编码）；jj-native 仓库没有 `.git` 时会退回当前会话目录，通常只有会话正好位于仓库根时才符合预期。
 - **不自动推送**：`jj_handoff` 只保证本地集成到目标，推送仍需你执行 `jj git push --bookmark <name>`。

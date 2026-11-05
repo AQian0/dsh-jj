@@ -190,7 +190,7 @@ function sharedWorkingCopyText(): string {
     "Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not parallel-safe: every jj command snapshots the whole directory, so an unpathed commit can capture another session's uncommitted files. Read-only inspection is safe; before writing files:",
     "- Isolate into a new jj workspace with jj_workspace_add: absolute path outside the repository, unique name, never reuse another session's workspace; switch with the working_directory tool, then confirm with jj_status.",
     '- If you already edited this working copy, jj_commit only your own paths first, then pass parents ["@"] to jj_workspace_add to carry them over.',
-    "- Never use `git worktree` (jj cannot see that checkout); never move, reuse or delete another session's workspace (shell `jj workspace forget` on another workspace is refused).",
+    "- Never use `git worktree` (jj cannot see that checkout); never move, reuse or delete another session's workspace (shell `jj workspace forget` on another workspace and any `jj workspace remove` are refused).",
     '- Edit the shared copy only when the user explicitly wants it there; commit explicit paths.',
   ].join('\n');
 }

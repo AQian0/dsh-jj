@@ -49,8 +49,14 @@ export interface JjInvocation {
   readonly repository?: string;
   /** `--at-op`/`--at-operation` value, when given (read-only replay). */
   readonly atOp?: string;
-  /** Argument of `jj workspace forget <name>`. */
+  /** First workspace named by `jj workspace forget|remove <name>...` (see {@link targetWorkspaces}). */
   readonly targetWorkspace?: string;
+  /**
+   * Every workspace named by `jj workspace forget|remove <name>...`. Both commands
+   * accept several names, so an ownership check must look at all of them: checking
+   * only the first let `jj workspace forget <own> <other>` through.
+   */
+  readonly targetWorkspaces?: readonly string[];
   /** True for `jj undo --allow-cross-workspace` (hard-deny per contract §8.3b). */
   readonly allowCrossWorkspace?: boolean;
   /** Non-flag arguments after the subcommand (used for `abandon @` / `restore` pathspecs). */
@@ -417,6 +423,13 @@ function classifyJjWords(
   if (restFlags.includes('--help') || restFlags.includes('-h')) {
     scope = 'read-only';
     reason = `\`jj ${subcommand} --help\` only prints help`;
+  } else if (subcommand === 'workspace remove') {
+    // `jj workspace remove` deletes any workspace together with its directory, stale
+    // ones included: a parallel session's workspace is stale right after another
+    // session rewrites shared history.
+    scope = 'destructive';
+    reason =
+      '`jj workspace remove` deletes the workspace directory from disk, including ignored files jj never snapshots';
   } else if (intoOther !== undefined) {
     scope = 'repo-wide';
     reason = `\`jj ${subcommand} --into ${intoOther}\` rewrites a revision other than the working copy and rebases its descendants`;
@@ -461,7 +474,9 @@ function classifyJjWords(
     reason = `\`jj ${subcommand}\` is not in the scope table; not treated as repository-wide`;
   }
 
-  const targetWorkspace = subcommand === 'workspace forget' ? positionals[0] : undefined;
+  const targetWorkspaces =
+    subcommand === 'workspace forget' || subcommand === 'workspace remove' ? positionals : undefined;
+  const targetWorkspace = targetWorkspaces?.[0];
   return {
     argv: ['jj', ...globalOptions, ...tail],
     raw,
@@ -471,6 +486,7 @@ function classifyJjWords(
     ...(repository !== undefined ? { repository } : {}),
     ...(atOp !== undefined ? { atOp } : {}),
     ...(targetWorkspace !== undefined ? { targetWorkspace } : {}),
+    ...(targetWorkspaces !== undefined && targetWorkspaces.length > 0 ? { targetWorkspaces } : {}),
     ...(allowCrossWorkspace ? { allowCrossWorkspace } : {}),
     positionals,
     confidence: 'high',

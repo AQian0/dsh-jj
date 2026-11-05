@@ -371,6 +371,47 @@ test('T19e: `jj workspace forget <other>` is denied regardless of mode', async (
     /leave the cleanup to the user/,
     'non-owned workspaces stay a user action with the exact command',
   );
+  // jj accepts several names: naming this session's own workspace first must not
+  // smuggle another workspace through the ownership check.
+  const multi = harness.runGuard(bash('jj workspace forget default other', native));
+  assert.ok(typeof multi === 'string', 'a multi-name forget that includes another workspace is denied');
+  assert.match(multi, /^Blocked: `jj workspace forget default other`/);
+});
+
+test('T19f: `jj workspace remove` (deletes the directory, stale workspaces included) is hard-denied for every target and mode', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-guard-remove');
+  const native = await initJjNative(fx.run, fx.path('native'));
+  const wsPath = join(fx.root, 'ws-other');
+  await fx.run(['jj', 'workspace', 'add', '--name', 'other', wsPath], { cwd: native, timeoutMs: 30_000 });
+  for (const mode of ['warn', 'deny', 'off'] as const) {
+    const harness = createGuardContext();
+    install(harness, { guardJjRepositoryWide: mode, defaultCwd: native });
+    for (const [command, cwd] of [
+      ['jj workspace remove other', native],
+      ['jj workspace remove other default', native],
+      // Removing the session's own workspace deletes the directory it runs in.
+      ['jj workspace remove other', wsPath],
+      ['cd ../ws-other && jj workspace remove other', native],
+    ] as const) {
+      const reason = harness.runGuard(bash(command, cwd));
+      assert.ok(
+        typeof reason === 'string',
+        `${command} (in ${cwd}) must be refused with guardJjRepositoryWide=${mode}`,
+      );
+      assert.match(reason, /Blocked: `jj workspace remove other/);
+      assert.match(reason, /deletes workspace directories from disk/);
+      assert.match(reason, /jj_workspace_cleanup/, 'the refusal points at the files-preserving cleanup tool');
+      assert.match(reason, /do not run jj workspace remove/);
+    }
+    assert.equal(
+      harness.runGuard(bash('jj workspace remove --help', native)),
+      undefined,
+      'printing help is still allowed',
+    );
+  }
+  // The guard only decides; the workspace and its directory are untouched.
+  const list = await fx.run(['jj', 'workspace', 'list', '-T', 'name ++ "\\n"'], { cwd: native, timeoutMs: 30_000 });
+  assert.match(list.stdout, /^other$/m);
 });
 
 test('T20 (base layer): the decision path is synchronous and spawns nothing', async (t) => {

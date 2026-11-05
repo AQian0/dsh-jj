@@ -615,6 +615,31 @@ test('jj workspace forget target is parsed flag-aware', async () => {
     'other',
   );
   assert.equal(classifyJjInvocation('jj -R /tmp/repo workspace forget other').invocations[0]?.targetWorkspace, 'other');
+  // jj accepts several names; all of them are captured for the ownership check.
+  assert.deepEqual(classifyJjInvocation('jj workspace forget mine other').invocations[0]?.targetWorkspaces, [
+    'mine',
+    'other',
+  ]);
+  assert.equal(classifyJjInvocation('jj workspace forget').invocations[0]?.targetWorkspaces, undefined);
+});
+
+test('jj workspace remove deletes directories and is destructive for every target', async () => {
+  const { classifyJjInvocation } = await import('../src/git-command.ts');
+  for (const command of [
+    'jj workspace remove other',
+    'jj workspace remove other another',
+    'jj workspace remove -R /tmp/repo other',
+    'jj --ignore-working-copy workspace remove other',
+    'bash -c "jj workspace remove other"',
+  ]) {
+    const invocation = classifyJjInvocation(command).invocations[0];
+    assert.equal(invocation?.subcommand, 'workspace remove', command);
+    assert.equal(invocation?.scope, 'destructive', command);
+    assert.match(invocation?.reason ?? '', /deletes the workspace directory/, command);
+  }
+  assert.deepEqual(classifyJjInvocation('jj workspace remove a b').invocations[0]?.targetWorkspaces, ['a', 'b']);
+  assert.equal(classifyJjInvocation('jj workspace remove a b').invocations[0]?.targetWorkspace, 'a');
+  assert.equal(classifyJjInvocation('jj workspace remove --help').invocations[0]?.scope, 'read-only');
 });
 
 // ---------------------------------------------------------------------------

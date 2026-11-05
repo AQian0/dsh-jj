@@ -432,7 +432,7 @@ export function buildJjWorkspaceForgetRefusal(
   descriptor: GuardDescriptorLike,
   cwd: string,
 ): string {
-  const target = invocation.targetWorkspace ?? '<name>';
+  const target = workspaceTargetsText(invocation);
   const current = descriptor.workspaceName ?? 'default';
   return [
     `Blocked: \`jj workspace forget ${target}\` names a workspace other than this session's own workspace ("${current}"), so unregistering it could break a working copy another session or the user is using (${cwd} -> ${descriptor.root}).`,
@@ -440,6 +440,46 @@ export function buildJjWorkspaceForgetRefusal(
     'Safer alternatives:',
     `  - If this session created "${target}" with jj_workspace_add: hand the work off first (jj_handoff), then call the jj_workspace_cleanup tool; it moves the session back to the default workspace and unregisters only session-owned workspaces.`,
     `  - Otherwise leave the cleanup to the user: \`jj workspace list\` shows names and paths; report them (for example "from the default workspace run jj workspace forget ${target}, then delete the directory") and do not run jj workspace forget yourself.`,
+  ].join('\n');
+}
+
+/** Workspace names of a `workspace forget|remove` invocation, as written. */
+function workspaceTargetsText(invocation: JjInvocation): string {
+  const targets = invocation.targetWorkspaces ?? (invocation.targetWorkspace ? [invocation.targetWorkspace] : []);
+  return targets.length > 0 ? targets.join(' ') : '<name>';
+}
+
+/**
+ * Hard-deny text for `jj workspace remove`, which deletes a workspace (stale ones
+ * included) together with its directory.
+ *
+ * Unlike `forget`, `remove` deletes the workspace directory from disk. jj
+ * snapshots tracked files first, but ignored files (`.env`, build output, local
+ * tooling state) are never snapshotted and are lost for good, and the directory may
+ * be another session's or the user's live working copy. Removing the session's own
+ * workspace also deletes the directory the session runs in. The command is refused
+ * for every target and independent of `guardJjRepositoryWide`: the plugin path is
+ * `jj_workspace_cleanup`, which unregisters a session-created workspace without
+ * deleting files.
+ *
+ * @param invocation - the classified `workspace remove` invocation.
+ * @param descriptor - descriptor of the effective (current) directory.
+ * @param cwd - the directory the command runs in.
+ * @returns the refusal text.
+ */
+export function buildJjWorkspaceRemoveRefusal(
+  invocation: JjInvocation,
+  descriptor: GuardDescriptorLike,
+  cwd: string,
+): string {
+  const target = workspaceTargetsText(invocation);
+  const current = descriptor.workspaceName ?? 'default';
+  return [
+    `Blocked: \`jj workspace remove ${target}\` deletes workspace directories from disk (this session runs in workspace "${current}": ${cwd} -> ${descriptor.root}). Ignored files are never snapshotted by jj and would be lost, and the directory may be a working copy another session or the user is using. This is refused regardless of configuration.`,
+    '',
+    'Safer alternatives:',
+    '  - If this session created the workspace with jj_workspace_add: hand the work off first (jj_handoff), then call the jj_workspace_cleanup tool; it moves the session back to the default workspace and unregisters only session-owned workspaces, keeping their files on disk.',
+    `  - Otherwise leave the cleanup to the user: \`jj workspace list\` shows names and paths; report them (for example "from the default workspace run jj workspace forget ${target} and delete the directory, or jj workspace remove ${target}") and do not run jj workspace remove or jj workspace forget yourself.`,
   ].join('\n');
 }
 
@@ -835,15 +875,18 @@ export function installGitConfusionGuard(
 
         // Hard denies (contract §8.3b): never short-circuited by config.
         if (invocation.scope === 'destructive') {
+          if (invocation.subcommand === 'workspace remove') {
+            return buildJjWorkspaceRemoveRefusal(invocation, descriptor, cwd);
+          }
           return buildJjHardDenyRefusal(invocation, descriptor);
         }
         if (invocation.scope !== 'repo-wide') continue;
 
         // `jj workspace forget <other>` affects someone else's workspace: always deny.
+        // jj accepts several names, so every one must be this session's own workspace.
         if (
           invocation.subcommand === 'workspace forget' &&
-          invocation.targetWorkspace !== undefined &&
-          invocation.targetWorkspace !== descriptor.workspaceName
+          (invocation.targetWorkspaces ?? []).some((name) => name !== descriptor.workspaceName)
         ) {
           return buildJjWorkspaceForgetRefusal(invocation, descriptor, cwd);
         }

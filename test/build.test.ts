@@ -435,6 +435,11 @@ test('the bare package name resolves each documented export', async () => {
     'function',
     'the workspace-forget refusal is part of the public API',
   );
+  assert.equal(
+    typeof root.buildJjWorkspaceRemoveRefusal,
+    'function',
+    'the workspace-remove refusal is part of the public API',
+  );
   assert.equal(root.ROOT_COMMIT_ID, '0'.repeat(40), 'the empty root commit id is exported for hand-off logic');
 });
 

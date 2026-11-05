@@ -193,7 +193,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       记在 `WeakMap`,记录**名字+规范路径**)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的
       workspace 才能注销;注销前必须先 `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。
       这是对旧「清理只能交给用户」规则的**唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝
-      (`buildJjWorkspaceForgetRefusal`)。
+      (`buildJjWorkspaceForgetRefusal`;jj 接受多个名字,`targetWorkspaces` 里任一不是当前 workspace 即拒绝)。
+      `jj workspace remove` 会把 workspace(stale 的也一样)连目录一起删除、被忽略文件无法恢复,
+      `jj-rules.ts` 把它归为 `destructive`,任何目标、任何 `guardJjRepositoryWide` 模式都由
+      `buildJjWorkspaceRemoveRefusal` hard-deny。
     - `JjOperations.workspaceAdd` 必须显式传 `--name`(缺省名用 `basename`)并按名字/规范路径解析返回的
       workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
       `workspace list` 模板对 `name`/`root` 都用 `json(...)`(名字可含空格/制表符);比较名字时用解码后的裸名。
@@ -203,7 +206,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       才归为 `JJ_REPO_BROKEN`。
     - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端,含 stale、firstChange
       校验、ambiguous roots、无关 destination、behind、bookmark 所有权、cleanup 所有权)、
-      `test/multi-session.test.ts`(收尾清单文案)、`test/guard.test.ts`(forget 拒绝文案)与 README「任务收尾」。
+      `test/multi-session.test.ts`(收尾清单文案)、`test/guard.test.ts`(forget / remove 拒绝文案)与 README「任务收尾」。
 14. **变更记录(`jj-changes` / 变更卡片)**:
     - bundle patch 禁用内置 `workspace-changes` 行并插入 `jj-changes`;`src/changes.ts` 的 `apply` 先
       `ctx.isolate('workspaceChanges')` 在隔离 scope 里跑内置 `apply`(拿到只读的 builtin service),再在父
@@ -322,7 +325,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 4. `index.ts`:在 `apply` 里把存活会话列表(含 `sessionProjections` 的 `turnBoundary` 活动状态)与 workingDirectory
    接给指引;已知空闲的对端必须在 `parallelPeerCwds` 里被过滤,检测 fail-open,不可阻断启动;
 5. `service.ts` / `tools.ts`:收尾自动化(`handoff()`、`jj_handoff`、`jj_workspace_cleanup`)与
-   guard 的 `jj workspace forget <other>` 拒绝文案(`buildJjWorkspaceForgetRefusal`)要保持一致;
+   guard 的 `jj workspace forget <other>` / `jj workspace remove` 拒绝文案(`buildJjWorkspaceForgetRefusal` /
+   `buildJjWorkspaceRemoveRefusal`)要保持一致;
 6. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案,`test/service-tools.test.ts` 覆盖 handoff / cleanup
    端到端(含 no-remote、already-integrated、needsCommit、conflicts、bookmark、默认 workspace 的 `firstChange`
    约束、cleanup 所有权与回退),同步 `test/prompt-context.test.ts`、`test/guard.test.ts` 与

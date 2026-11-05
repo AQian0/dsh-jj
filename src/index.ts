@@ -356,6 +356,7 @@ export {
 export {
   buildGitRefusalMessage,
   buildJjWorkspaceForgetRefusal,
+  buildJjWorkspaceRemoveRefusal,
   buildWorktreeToolRefusalMessage,
   evaluateGitCommand,
   gitConfusionWhy,
