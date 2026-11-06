@@ -100,7 +100,10 @@ test('operation layer: status, new, describe, log, diff, op log, bookmarks, work
   assert.match(status.change.changeId, /^[a-z]{8,}/);
   assert.ok(status.raw.length > 0, 'jj status text is returned');
 
-  // new change with a description
+  // new change with a description: the empty initial @ must carry content first,
+  // because jj_new on an already empty working copy is refused (it would only add
+  // another empty commit to the chain).
+  await writeFixtureFile(fx, repo, 'seed.txt', 'seed');
   const created = await operations.newChange(repo, [], 'first change', undefined);
   assert.equal(created.currentWorkingCopy, true);
   assert.equal(created.description, 'first change');
@@ -313,6 +316,12 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
   for (const definition of definitions) {
     const args = calls[definition.name];
     if (args === undefined) continue; // jj_workspace_add is exercised separately (it creates a directory)
+    if (definition.name === 'jj_commit' || definition.name === 'jj_new') {
+      // Both tools refuse to create an empty commit; make sure @ has content whichever
+      // of them the schema order reaches first.
+      const current = await operations.status(repo);
+      if (current.change.empty) await writeFixtureFile(fx, repo, `schema-${definition.name}.txt`, definition.name);
+    }
     // `ToolDefinition.parameters` / `output.schema` are the compiled JSON Schemas.
     const violations = validateJsonSchemaValue(definition.parameters as JsonSchemaNode, args);
     assert.deepEqual(violations, [], `${definition.name} rejects its own example args`);
@@ -358,7 +367,10 @@ test('T20: every tool path runs jj only, never git', async (t) => {
     await definition.execute(name === 'jj_log' ? { revset: '@', limit: 2 } : {}, fakeExec());
   }
   await definitions.get('jj_bookmark_set')!.execute({ name: 'argv-bookmark', revset: '@' }, fakeExec());
+  // Both tools refuse an empty working copy, so give each one real content.
+  await writeFixtureFile(fx, repo, 'argv-new.txt', 'new');
   await definitions.get('jj_new')!.execute({ message: 'argv new' }, fakeExec());
+  await writeFixtureFile(fx, repo, 'argv-commit.txt', 'commit');
   await definitions.get('jj_commit')!.execute({ message: 'chore: argv commit' }, fakeExec());
   await definitions.get('jj_describe')!.execute({ message: 'argv described' }, fakeExec());
 
@@ -558,11 +570,42 @@ test('operation layer: jj commit reads the committed change and the new @ in one
 
   calls.length = 0;
   const result = await operations.commit(repo, 'feat: merged read', ['one.txt']);
-  assert.equal(calls.length, 2, 'one commit spawn plus one merged read spawn');
+  assert.equal(calls.length, 3, 'one working-copy emptiness read, one commit spawn, one merged read spawn');
   const mergedReads = calls.filter((argv) => argv.includes('@ | @-'));
   assert.equal(mergedReads.length, 1, 'the committed change and the new @ come from a single jj log call');
+  assert.ok(
+    calls.some((argv) => argv.includes('-r') && argv.includes('@')),
+    'the empty-commit guard reads the working copy before committing',
+  );
   assert.deepEqual([...result.committed.paths], ['one.txt'], 'the merged read still reports the committed paths');
   assert.deepEqual([...result.workingCopy.paths], ['two.txt'], 'the merged read still reports the remaining paths');
+});
+
+test('operation layer: jj_commit and jj_new refuse to create empty commits', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-no-empty-commits');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  // A fresh repository already has an empty @: both commands would only add an
+  // empty commit to the chain, so they fail before spawning the mutating command.
+  calls.length = 0;
+  await assert.rejects(() => operations.commit(repo, 'chore: nothing', []), /would create an empty commit/);
+  assert.ok(!calls.some((argv) => argv.includes('commit')), 'the refusal happens before jj commit runs');
+  await assert.rejects(() => operations.newChange(repo, [], 'empty'), /another empty change/);
+  assert.ok(!calls.some((argv) => argv.includes('new')), 'the refusal happens before jj new runs');
+
+  // Content makes both commands legitimate; after the commit @ is empty again.
+  await writeFixtureFile(fx, repo, 'one.txt', 'one');
+  const committed = await operations.commit(repo, 'feat: one', []);
+  assert.equal(committed.committed.empty, false);
+  await assert.rejects(() => operations.commit(repo, 'chore: empty again', []), /would create an empty commit/);
+  await assert.rejects(() => operations.newChange(repo, [], undefined), /another empty change/);
+  // Explicit parents remain allowed: that is how a stack starts on another revision.
+  const elsewhere = await operations.newChange(repo, ['root()'], 'chore: start elsewhere');
+  assert.equal(elsewhere.currentWorkingCopy, true);
 });
 
 test('jj_commit_style inherits Conventional history, asks when undecidable, and honours config', async (t) => {
@@ -1074,6 +1117,35 @@ test('jj_handoff tool: runs the whole hand-off and reports model next steps', as
   await assert.rejects(() => renamedDefinitions.execute({}, fakeExec()), /needs `firstChange`/);
 });
 
+test('jj_handoff: a rebase that empties a session change reports it instead of claiming a clean stack', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-emptied');
+  // Parallel duplicate work: the session change is identical to the one main
+  // receives, so after the hand-off rebase jj keeps it as an empty commit.
+  await writeFixtureFile(fx, ws, 'same.txt', 'same');
+  await commitWorkingCopy(fx, ws, 'feat: parallel duplicate');
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: upstream duplicate'], repo);
+  await writeFixtureFile(fx, repo, 'same.txt', 'same');
+  await commitWorkingCopy(fx, repo, 'chore: upstream duplicate');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+
+  const result = await operations.handoff(ws);
+  assert.equal(result.rebased, true);
+  const emptied = result.stack.filter((change) => change.empty && !change.currentWorkingCopy);
+  assert.equal(emptied.length, 1, 'the session change became empty but jj kept it in the chain');
+  assert.equal(emptied[0]?.description, 'feat: parallel duplicate');
+
+  // A second hand-off is already integrated, but the model still gets the warning.
+  const handoff = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get('jj_handoff')!;
+  fx.cwd = ws;
+  const value = (await handoff.execute({}, fakeExec())) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(handoff.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  const nextSteps = String(value['nextSteps']);
+  assert.match(nextSteps, /empty change/, 'the empty change is named in next steps');
+  assert.match(nextSteps, /jj abandon/, 'the described empty change can be dropped');
+  assert.match(nextSteps, /never abandon/i, 'a foreign empty working-copy change must not be abandoned');
+});
+
 test('jj_workspace_cleanup tool: unregisters only a session-created workspace and returns to the default workspace', async (t) => {
   const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
   const fx = makeFixture(t, 'dsh-jj-tool-cleanup');
@@ -1108,10 +1180,20 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
     readonly name: string;
   };
   assert.equal(created.name, 'clean-me');
+  const forgottenChange = (await operations.status(wsPath)).change;
   fx.cwd = wsPath;
   const value = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
   assert.deepEqual(validateJsonSchemaValue(cleanup.output.schema, value), [], `output: ${JSON.stringify(value)}`);
   assert.equal(value['forgotten'], true);
+  assert.ok(
+    !String(value['message']).includes('not abandoned by jj'),
+    'an abandoned working-copy change is not reported',
+  );
+  assert.equal(
+    await operations.changeExists(repo, forgottenChange.changeId),
+    false,
+    'jj abandoned the empty, undescribed working-copy change when the workspace was forgotten',
+  );
   assert.equal(value['currentWorkspace'], 'default');
   assert.equal(value['currentWorkspaceRoot'], realpath(repo));
   assert.deepEqual(moved, [realpath(repo)], 'the session is moved back to the default workspace before forgetting');
@@ -1184,6 +1266,87 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   await assert.rejects(
     () => plainDefinitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent)),
     /cannot move this session back to the default workspace/,
+  );
+
+  // A described empty working-copy change survives `jj workspace forget` (jj only
+  // abandons empty, undescribed changes without descendants), so cleanup reports it
+  // instead of implying the shared history is clean.
+  fx.cwd = repo;
+  const retainedPath = join(fx.root, 'ws-retained');
+  await definitions.get('jj_workspace_add')!.execute({ path: retainedPath, name: 'retained' }, fakeExec(agent));
+  await mustRun(fx.run, ['jj', '--no-pager', 'describe', '-r', '@', '-m', 'empty marker'], retainedPath);
+  const marker = (await operations.log(retainedPath, '@', 1))[0];
+  assert.ok(marker !== undefined);
+  fx.cwd = retainedPath;
+  const retainedValue = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
+  assert.equal(retainedValue['forgotten'], true);
+  assert.match(String(retainedValue['message']), /not abandoned by jj/);
+  assert.match(String(retainedValue['message']), /empty marker/);
+  assert.equal(
+    await operations.changeExists(repo, marker.changeId),
+    true,
+    'the described empty working-copy change is still visible in the shared history',
+  );
+});
+
+test('jj_workspace_cleanup: recovers a stale default workspace before forgetting', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-cleanup-stale-default');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const moved: string[] = [];
+  const workingDirectory = {
+    ensure: async () => fx.cwd as string,
+    set: async (_agent: unknown, path: string) => {
+      moved.push(path);
+      return path;
+    },
+  };
+  const definitions = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}), workingDirectory)),
+  );
+  const agent = { id: 'stale-cleanup-agent' };
+  fx.cwd = repo;
+  const created = (await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: join(fx.root, 'ws-stale'), name: 'stale-ws' }, fakeExec(agent))) as { readonly path: string };
+  const ws = created.path;
+  const rootEmptyChange = (await operations.log(repo, '@', 1))[0];
+  assert.ok(rootEmptyChange !== undefined);
+  // Advance main from the session workspace, then start the session stack on the
+  // root workspace's empty @ — the shape the old `parents: ["@"]` guidance created.
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], ws);
+  await writeFixtureFile(fx, ws, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, ws, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], ws);
+  await mustRun(fx.run, ['jj', 'new', rootEmptyChange.changeId], ws);
+  await writeFixtureFile(fx, ws, 'work.txt', 'work');
+  await commitWorkingCopy(fx, ws, 'feat: work');
+  // The hand-off rebases the root workspace's checked-out change, leaving it stale.
+  const handoff = await operations.handoff(ws);
+  assert.equal(handoff.rebased, true);
+  await assert.rejects(
+    () => operations.status(repo),
+    /stale/i,
+    'the default workspace is stale after the sibling rebase',
+  );
+
+  calls.length = 0;
+  fx.cwd = ws;
+  const value = (await definitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent))) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(value['forgotten'], true);
+  assert.equal(value['currentWorkspace'], 'default');
+  assert.deepEqual(moved, [realpath(repo)]);
+  assert.ok(
+    calls.some((argv) => argv.includes('workspace') && argv.includes('update-stale')),
+    'the stale default workspace is recovered before forgetting it is used again',
   );
 });
 
@@ -1529,6 +1692,75 @@ test('operation layer: workspaceAdd returns the bare name for names with spaces 
   const defaulted = await operations.workspaceAdd(repo, `  ${defaultPath}  `, undefined, [], undefined, undefined);
   assert.equal(defaulted.name, 'My Project ws');
   assert.equal(defaulted.path, realpath(defaultPath));
+});
+
+test('operation layer: workspaceAdd drops an empty @ parent so no empty commit enters the new chain', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const fx = makeFixture(t, 'dsh-jj-workspace-at-parent');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  fx.cwd = repo;
+
+  // The old multi-session guidance told the model to pass parents ["@"]; after a
+  // commit @ is the fresh empty change, so that put an empty description-less
+  // commit into the new workspace's ancestry, which later reached Git history.
+  calls.length = 0;
+  const tool = definitions.get('jj_workspace_add')!;
+  const value = (await tool.execute(
+    { path: join(fx.root, 'ws-at-parent'), name: 'at-parent', parents: ['@'] },
+    fakeExec(),
+  )) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(tool.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  assert.match(String(value['note'] ?? ''), /dropped/);
+  assert.ok(!calls.some((argv) => argv.includes('workspace') && argv.includes('-r')), 'no -r @ reaches jj');
+
+  const wsPath = fx.path('ws-at-parent');
+  const ancestry = await operations.log(wsPath, 'main..@', 5);
+  assert.deepEqual(
+    ancestry.map((change) => change.empty),
+    [true],
+    'only the new empty working copy is above main',
+  );
+  const parent = (await operations.log(wsPath, '@-', 1))[0];
+  assert.equal(parent?.description, 'chore: base');
+  await writeFixtureFile(fx, wsPath, 'one.txt', 'one');
+  await commitWorkingCopy(fx, wsPath, 'feat: one');
+  const chain = (await operations.log(wsPath, 'main..@-', 5)).filter((change) => !change.empty);
+  assert.deepEqual(
+    chain.map((change) => change.description),
+    ['feat: one'],
+    'the session work sits directly on main with no empty commit in between',
+  );
+});
+
+test('operation layer: workspaceAdd refuses @ while the working copy still has uncommitted content', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-workspace-at-dirty');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+
+  await writeFixtureFile(fx, repo, 'dirty.txt', 'dirty');
+  calls.length = 0;
+  await assert.rejects(
+    () => operations.workspaceAdd(repo, join(fx.root, 'ws-dirty-at'), 'dirty-at', ['@'], undefined, undefined),
+    /cannot use the working-copy change @ as a parent/,
+    'a non-empty @ would become an undescribed commit in the new workspace chain',
+  );
+  assert.ok(
+    !calls.some((argv) => argv.includes('workspace') && argv.includes('add')),
+    'the refusal happens before jj workspace add runs',
+  );
+  const listed = await operations.workspaceList(repo);
+  assert.ok(!listed.some((workspace) => workspace.name === 'dirty-at'), 'no workspace was created');
 });
 
 test('jj_workspace_cleanup: a session-created workspace whose name contains spaces is cleaned up end to end', async (t) => {

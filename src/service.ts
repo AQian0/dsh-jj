@@ -185,6 +185,12 @@ export interface JjWorkspaceAddResult {
   readonly path: string;
   readonly name: string;
   readonly change: JjChangeRecord;
+  /**
+   * Model-facing note when the requested parents were adjusted: a parent that
+   * resolves to the fresh empty working-copy change is dropped, so the new
+   * workspace's chain does not gain an empty commit.
+   */
+  readonly note?: string;
 }
 
 /**
@@ -470,13 +476,29 @@ export class JjOperations {
     return { text: bounded.text, truncated: bounded.truncated };
   }
 
-  /** `jj new [-m <message>] [-- <parent>…]` then read back `@`. */
+  /**
+   * `jj new [-m <message>] [-- <parent>…]` then read back `@`.
+   *
+   * With no parents `jj new` starts a change on top of the current one. When the
+   * current `@` is already empty that only stacks another empty change on top and
+   * leaves the old empty `@` behind as a description-less commit in the chain, so
+   * the call is refused. An explicit parent (start a stack on another revision) and
+   * a non-empty working copy keep their normal behavior.
+   */
   async newChange(
     cwd: string,
     parents: readonly string[],
     message: string | undefined,
     signal?: AbortSignal,
   ): Promise<JjChangeRecord> {
+    if (parents.length === 0) {
+      const current = await this.readAt(cwd, signal);
+      if (current.empty && !current.conflict) {
+        throw badInput(
+          'jj_new would add another empty change on top of this empty working copy, leaving an empty commit in the change chain. Edit the files (they go into @) and finish steps with jj_commit; pass explicit parents to start a change on another revision.',
+        );
+      }
+    }
     const argv = ['new'];
     if (message !== undefined && message.length > 0) argv.push('-m', message);
     // Model-supplied revsets are positional arguments, not options: `--` keeps a
@@ -524,9 +546,12 @@ export class JjOperations {
    * jj commit is describe + new in one step: the current change keeps its content
    * (or only the given paths, which lets a caller split a messy working copy),
    * gets the description, and a new working-copy change becomes `@` (empty unless
-   * some changes were left behind). Warnings jj reports on a zero exit (for
-   * example a pathspec that matched no file) are returned instead of being
-   * discarded, because a silent empty commit would defeat the split workflow.
+   * some changes were left behind). An empty working copy is refused before jj
+   * runs: committing it would leave an empty commit in the change chain (and in the
+   * history handed off/pushed later), which is never what "describe this step"
+   * means. Warnings jj reports on a zero exit (for example a pathspec that matched
+   * no file) are returned instead of being discarded, because a silent empty commit
+   * would defeat the split workflow.
    *
    * The read-back uses `TPL_STATUS` (not the lightweight `TPL_CHANGE`) because the
    * tools surface `committedPaths`/`workingCopyPaths`, but it reads both revisions
@@ -542,6 +567,18 @@ export class JjOperations {
       throw badInput('jj_commit needs a non-empty description that follows the repository commit style.');
     }
     assertPaths(paths);
+    // An empty conflicted `@` is a real state (pending merge resolution) and keeps
+    // its existing path; a plain empty `@` can only produce an empty commit.
+    const current = await this.readAt(cwd, signal);
+    if (current.empty && !current.conflict) {
+      const pathHint =
+        paths.length > 0
+          ? ' `jj_commit` with paths commits only those files, so an unmatched path also creates an empty commit; check the paths.'
+          : '';
+      throw badInput(
+        `jj_commit would create an empty commit: this working copy (@) has no content changes. Nothing was committed. If the work is already committed, call jj_handoff directly; for an intentionally empty change use jj_new; otherwise edit the files first.${pathHint}`,
+      );
+    }
     // A pathspec would otherwise be parsed as an option; `--` ends option parsing.
     const argv = ['commit', '-m', message, ...(paths.length > 0 ? ['--', ...paths] : [])];
     const commitResult = await this.run(cwd, argv, signal);
@@ -560,7 +597,7 @@ export class JjOperations {
     }
     if (paths.length > 0 && committed.empty) {
       warnings.push(
-        'No changes matched the given paths, so the committed change is empty; the working copy still holds the changes. Check that the paths are repository-relative.',
+        'No changes matched the given paths, so the committed change is empty; the working copy still holds the changes. Check that the paths are repository-relative. The empty commit stays in the change chain: remove it with `jj abandon <change id>` (or undo the commit with jj_undo) if it was not intended.',
       );
     }
     return { committed, workingCopy, warnings };
@@ -940,7 +977,30 @@ export class JjOperations {
     return operations;
   }
 
-  /** `jj workspace add <path> [--name n] [-r r]… [-m m] [--colocate]`, then read the workspace back. */
+  /**
+   * `jj workspace add <path> [--name n] [-r r]… [-m m] [--colocate]`, then read
+   * the workspace back.
+   *
+   * A parent that resolves to `@` is special-cased. It names the current
+   * *working-copy* change, which is usually the fresh empty change left by the last
+   * commit; using it as a parent puts that empty commit into the new workspace's
+   * ancestry, and it later reaches the handed-off (and pushed) linear history as an
+   * empty commit.
+   * Since `jj workspace add` without `-r` already bases the new workspace on the
+   * parents of `@` (the last committed change), an empty `@` parent is dropped with
+   * a note. Once `@` contains uncommitted content it cannot be dropped safely (the
+   * commit would be undescribed and owned by the source workspace), so the call is
+   * refused with the commit-first instruction instead.
+   *
+   * @param cwd - workspace directory to run jj in.
+   * @param path - destination directory for the new workspace.
+   * @param name - jj workspace name; defaults to the destination basename.
+   * @param parents - revsets the new working-copy change starts on.
+   * @param message - optional description for the new working-copy change.
+   * @param colocate - create a matching Git worktree when true.
+   * @param signal - cancellation signal.
+   * @returns the created workspace and its current change.
+   */
   async workspaceAdd(
     cwd: string,
     path: string,
@@ -961,9 +1021,10 @@ export class JjOperations {
     // name instead of jj's list order, so callers (the tools layer records session
     // ownership) can never register a different workspace by mistake.
     const requestedName = name !== undefined && name.length > 0 ? name : basename(trimmedPath);
+    const adjusted = await this.adjustWorkspaceParents(cwd, parents, signal);
     const argv = ['workspace', 'add', trimmedPath];
     if (requestedName.length > 0) argv.push('--name', requestedName);
-    for (const parent of parents) argv.push('-r', parent);
+    for (const parent of adjusted.parents) argv.push('-r', parent);
     if (message !== undefined && message.length > 0) argv.push('-m', message);
     if (colocate === true) argv.push('--colocate');
     await this.run(cwd, argv, signal);
@@ -981,7 +1042,63 @@ export class JjOperations {
       );
     }
     const change = await this.readAt(created.root, signal);
-    return { path: created.root, name: created.name, change };
+    return {
+      path: created.root,
+      name: created.name,
+      change,
+      ...(adjusted.note !== undefined ? { note: adjusted.note } : {}),
+    };
+  }
+
+  /**
+   * Drop a parent that resolves to the current working-copy change, or refuse it.
+   *
+   * `jj workspace add -r @` (or `-r <@'s change id>`, or any revset selecting `@`)
+   * makes the current working-copy change a parent of the new workspace. After a
+   * commit that change is the fresh empty change, so the new workspace's chain
+   * would gain an empty description-less commit that reaches the handed-off/pushed
+   * history as an empty commit. Omitting `-r` already bases the new workspace on
+   * `@`'s parents, so a bare empty `@` is dropped. A non-empty `@` is refused:
+   * committing it is the caller's decision, and as an unspecified working-copy
+   * commit it would still pollute the new chain.
+   *
+   * Parents are compared as *revisions*, not strings: a change id copied from
+   * `jj_status`/`jj_log` must hit the same guard as the literal `@` revset.
+   *
+   * @param cwd - workspace directory.
+   * @param parents - requested parent revsets.
+   * @param signal - cancellation signal.
+   * @returns the parents to pass to jj plus an optional model-facing note.
+   */
+  private async adjustWorkspaceParents(
+    cwd: string,
+    parents: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<{ parents: readonly string[]; note?: string }> {
+    if (parents.length === 0) return { parents };
+    const workingCopyIndexes: number[] = [];
+    for (const [index, parent] of parents.entries()) {
+      // An invalid/unresolvable revset yields no overlap here and is then reported
+      // by jj itself; only the working-copy comparison is the plugin's concern.
+      const overlap = await this.readCommitIds(cwd, `((${parent}) & @)`, signal, 1);
+      if (overlap.length > 0) workingCopyIndexes.push(index);
+    }
+    if (workingCopyIndexes.length === 0) return { parents };
+    const workingCopy = await this.readAt(cwd, signal);
+    if (!workingCopy.empty) {
+      throw badInput(
+        'jj_workspace_add cannot use the working-copy change @ as a parent: it still has uncommitted content, so the new workspace would keep it as an undescribed commit in its chain (and in the history handed off later). Commit it first with jj_commit, then call jj_workspace_add without parents: jj bases the new workspace on the commit you just made.',
+      );
+    }
+    if (parents.length > 1) {
+      throw badInput(
+        'jj_workspace_add cannot combine the working-copy change @ with other parents: @ is the empty working-copy change, and using it as a parent would add an empty commit to the new workspace. Drop @ and pass only committed parents (or omit parents entirely).',
+      );
+    }
+    return {
+      parents: [],
+      note: 'The requested parent @ (the empty working-copy change) was dropped: jj_workspace_add already bases the new workspace on its parent commit (the last committed change), so no empty commit enters the new chain.',
+    };
   }
 
   /**
@@ -1020,6 +1137,11 @@ export class JjOperations {
    * forgotten and own the target: the `jj_workspace_cleanup` tool enforces both,
    * the shell guard keeps denying raw `jj workspace forget <other>` commands.
    *
+   * The surviving (default) workspace can be stale when this session's hand-off
+   * rewrote a change it still had checked out. Cleanup must not strand the session
+   * for that: the stale copy is recovered once and the forget retried, exactly like
+   * the hand-off wraps its own flow.
+   *
    * @param cwd - directory to run jj in (the surviving workspace).
    * @param name - exact workspace name from `jj workspace list`.
    * @param signal - cancellation signal.
@@ -1030,8 +1152,38 @@ export class JjOperations {
       throw badInput('workspace name must be non-empty and must not start with "-".');
     }
     const argv = ['workspace', 'forget', name.trim()];
-    const result = await this.run(cwd, argv, signal);
-    return bound(result.stdout.trim() || result.stderr.trim(), 1024).text;
+    const forget = async (): Promise<string> => {
+      const result = await this.run(cwd, argv, signal);
+      return bound(result.stdout.trim() || result.stderr.trim(), 1024).text;
+    };
+    try {
+      return await forget();
+    } catch (error) {
+      if (!isStaleWorkingCopyFailure(error)) throw error;
+      await this.updateStale(cwd, signal);
+      return await forget();
+    }
+  }
+
+  /**
+   * Whether a change id still resolves to a visible revision.
+   *
+   * Used after `jj workspace forget`: jj abandons the forgotten workspace's
+   * working-copy commit only when it is empty, undescribed and has no descendants;
+   * otherwise the change stays in the shared history (and can surface as an empty
+   * commit). Missing revisions report `false`; infrastructure failures are rethrown
+   * (same contract as {@link tryReadAt}), and callers that must stay fail-open
+   * contain them.
+   *
+   * @param cwd - directory to run jj in.
+   * @param changeId - change id to look up.
+   * @param signal - cancellation signal.
+   * @returns true when the revision is still visible.
+   */
+  async changeExists(cwd: string, changeId: string, signal?: AbortSignal): Promise<boolean> {
+    const id = changeId.trim();
+    if (id.length === 0) return false;
+    return (await this.tryReadAt(cwd, id, signal)) !== undefined;
   }
 
   /**

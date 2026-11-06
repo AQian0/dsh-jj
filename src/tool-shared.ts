@@ -138,6 +138,32 @@ function workspaceCleanupText(descriptor: VcsDescriptor, cleanupOwned: boolean):
 }
 
 /**
+ * Model-facing warning about empty changes carried by the handed-off stack.
+ *
+ * A moved stack can contain empty changes for two reasons: another workspace's
+ * empty working-copy change became an ancestor (it was created with a
+ * `parents: ["@"]` workspace add), or a rebased change became empty because the
+ * destination already contains its content. Both would be exported to Git as empty
+ * commits, so the hand-off reports them instead of calling the stack clean.
+ *
+ * @param result - the hand-off result whose stack was just integrated.
+ * @returns one sentence naming the empty changes, or `''` when there are none.
+ */
+function handoffEmptyChangesNote(result: JjHandoffResult): string {
+  const empty = result.stack.filter((change) => change.empty && !change.currentWorkingCopy);
+  if (empty.length === 0) return '';
+  const listed = empty
+    .map((change) => `${change.changeId} (${change.description.length > 0 ? change.description : 'no description'})`)
+    .join(', ');
+  const count = empty.length;
+  return [
+    `The integrated stack carries ${count} empty change${count === 1 ? '' : 's'}: ${listed}. They would become empty commits in Git history.`,
+    "A described change that became empty because the destination already contains its content may be dropped with `jj abandon <change id>` when it is this session's own unpushed change;",
+    'an empty change without a description is usually another workspace\'s empty working-copy change: never abandon it, report it to the user so the next workspace is created without `parents: ["@"]`.',
+  ].join(' ');
+}
+
+/**
  * Model-facing next step for one hand-off result.
  *
  * The whole point of jj_handoff is that the model does not re-delegates its steps
@@ -147,6 +173,8 @@ function workspaceCleanupText(descriptor: VcsDescriptor, cleanupOwned: boolean):
  */
 export function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescriptor, cleanupOwned: boolean): string {
   const cleanup = workspaceCleanupText(descriptor, cleanupOwned);
+  const emptyNote = handoffEmptyChangesNote(result);
+  const emptySuffix = emptyNote.length > 0 ? ` ${emptyNote}` : '';
   if (result.needsCommit) {
     return "Commit the working copy with jj_commit (a description following this repository's style), then call jj_handoff again. Do not ask the user to commit.";
   }
@@ -169,12 +197,12 @@ export function handoffNextSteps(result: JjHandoffResult, descriptor: VcsDescrip
     return `This workspace is behind ${result.destination}: the destination already contains this workspace's history, so nothing was rebased and nothing changed. Inspect the graph with jj_log and report the situation to the user; do not hand the remaining steps to the user.${cleanupNote} ${cleanup}`;
   }
   if (!result.onTarget) {
-    return `The rebase command ran but the stack base is not the resolved destination yet. Inspect the change graph with jj_log and report the change ids; do not hand the remaining steps to the user. ${cleanup}`;
+    return `The rebase command ran but the stack base is not the resolved destination yet. Inspect the change graph with jj_log and report the change ids; do not hand the remaining steps to the user.${emptySuffix} ${cleanup}`;
   }
   if (result.alreadyIntegrated) {
-    return `Nothing to rebase and no conflicts: the stack already sits on ${result.destination}. Report the destination, the change ids and any bookmark outcome to the user.${cleanupNote} ${cleanup}`;
+    return `Nothing to rebase and no conflicts: the stack already sits on ${result.destination}. Report the destination, the change ids, any bookmark outcome and any empty change to the user.${emptySuffix}${cleanupNote} ${cleanup}`;
   }
-  return `Rebase finished and verified: the stack now sits directly on ${result.destination}. Report the rebased change ids, the destination, and the resolved-by-fallback provenance (destinationSource) to the user.${cleanupNote} ${cleanup}`;
+  return `Rebase finished and verified: the stack now sits directly on ${result.destination}. Report the rebased change ids, the destination, the resolved-by-fallback provenance (destinationSource), any bookmark outcome and any empty change to the user.${emptySuffix}${cleanupNote} ${cleanup}`;
 }
 
 /**

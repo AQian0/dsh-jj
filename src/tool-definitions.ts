@@ -212,7 +212,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_new',
       description:
-        'Create a new Jujutsu (jj) change on top of the given parents and make it the working copy (@). This is jj, not git: the previous change keeps its identity and is not re-created, and no commit step is needed — the new change is already real. To finish the current change with a description and start the next one in a single step, use jj_commit. Prefer a series of small changes over one growing working copy.',
+        'Create a new Jujutsu (jj) change on top of the given parents and make it the working copy (@). This is jj, not git: the previous change keeps its identity and is not re-created, and no commit step is needed — the new change is already real. To finish the current change with a description and start the next one in a single step, use jj_commit. Prefer a series of small changes over one growing working copy. With no parents it is refused while @ is already an empty change: that would only add another empty commit to the chain; pass explicit parents to start on another revision.',
       parameters: {
         message: {
           type: 'string',
@@ -236,7 +236,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_commit',
       description:
-        'Commit the current Jujutsu (jj) working-copy change with a description and start a new change on top. This is jj, not git: jj commit is jj describe plus jj new, so the described change stays in history and a new working-copy change is created (empty unless paths leave changes behind); there is no staging area. Prefer it after each coherent step to keep the change stack reviewable for humans, and pass paths to commit only part of the working copy when splitting work. Follow the repository description style — jj_commit_style reports it.',
+        'Commit the current Jujutsu (jj) working-copy change with a description and start a new change on top. This is jj, not git: jj commit is jj describe plus jj new, so the described change stays in history and a new working-copy change is created (empty unless paths leave changes behind); there is no staging area. Prefer it after each coherent step to keep the change stack reviewable for humans, and pass paths to commit only part of the working copy when splitting work. Follow the repository description style — jj_commit_style reports it. It refuses when @ has no content changes, because that would leave an empty commit in the chain; call jj_handoff directly when the work is already committed, and use jj_new for an intentionally empty change.',
       parameters: {
         message: {
           type: 'string',
@@ -602,7 +602,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_add',
       description:
-        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, and start a new change in it. This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Without `parents` the new workspace starts from the parents of the current change; pass `parents: ["@"]` to carry the current change (and its checkout) into the new workspace when migrating mid-task.',
+        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, and start a new change in it. This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Omit `parents` to start from the parents of the current change: after jj_commit that bases the new workspace on the commit you just made, which is the intended way to carry your committed work over. Do not pass `parents: ["@"]` for that — @ is the working-copy change (usually the fresh empty change), so it would become an empty commit in the new workspace\'s chain and reach the handed-off/pushed history; the tool drops a bare empty @ and refuses @ while the working copy still has uncommitted changes.',
       parameters: {
         path: {
           type: 'string',
@@ -617,7 +617,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         parents: {
           type: 'array',
           items: { type: 'string' },
-          description: "Revsets the new workspace's change starts on; omit to share the current change's parents.",
+          description:
+            "Revsets the new workspace's change starts on; omit to share the current change's parents (recommended: after jj_commit this is the commit you just made). A literal @ is dropped while @ is the empty working-copy change and refused while @ still has uncommitted content, because basing the new workspace on @ would leave the working-copy change as an empty/undescribed commit in its chain.",
         },
         message: { type: 'string', description: 'Description for the new workspace working-copy change.' },
         colocate: {
@@ -635,6 +636,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             name: { type: 'string', required: true },
             changeId: { type: 'string', required: true },
             commitId: { type: 'string', required: true },
+            note: {
+              type: 'string',
+              description:
+                'Set when the requested parents were adjusted (a bare empty @ was dropped) so no empty commit enters the new chain.',
+            },
           },
         },
         render: (_args, value) => textRender(value),
@@ -656,6 +662,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           name: result.name,
           changeId: result.change.changeId,
           commitId: result.change.commitId,
+          ...(result.note !== undefined ? { note: result.note } : {}),
         };
       },
     }),
@@ -1018,14 +1025,28 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           );
         }
         await workingDirectory.set(exec.agent, fallback.root, exec.signal);
+        const forgotten = status.change;
         const message = await operations.workspaceForget(fallback.root, workspaceName, exec.signal);
+        // jj abandons the forgotten workspace's working-copy commit only when it is
+        // empty, undescribed and has no descendants. Otherwise it stays in the shared
+        // history (a described empty change, or one another workspace is based on) and
+        // can surface as an empty commit, so say so instead of implying a clean forget.
+        let retained = false;
+        try {
+          retained = await operations.changeExists(fallback.root, forgotten.changeId, exec.signal);
+        } catch {
+          retained = false; // the workspace is already unregistered: never fail the cleanup here
+        }
+        const retainedNote = retained
+          ? ` Note: the workspace's empty working-copy change ${forgotten.changeId}${forgotten.description.length > 0 ? ` (${forgotten.description})` : ''} was not abandoned by jj (it has a description or another workspace is based on it), so it stays in the shared history and may appear as an empty commit. Inspect it with jj_log; if another workspace is based on it, leave it and report it to the user.`
+          : '';
         return {
           forgotten: true,
           workspaceName,
           workspaceRoot: descriptor.root,
           currentWorkspace: 'default',
           currentWorkspaceRoot: fallback.root,
-          message,
+          message: `${message}${retainedNote}`,
           directoryNote: `The directory ${descriptor.root} is no longer a jj working copy; its files remain on disk and nothing tracked was lost. The user can delete it whenever convenient.`,
         };
       },

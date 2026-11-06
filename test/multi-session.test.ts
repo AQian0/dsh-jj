@@ -171,6 +171,17 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   assert.match(text, /jj_workspace_cleanup/, 'a session-created workspace is cleaned up by the plugin');
   assert.match(text, /the user runs `jj workspace forget <name>`/, 'raw workspace forget is left to the user');
   assert.match(text, /do not run it yourself/i, 'raw workspace forget stays denied');
+  assert.match(
+    text,
+    /create the workspace WITHOUT `parents`/,
+    'the isolation instruction moves committed work over without basing the new workspace on the working-copy change',
+  );
+  assert.ok(
+    !text.includes('pass parents ["@"]'),
+    'the old advice that inserted the empty working-copy change into the new chain is gone',
+  );
+  assert.match(text, /empty commit/, 'the empty-commit consequence of basing on @ is named');
+  assert.match(text, /never commit an empty working copy/i, 'the finish checklist refuses empty commits');
 });
 
 test('sibling workspaces are described as isolated copies with a shared repository', () => {

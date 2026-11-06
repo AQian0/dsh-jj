@@ -187,11 +187,11 @@ export function detectParallelSessions(
 /** One peer session's guidance: isolate before writing into the shared working copy. */
 function sharedWorkingCopyText(): string {
   return [
-    "Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not parallel-safe: every jj command snapshots the whole directory, so an unpathed commit can capture another session's uncommitted files. Read-only inspection is safe; before writing files:",
-    "- Isolate into a new jj workspace with jj_workspace_add: absolute path outside the repository, unique name, never reuse another session's workspace; switch with the working_directory tool, then confirm with jj_status.",
-    '- If you already edited this working copy, jj_commit only your own paths first, then pass parents ["@"] to jj_workspace_add to carry them over.',
-    "- Never use `git worktree` (jj cannot see that checkout); never move, reuse or delete another session's workspace (shell `jj workspace forget` on another workspace and any `jj workspace remove` are refused).",
-    '- Edit the shared copy only when the user explicitly wants it there; commit explicit paths.',
+    "Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not parallel-safe: every jj command snapshots the whole directory, so an unpathed commit can capture another session's files. Read-only inspection is safe; before writing files:",
+    '- Isolate with jj_workspace_add: an absolute path outside the repository and a unique name; switch there with the working_directory tool, then confirm with jj_status.',
+    '- Already edited this working copy? Commit only your own paths first (jj_commit with paths), then create the workspace WITHOUT `parents` (jj starts it on that commit). Never pass `parents: ["@"]`: @ is the empty working-copy change and would leave an empty commit in the new chain.',
+    "- Never use `git worktree` (jj cannot see it); never move, reuse or delete another session's workspace (shell `jj workspace forget <other>` and `jj workspace remove` are refused).",
+    '- Edit the shared copy only if the user explicitly wants it there.',
   ].join('\n');
 }
 
@@ -217,12 +217,12 @@ function genericParallelText(): string {
 function finishChecklistText(target: string): string {
   return [
     "Finishing this workspace's work (standard rebase hand-off):",
-    '1. jj_commit the last coherent step; keep the change ids you created.',
+    '1. Commit only while @ still has content changes; never commit an empty working copy (the empty commit would stay in the handed-off chain). Keep the change ids you created.',
     `2. Call jj_handoff once instead of manual fetch/rebase/verify: it fetches (a repository without remotes is fine), picks the integration target itself (configured rebaseTarget, default ${target}, then local main/master), rebases the whole stack with source mode, verifies the base, reports conflicts and moves a bookmark you pass. In the default workspace pass firstChange: <bottom-most change id you created>; in your own workspace omit it. If the stack bottoms on an earlier session's commit, keep the chain together.`,
     '3. Resolve conflicts yourself: edit files to their final content, remove the marker blocks, jj_status to snapshot; for a conflict in a middle commit `jj edit <change>`, fix it, then `jj new <top change>`; call jj_handoff again. Report only a conflict you cannot resolve safely.',
     '4. Only ask the user for an integration target when jj_handoff reports none exists; never ask them to fetch, rebase, verify or move bookmarks.',
-    '5. If you created this workspace with jj_workspace_add, call jj_workspace_cleanup; if refused (not session-created), report its name/path: the user runs `jj workspace forget <name>`, do not run it yourself.',
-    '6. Report the rebased change ids, the resolved destination, any bookmark move and the cleanup outcome.',
+    '5. If you created this workspace with jj_workspace_add, call jj_workspace_cleanup; if refused, report its name/path — the user runs `jj workspace forget <name>`, do not run it yourself.',
+    '6. Report the rebased change ids, destination, any bookmark move and the cleanup outcome.',
   ].join('\n');
 }
 
