@@ -166,12 +166,18 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     必须被 `parallelPeerCwds` 过滤掉,否则单会话也会被误判而新建 jj workspace。活动状态服务 / 投影缺失或抛错时
     该对端按「可能存在并行」的保守行为处理(fail-open),agents / workingDirectory 缺失或抛错时按「没有其他会话」
     处理(`auto` 不注入),任何一条路径都不得阻断 prompt 组装。
+    隔离建议固定为「先只提交自己的路径、再**不带 `parents`** 调用 `jj_workspace_add`」:不带 parents 时 jj 以
+    当前 `@` 的父提交为起点,正好带上刚提交的那一步;传 `parents: ["@"]` 会把空的工作副本提交变成新 workspace
+    提交链里的空提交、最终进入收尾/推送历史。不要在指引或工具描述里重新推荐 `parents ["@"]`。
 13. **收尾自动化(`jj_handoff` / `jj_workspace_cleanup`)**:
     - `service.ts` 的 `handoff()` 是收尾的唯一入口:fetch(无远端不算错)→ 目标解析(显式 `destination` →
       配置 `rebaseTarget` → `trunk()` → 本地 `main` → `master`,跳过 root commit;显式目标解析到 root 是
       模型错误,必须报错而不是静默换目标;全失败才报「问用户」)→ `roots(::@ ~ ::target)` 探测整段栈 →
       `jj rebase -s` → 复核 base 并返回冲突数据。不要把这些步骤拆回 prompt;`needsCommit` 时先让模型
       `jj_commit`,不要代为描述。
+    - rebase 后要检查 `stack` 里残留的空 change(`empty && !currentWorkingCopy`):`handoffNextSteps` 的 `nextSteps`
+      必须列出它们的 change id 与处理建议,但不自动 abandon(可能是别的 workspace 的空工作副本);本会话自己的、
+      rebase 后才变空的已描述 change 才提示用 `jj abandon <change id>` 丢弃。
     - **stale 恢复必须包住整个流程**:stale 时连目标/栈的 `jj log` 读取都会失败,所以 `handoff()` 用
       「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
       rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
@@ -198,16 +204,23 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       (`buildJjWorkspaceForgetRefusal`;jj 接受多个名字,`targetWorkspaces` 里任一不是当前 workspace 即拒绝)。
       `jj workspace remove` 会把 workspace(stale 的也一样)连目录一起删除、被忽略文件无法恢复,
       `jj-rules.ts` 把它归为 `destructive`,任何目标、任何 `guardJjRepositoryWide` 模式都由
-      `buildJjWorkspaceRemoveRefusal` hard-deny。
+      `buildJjWorkspaceRemoveRefusal` hard-deny。注销后还要用 `changeExists()` 检查被遗忘 workspace 的空工作副本
+      是否仍可见(jj 只在「空 + 无描述 + 无后代」时才丢弃它),保留时在结果 `message` 里说明它仍在共享历史、可能
+      显示为空提交;`workspaceForget` 对 stale 的默认 workspace(兄弟 workspace 的 handoff 改写了它检出的 change)
+      必须 `update-stale` 后重试一次,清理不得因此失败。
     - `JjOperations.workspaceAdd` 必须显式传 `--name`(缺省名用 `basename`)并按名字/规范路径解析返回的
       workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
       `workspace list` 模板对 `name`/`root` 都用 `json(...)`(名字可含空格/制表符);比较名字时用解码后的裸名。
+    - `workspaceAdd` 的 parents 必须**按 revision 解析**而不是按字符串匹配:`(parent) & @` 非空即表示该 parent
+      指向当前工作副本——`@` 为空时丢弃这个 parent 并在结果 `note` 里说明,`@` 有未提交内容或多 parent 混用时
+      抛 `JJ_BAD_INPUT`,绝不把工作副本提交塞进新 workspace 的链(从 `jj_status` 复制 change id 也不能绕过)。
     - 其它收尾输入的不变量:`jj new` 的位置参数前必须加 `--`;`describeChange` 只接受唯一 revision
       (0 个/多个都报错,绝不批量改描述);`jj op log` 的 `time` 取 `json(self).time.start`(jj 的
       `time` 是 `{start,end}` 对象),不是 `String(object)`;`Cannot access` 只有指向 `.jj`/`.git` 元数据时
       才归为 `JJ_REPO_BROKEN`。
     - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端,含 stale、firstChange
-      校验、ambiguous roots、无关 destination、behind、bookmark 所有权、cleanup 所有权)、
+      校验、ambiguous roots、无关 destination、behind、bookmark 所有权、cleanup 所有权、cleanup stale 恢复与保留
+      提示、handoff 空 change 上报)、
       `test/multi-session.test.ts`(收尾清单文案)、`test/guard.test.ts`(forget / remove 拒绝文案)与 README「任务收尾」。
 14. **变更记录(`jj-changes` / 变更卡片)**:
     - bundle patch 禁用内置 `workspace-changes` 行并插入 `jj-changes`;`src/changes.ts` 的 `apply` 先
@@ -260,6 +273,18 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       发布边界、非祖先/merge/空源/冲突源、`jj_amend` 输出 schema 自校验)、`test/commit-style.test.ts`、
       `test/prompt-context.test.ts` 与 `test/config.test.ts`;改窗口判定或文案时同步 README「修正近期提交」「工具一览」
       与 `locale/*.json`、`tools/locale/*.json`。
+16. **空提交防护(多会话/多工作区收尾的单链空提交)**:
+    - 单链里的空提交有两个插件侧来源:把当前 `@` 当作新 workspace 的 parent(见规则 12/13),以及在空 `@` 上
+      `jj_commit` / `jj_new`。两处都必须在**执行前**防护,不能事后补警告或自动 undo(撤销是破坏性改写)。
+    - `JjOperations.commit()` 先用 `readAt(cwd)` 读取 `@`:空且非 conflict 时抛 `JJ_BAD_INPUT`(冲突的空合并
+      change 保持原路径,它需要先解决冲突);`paths` 一个都没匹配上时 jj 仍会创建空提交,只能在成功结果里返回
+      警告并提示 `jj abandon`(现有测试锁定 warning-only 形状)。`newChange()` 在无 parents 且 `@` 已空时同样
+      拒绝;显式 parents 的 `jj_new` 保持可用(用于在别的 revision 上开栈)。
+    - `jj_handoff` 对 rebase 后才变空的 change 只报告不自动删除(见规则 13);已存在的空提交由用户/模型用
+      `jj abandon <change id>` 清理,插件不提供 abandon 工具,也不自动改写他人提交。
+    - 修改这些守卫/文案时同步 `test/service-tools.test.ts`(commit/new 空提交拒绝、workspaceAdd parent
+      丢弃/拒绝、handoff 空 change 上报、cleanup stale 恢复与保留提示)、`test/multi-session.test.ts`(隔离与
+      收尾文案、prompt token 预算)与 README「多会话协作」「任务收尾」「已知限制」。
 
 ## 代码约定
 
@@ -321,6 +346,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    **shell 里的 `jj workspace forget` 仍不可要求模型执行**:只有 `jj_workspace_cleanup` 工具可以注销
    本会话通过 `jj_workspace_add` 创建的临时 workspace,其它情况清理交给用户(报告 `jj workspace list` 的名字/路径);
    并行会话一旦被检测到,收尾清单要在同一会话后续轮次继续注入(`parallelSeen` latch),子代理不注入;
+   隔离段必须写成「先提交自己的路径,再**不带 parents** 调用 `jj_workspace_add`」,并解释 `parents ["@"]` 会把
+   空工作副本提交带进新链;`jj_workspace_add` 的 parent 守卫与 `jj_commit` / `jj_new` 空提交守卫见规则 13/16;
 2. `prompt-context.ts`:把这一段拼进 jj 会话上下文,受 `multiSessionGuidance` / `rebaseTarget` 控制;
 3. `config.ts` 的 `Config` schema:`multiSessionGuidance`(`auto` / `always` / `off`,默认 `auto`)与 `rebaseTarget`
    (默认 `trunk()`,不得为空);
