@@ -11,12 +11,14 @@ import assert from 'node:assert/strict';
 import { JJ_CAPABILITY_MATRIX, JJ_KNOWN_SUBCOMMANDS, capabilityToolNames } from '../src/capabilities.ts';
 import { resolveConfig } from '../src/config.ts';
 import { jjToolDefinitions } from '../src/tool-definitions.ts';
+import { WorkspaceOwnership } from '../src/policies.ts';
 
 /** Tool names the definitions expose, without executing anything. */
 function registeredToolNames(): string[] {
   const definitions = jjToolDefinitions({
     service: {
       operations: {} as never,
+      workspaceOwnership: new WorkspaceOwnership(),
       detect: async () => {
         throw new Error('not used');
       },

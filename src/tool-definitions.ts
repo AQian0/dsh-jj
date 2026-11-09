@@ -21,15 +21,9 @@ import {
 import { isRewritableChange } from './jj-templates.ts';
 import { CHANGE_PROPERTIES, CHANGE_SCHEMA, changeView, textRender, workspaceFields } from './tool-schemas.ts';
 import type { VcsDescriptor } from './types.ts';
-import {
-  amendNextSteps,
-  canonicalWorkspacePath,
-  handoffNextSteps,
-  isRootWorkspace,
-  requireWorkspace,
-  type ToolContext,
-  type ToolExec,
-} from './tool-shared.ts';
+import { cleanupWorkspace } from './flows/cleanup.ts';
+import { amendNextSteps, handoffNextSteps, requireWorkspace, type ToolContext, type ToolExec } from './tool-shared.ts';
+import { isRootWorkspace } from './policies.ts';
 
 /**
  * Build every `jj_*` tool definition (contract §7.3).
@@ -41,25 +35,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   const { service, config } = context;
   const operations = service.operations;
   /**
-   * Workspaces this session created through `jj_workspace_add`, keyed by the live
-   * agent. Ownership is the safety invariant behind `jj_workspace_cleanup`: only a
-   * workspace this exact session registered may be unregistered by the plugin, so a
-   * session can never forget another session's (or the user's) working copy.
+   * Workspace ownership is service state, not tool state: the cleanup flow, the panel
+   * and (later) the guard read the same registry, and a restarted host starts empty.
+   * The tools only report what they created and ask before unregistering.
    */
-  const sessionWorkspaces = new WeakMap<object, { name: string; root: string }[]>();
-  const rememberOwnedWorkspace = (agent: unknown, name: string, root: string): void => {
-    if (typeof agent !== 'object' || agent === null) return;
-    const owned = sessionWorkspaces.get(agent) ?? [];
-    const canonicalRoot = canonicalWorkspacePath(root);
-    if (!owned.some((entry) => entry.name === name && entry.root === canonicalRoot))
-      owned.push({ name, root: canonicalRoot });
-    sessionWorkspaces.set(agent, owned);
-  };
-  const ownsWorkspace = (agent: unknown, name: string, root: string): boolean => {
-    if (typeof agent !== 'object' || agent === null) return false;
-    const canonicalRoot = canonicalWorkspacePath(root);
-    return (sessionWorkspaces.get(agent) ?? []).some((entry) => entry.name === name && entry.root === canonicalRoot);
-  };
+  const ownership = service.workspaceOwnership;
   // Commit-description policy is owned by the runtime entry (`ctx.jj`) so the
   // session prompt and jj_commit_style cannot disagree; the tools row only carries
   // tool-specific tuning (limits, default cwd, …).
@@ -656,7 +636,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           args.colocate,
           exec.signal,
         );
-        rememberOwnedWorkspace(exec.agent, result.name, result.path);
+        ownership.remember(exec.agent, result.name, result.path);
         return {
           path: result.path,
           name: result.name,
@@ -966,7 +946,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           },
           exec.signal,
         );
-        const cleanupOwned = workspaceName !== 'default' && ownsWorkspace(exec.agent, workspaceName, descriptor.root);
+        const cleanupOwned = workspaceName !== 'default' && ownership.owns(exec.agent, workspaceName, descriptor.root);
         return {
           ...workspaceFields(descriptor),
           destination: result.destination,
@@ -1016,70 +996,17 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
       async execute(_args, exec) {
         const { cwd, descriptor } = await openWorkspace(exec);
-        const workspaceName = descriptor.workspaceName ?? 'default';
-        if (workspaceName === 'default') {
-          throw new Error(
-            'jj_workspace_cleanup is unnecessary here: this session already runs in the default workspace, which must never be forgotten.',
-          );
-        }
-        if (!ownsWorkspace(exec.agent, workspaceName, descriptor.root)) {
-          throw new Error(
-            [
-              `jj_workspace_cleanup refused: workspace "${workspaceName}" was not created through jj_workspace_add in this session, so the plugin will not unregister it.`,
-              'Unregistering a workspace another session or the user created would break their working copy.',
-              `If the user should clean it up: from the default workspace run \`jj workspace forget ${workspaceName}\`, then delete ${descriptor.root}. Report those commands; do not run jj workspace forget yourself (the shell guard denies it).`,
-            ].join('\n'),
-          );
-        }
-        const status = await operations.status(cwd, exec.signal);
-        if (!status.change.empty) {
-          throw new Error(
-            'The working copy still has uncommitted changes. Commit them with jj_commit (or finish the hand-off with jj_handoff) before cleaning up, so nothing is lost when the workspace is unregistered.',
-          );
-        }
-        if (status.change.conflict) {
-          throw new Error(
-            'The working copy still has unresolved conflicts. Resolve them and finish the hand-off (jj_handoff) before cleaning up the workspace.',
-          );
-        }
-        const workspaces = await operations.workspaceList(cwd, exec.signal);
-        const fallback = workspaces.find((workspace) => workspace.name === 'default');
-        if (fallback === undefined) {
-          throw new Error(
-            'jj_workspace_cleanup could not find the default workspace to move this session back to; report the cleanup commands to the user instead.',
-          );
-        }
-        const workingDirectory = context.host.workingDirectory;
-        if (exec.agent === undefined || workingDirectory === undefined || typeof workingDirectory.set !== 'function') {
-          throw new Error(
-            'jj_workspace_cleanup cannot move this session back to the default workspace (the host workingDirectory service exposes no set). Keep the workspace registered and report the cleanup commands to the user instead.',
-          );
-        }
-        await workingDirectory.set(exec.agent, fallback.root, exec.signal);
-        const forgotten = status.change;
-        const message = await operations.workspaceForget(fallback.root, workspaceName, exec.signal);
-        // jj abandons the forgotten workspace's working-copy commit only when it is
-        // empty, undescribed and has no descendants. Otherwise it stays in the shared
-        // history (a described empty change, or one another workspace is based on) and
-        // can surface as an empty commit, so say so instead of implying a clean forget.
-        let retained = false;
-        try {
-          retained = await operations.changeExists(fallback.root, forgotten.changeId, exec.signal);
-        } catch {
-          retained = false; // the workspace is already unregistered: never fail the cleanup here
-        }
-        const retainedNote = retained
-          ? ` Note: the workspace's empty working-copy change ${forgotten.changeId}${forgotten.description.length > 0 ? ` (${forgotten.description})` : ''} was not abandoned by jj (it has a description or another workspace is based on it), so it stays in the shared history and may appear as an empty commit. Inspect it with jj_log; if another workspace is based on it, leave it and report it to the user.`
-          : '';
-        return {
-          forgotten: true,
-          workspaceName,
-          workspaceRoot: descriptor.root,
-          currentWorkspace: 'default',
-          currentWorkspaceRoot: fallback.root,
-          message: `${message}${retainedNote}`,
-          directoryNote: `The directory ${descriptor.root} is no longer a jj working copy; its files remain on disk and nothing tracked was lost. The user can delete it whenever convenient.`,
-        };
+        // The decision, the stale recovery and the ordering of "move the session, then
+        // forget" live in the flow (src/flows/cleanup.ts); the tool only supplies facts.
+        return await cleanupWorkspace({
+          operations,
+          owns: (name, root) => ownership.owns(exec.agent, name, root),
+          host: context.host,
+          agent: exec.agent,
+          cwd,
+          descriptor,
+          signal: exec.signal,
+        });
       },
     }),
 

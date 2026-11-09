@@ -17,6 +17,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj, jjNonInteractiveEnv } from '../src/jj-command.ts';
+import { WorkspaceOwnership } from '../src/policies.ts';
 import { JjOperations } from '../src/service.ts';
 import { jjToolDefinitions } from '../src/tools.ts';
 import type { RunCommand } from '../src/types.ts';
@@ -138,7 +139,11 @@ test('V2: the `jj_squash` tool path also never launches an editor', async (t) =>
   const operations = new JjOperations({ runJj, config: {} });
   const definitions = new Map(
     jjToolDefinitions({
-      service: { operations, detect: async () => await detectVcs(repo, fx.run) },
+      service: {
+        operations,
+        workspaceOwnership: new WorkspaceOwnership(),
+        detect: async () => await detectVcs(repo, fx.run),
+      },
       config: resolveConfig({}),
       host: { tools: { register: () => () => {} } },
       cwdFor: async () => repo,

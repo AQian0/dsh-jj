@@ -81,6 +81,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 22 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
 | `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
 | `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
+| `src/policies.ts`                                              | 纯模块:工作区所有权注册表、根 workspace 判定、cleanup 决策、stale 错误识别;工具/flow/guard 共用同一份规则                                                                               |
+| `src/flows/cleanup.ts`                                         | 具名流程:离开并注销本会话创建的 workspace（所有权、stale 恢复、切换目录与 forget 的顺序都在这一个地方）                                                                                 |
 | `src/capabilities.ts`                                          | 纯模块:jj 子命令 → 处置（tool / shell / blocked）的能力矩阵；`test/capabilities.test.ts` 断言覆盖 guard 表与已注册工具                                                                  |
 | `src/git-command.ts`                                           | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
 | `src/git-tokenize.ts`                                          | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                   |
@@ -122,7 +124,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    changes 通过 `inject: ['subprocess', 'fs', 'jj']` 消费(runtime 行提供 jj 命令名与进程限额,也保证 bundle 行
    顺序)。删改 `inject` 会破坏其他行加载。
 3. **纯模块**:`detect.ts`、`git-command.ts`(barrel)、`git-tokenize.ts`、`git-equivalence.ts`、
-   `git-rules.ts`、`jj-rules.ts`、`types.ts`、`commit-style.ts`、`multi-session.ts`、`jj-templates.ts`、
+   `git-rules.ts`、`jj-rules.ts`、`types.ts`、`commit-style.ts`、`multi-session.ts`、`jj-templates.ts`、`policies.ts`、
    `changes-types.ts`、`changes-paths.ts`、`changes-diff.ts`、`changes-jj.ts`、`changes-recorder.ts`、
    `changes-service.ts` 不得在运行时 import 任何 `@deepseek-ai/*`(由 `build.test.ts` 强制;类型导入可以)。
    DSH 运行时 import 仅限:`config.ts`(schemastery)、`jj-service.ts`(cordis)、`tool-definitions.ts`
@@ -203,9 +205,12 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       `json(self).target` 是 `[add, remove, add…]` 合并形式,缺席的一侧是 `null`)一律 `bookmarkSkipped`,不替人选边,
       `bookmarkList` 的 `target` 取第一个存在的 add 侧,绝不能把 `null` 变成字面 revset `"null"`;bookmark 名在 rebase 前校验,
       rebase 后的 bookmark 失败收敛为 `bookmarkSkipped`(保留已成功的 rebase 结果)。
-    - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(按 `exec.agent`
-      记在 `WeakMap`,记录**名字+规范路径**)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的
-      workspace 才能注销;注销前必须先 `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。
+    - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(记在
+      `ctx.jj` 的 `WorkspaceOwnership` 注册表:按 `exec.agent` 记录**名字+规范路径**,不随工具定义生灭)、
+      当前 workspace 不是 `default`、working copy 无未提交改动/冲突的 workspace 才能注销;注销前必须先
+      `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。判定与编排在 `policies.ts` 的
+      `decideWorkspaceCleanup` 与 `flows/cleanup.ts`:读取工作副本遇到 stale 会先 `update-stale` 再重试,
+      不再因为一次快照失败就放弃清理。
       这是对旧「清理只能交给用户」规则的**唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝
       (`buildJjWorkspaceForgetRefusal`;jj 接受多个名字,`targetWorkspaces` 里任一不是当前 workspace 即拒绝)。
       `jj workspace remove` 会把 workspace(stale 的也一样)连目录一起删除、被忽略文件无法恢复,
@@ -271,7 +276,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       `--use-destination-message` 保留(永不打开编辑器),需要时用 `message` 改写;stale 时 `updateStale()` 后重跑一次
       (与 handoff 相同),不要只在外层重试。
     - `jj_amend` 工具只做参数映射与 `nextStep` 文案;`jj_commit` 的输出必须带 `commitCorrectionHint`,把规则放在
-      「刚提交完」这个决策点上;`jj_squash` 不做完整预校验,但要把 jj 的 immutable 拒绝映射成 `JJ_BAD_INPUT`。
+      「刚提交完」这个决策点上。`jj_squash` 执行前同样校验发布边界 `((from)|(into))::@`(与 amend 一致),
+      并把 jj 的 immutable 拒绝映射成 `JJ_BAD_INPUT`——两条改写路径的安全等级不允许不同。
     - 指引在 `commit-style.ts` 的 `CORRECTION_GUIDANCE`(与 `SPLIT_COMMITS_GUIDANCE` 分开),受 `preferAmendCorrections`
       (默认 true,runtime 行)控制;`false` 只关指引,不禁用工具。默认不要改成「所有后续改动都追加提交」或
       「自动改写」——修正只由用户指令触发。

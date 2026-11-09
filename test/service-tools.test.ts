@@ -13,6 +13,7 @@ import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj, JjError } from '../src/jj-command.ts';
 import { JjOperations, TPL_CHANGE, TPL_STATUS, changeFromRecord, isRewritableChange } from '../src/service.ts';
+import { WorkspaceOwnership } from '../src/policies.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
 import {
   assertToolchain,
@@ -57,6 +58,7 @@ function toolService(
 ): JjToolService {
   return {
     operations,
+    workspaceOwnership: new WorkspaceOwnership(),
     detect: (cwd, signal) => detectVcs(cwd, fx.run, signal),
   };
 }

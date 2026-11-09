@@ -14,6 +14,7 @@ import { resolve } from 'node:path';
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { assertServiceableConfig, configSchemaFor, resolveConfig, type JjPluginConfig } from './config.ts';
 import { detectVcs, sniffVcsSync } from './detect.ts';
+import { WorkspaceOwnership } from './policies.ts';
 import { createRunGit, createRunJj } from './jj-command.ts';
 import { JjOperations } from './service.ts';
 import type { JjRunResult, RunJjOptions, VcsDescriptor, VcsKind, VcsSniff } from './types.ts';
@@ -53,6 +54,14 @@ export class JjService extends Service {
   static Config = configSchemaFor('runtime');
 
   readonly operations: JjOperations;
+  /**
+   * Workspaces this session created through the tools.
+   *
+   * It lives on the service, not inside the tool definitions: the cleanup flow, the
+   * panel and (later) the guard must see the same ownership facts, and a restarted host
+   * must start with none of them.
+   */
+  readonly workspaceOwnership = new WorkspaceOwnership();
   /**
    * The lifetime-bound jj runner every consumer row shares.
    *

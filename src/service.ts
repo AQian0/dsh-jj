@@ -23,6 +23,7 @@ import {
   type ResolvedJjConfig,
 } from './config.ts';
 import { JjError, runJjChecked, type RunJj } from './jj-command.ts';
+import { isStaleWorkingCopyFailure } from './policies.ts';
 import {
   asRecord,
   bound,
@@ -324,12 +325,6 @@ export interface JjHandoffResult {
   readonly bookmark?: JjHandoffBookmark;
   /** Why a requested bookmark move was skipped (conflicts, empty stack). */
   readonly bookmarkSkipped?: string;
-}
-
-/** Whether an error is jj's "working copy is stale" refusal (another workspace rewrote a shared ancestor). */
-function isStaleWorkingCopyFailure(error: unknown): boolean {
-  const stderr = error instanceof JjError ? error.detail.stderr : error instanceof Error ? error.message : '';
-  return /stale/i.test(stderr) && /workspace update-stale/i.test(stderr);
 }
 
 /** Canonical filesystem spelling of one path (realpath when it exists, else the resolved absolute path). */

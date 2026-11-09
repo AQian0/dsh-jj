@@ -8,16 +8,17 @@
  *
  * @module dsh-jj/tool-shared
  */
-import { realpathSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { ResolvedJjConfig } from './config.ts';
+import type { WorkspaceOwnership } from './policies.ts';
 import type { JjAmendResult, JjHandoffResult, JjOperations } from './service.ts';
 import type { VcsDescriptor } from './types.ts';
 
 /** Structural view of the service the tools need (a live `JjService` satisfies it). */
 export interface JjToolService {
   readonly operations: JjOperations;
+  /** Per-session workspace ownership, owned by the service (see `WorkspaceOwnership`). */
+  readonly workspaceOwnership: WorkspaceOwnership;
   detect(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor>;
 }
 
@@ -74,29 +75,7 @@ export function jjRefusalText(descriptor: VcsDescriptor, cwd: string, jjCommand 
     .join('\n');
 }
 
-/** Canonical workspace root for ownership checks (realpath when it exists, else the path as given). */
-export function canonicalWorkspacePath(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
-  }
-}
-
-/**
- * Whether this session runs in the repository's root ("default") workspace.
- *
- * Determined from the layout, not the name: the root workspace owns `.jj/repo` as
- * a real directory, while a linked workspace's `.jj/repo` is a pointer file. This
- * keeps the `firstChange` safety requirement when the root workspace was renamed.
- */
-export function isRootWorkspace(descriptor: VcsDescriptor): boolean {
-  try {
-    return statSync(join(descriptor.root, '.jj', 'repo')).isDirectory();
-  } catch {
-    return (descriptor.workspaceName ?? 'default') === 'default';
-  }
-}
+export { canonicalWorkspacePath, isRootWorkspace } from './policies.ts';
 
 /** The caller identity and cancellation one tool call runs with (the `execute` `exec` argument). */
 export interface ToolExec {

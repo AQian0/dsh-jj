@@ -69,6 +69,7 @@ const PURE_MODULES = [
   'git-rules',
   'jj-rules',
   'jj-templates',
+  'policies',
   'types',
   'commit-style',
   'multi-session',
