@@ -809,6 +809,56 @@ test('the built runtime entry registers the ctx.jj service on a real Cordis cont
   assert.equal(service.describe('jj-native'), 'Jujutsu (jj) native repository');
 });
 
+test('the runtime entry registers the panel routes once the connection service exists', async () => {
+  const { Context } = await import('@deepseek-ai/cordis');
+  const runtimeEntry = await import('@aqian0/dsh-jj');
+  interface RegisteredRoute {
+    readonly path: string;
+  }
+  const routesOf = (): { routes: RegisteredRoute[]; connection: unknown } => {
+    const routes: RegisteredRoute[] = [];
+    return {
+      routes,
+      connection: {
+        fetch: {
+          register: (entry: RegisteredRoute) => {
+            routes.push(entry);
+            return () => {};
+          },
+        },
+      },
+    };
+  };
+  const overviewPath = '/api/jj.overview';
+  const refreshPath = '/api/jj.refresh';
+
+  // Available before apply: the routes register synchronously.
+  const early = routesOf();
+  const earlyCtx = new Context();
+  earlyCtx.provide('connection');
+  earlyCtx.set('connection', early.connection);
+  runtimeEntry.apply(earlyCtx, {});
+  assert.deepEqual(
+    early.routes.map((route) => route.path),
+    [overviewPath, refreshPath],
+  );
+
+  // Provided later (the real boot order): a child fiber through `ctx.inject` must
+  // install them when the Web app's connection row finally appears.
+  const late = routesOf();
+  const lateCtx = new Context();
+  runtimeEntry.apply(lateCtx, {});
+  assert.equal(late.routes.length, 0, 'no connection yet, so no panel routes');
+  lateCtx.provide('connection');
+  lateCtx.set('connection', late.connection);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(
+    late.routes.map((route) => route.path),
+    [overviewPath, refreshPath],
+    'the routes register when the connection service is provided later',
+  );
+});
+
 test('the runtime entry forwards the commit policy into the registered prompt context', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-apply-policy');
   const repo = await initJjColocated(fx.run, fx.path('repo'));

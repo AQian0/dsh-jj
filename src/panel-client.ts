@@ -52,7 +52,8 @@ interface ClientContext {
 /** Translation dictionaries; both baselines are required by the client locale service. */
 const DICTIONARIES: Record<string, Record<string, string>> = {
   zh: {
-    title: 'Jujutsu',
+    title: 'Jujutsu 状态',
+    guideDescription: '工作副本、栈、工作区与书签',
     refresh: '刷新',
     loading: '正在读取 jj 状态…',
     unavailable: '暂无可显示的内容（这个会话可能不在 jj 仓库里）。',
@@ -80,7 +81,8 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     conflicts: '冲突',
   },
   en: {
-    title: 'Jujutsu',
+    title: 'Jujutsu status',
+    guideDescription: 'Working copy, stack, workspaces and bookmarks',
     refresh: 'Refresh',
     loading: 'Reading jj status…',
     unavailable: 'Nothing to show (this session may not be in a jj workspace).',
@@ -266,7 +268,7 @@ function JjPanelBody(props: TabProps): unknown {
   });
   const [overview, setOverview] = ReactImpl?.useState<Overview | undefined>(undefined) ?? [undefined, () => {}];
   const [reloading, setReloading] = ReactImpl?.useState(false) ?? [false, () => {}];
-  const [failed, setFailed] = ReactImpl?.useState(false) ?? [false, () => {}];
+  const [failure, setFailure] = ReactImpl?.useState<string | undefined>(undefined) ?? [undefined, () => {}];
 
   ReactImpl?.useEffect(() => {
     if (typeof cwd !== 'string' || cwd.length === 0) {
@@ -277,15 +279,15 @@ function JjPanelBody(props: TabProps): unknown {
     void fetch(`api/jj.overview?cwd=${encodeURIComponent(cwd)}`, {
       headers: { accept: 'application/json' },
     })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((payload: unknown) => {
         if (alive) {
           setOverview(payload as Overview);
-          setFailed(false);
+          setFailure(undefined);
         }
       })
-      .catch(() => {
-        if (alive) setFailed(true);
+      .catch((error: unknown) => {
+        if (alive) setFailure(error instanceof Error ? error.message : String(error));
       });
     return () => {
       alive = false;
@@ -312,9 +314,11 @@ function JjPanelBody(props: TabProps): unknown {
         : t('workingCopy'),
     ),
   ];
-  if (failed) children.push(h('p', { style: STYLE.note, key: 'failed' }, t('failed')));
+  if (failure !== undefined) {
+    children.push(h('p', { style: STYLE.note, key: 'failed' }, `${t('failed')} (${failure})`));
+  }
   if (overview === undefined) {
-    children.push(h('p', { style: STYLE.note, key: 'loading' }, t('loading')));
+    if (failure === undefined) children.push(h('p', { style: STYLE.note, key: 'loading' }, t('loading')));
   } else if (overview.reason !== undefined || overview.workspace === undefined) {
     children.push(h('p', { style: STYLE.note, key: 'unavailable' }, overview.reason ?? t('unavailable')));
   } else {

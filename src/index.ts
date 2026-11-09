@@ -364,22 +364,6 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
       'dsh-jj: session heartbeats',
     );
   }
-  // Web panel (read-only): the routes exist only when the Host has a connection service
-  // and `uiPanel` is not `off`. Headless profiles simply have no `connection`, and a
-  // panel failure must never affect the session.
-  if (resolved.uiPanel === 'auto') {
-    const connection = readService<JjPanelRouteHost>('connection');
-    if (connection?.fetch !== undefined && typeof connection.fetch.register === 'function') {
-      try {
-        const disposePanel = registerJjPanelRoutes(connection, { service: jjService, enabled: true });
-        if (typeof registerEffect === 'function') {
-          registerEffect.call(ctx, () => disposePanel, 'dsh-jj: panel routes');
-        }
-      } catch {
-        // A missing/broken route registry degrades the panel, never the runtime row.
-      }
-    }
-  }
   // The service set of a profile is not ordered: the Cordis loader boots every bundle
   // row concurrently and a row only waits for the services it declares in `inject`.
   // Reading `systemPrompt` once during `apply` would silently skip the jj session
@@ -405,6 +389,43 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
       inject.call(ctx, ['systemPrompt'], installPromptContext);
     } catch {
       if (typeof effect === 'function') effect.call(ctx, installPromptContext, 'dsh-jj: jj prompt context');
+    }
+  }
+  // Web panel (read-only): the routes exist only when the Host has a connection service
+  // and `uiPanel` is not `off`. Headless profiles simply have no `connection`, and a
+  // panel failure must never affect the session.
+  //
+  // The service set is not ordered: this row applies early (the base bundle), while the
+  // Web app's `connection` row applies later, so reading it once here was a race that
+  // left the panel routes unregistered and the tab showing "could not read jj status".
+  // A child fiber through `ctx.inject` installs the routes as soon as `connection`
+  // appears (and re-installs them after a service reload), exactly like `systemPrompt`.
+  if (resolved.uiPanel === 'auto') {
+    const installPanelRoutes = (): (() => void) => {
+      const connection = readService<JjPanelRouteHost>('connection');
+      if (connection?.fetch === undefined || typeof connection.fetch.register !== 'function') {
+        return () => {};
+      }
+      try {
+        return registerJjPanelRoutes(connection, { service: jjService, enabled: true });
+      } catch {
+        return () => {};
+      }
+    };
+    const hasConnection = (): boolean => {
+      const connection = readService<JjPanelRouteHost>('connection');
+      return connection?.fetch !== undefined && typeof connection.fetch.register === 'function';
+    };
+    if (hasConnection() || typeof inject !== 'function') {
+      if (typeof registerEffect === 'function') {
+        registerEffect.call(ctx, installPanelRoutes, 'dsh-jj: panel routes');
+      }
+    } else {
+      try {
+        inject.call(ctx, ['connection'], installPanelRoutes);
+      } catch {
+        // A missing connection degrades the panel, never the runtime row.
+      }
     }
   }
 }
