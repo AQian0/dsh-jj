@@ -49,21 +49,28 @@ interface ClientContext {
   effect?(body: () => unknown, label?: string): unknown;
 }
 
-/** Translation dictionaries; both baselines are required by the client locale service. */
+/**
+ * Translation dictionaries; both baselines are required by the client locale service.
+ *
+ * `zh` is the key-set source of truth and `en` must carry exactly the same keys; the
+ * build test enforces that so a missing translation can never surface as a raw key in
+ * either language. Only chrome copy lives here: jj's own operation/commit descriptions,
+ * workspace names and paths are data and stay in the language jj or the user wrote them.
+ */
 const DICTIONARIES: Record<string, Record<string, string>> = {
   zh: {
     title: 'Jujutsu 状态',
     guideDescription: '工作副本、栈、工作区与书签',
     refresh: '刷新',
     loading: '正在读取 jj 状态…',
-    unavailable: '暂无可显示的内容（这个会话可能不在 jj 仓库里）。',
+    unavailable: '暂无可显示的内容。',
     failed: '读取 jj 状态失败。',
     workingCopy: '工作副本',
     noDescription: '（无描述）',
     empty: '空',
     conflict: '冲突',
-    clean: '干净',
-    stale: 'stale',
+    modified: '有改动',
+    stale: '过期',
     stack: '栈',
     noStack: '没有待集成的提交。',
     workspaces: '工作区',
@@ -71,8 +78,9 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     bookmarks: '书签',
     noBookmarks: '没有书签。',
     operations: '操作日志',
-    changeId: 'change',
-    commitId: 'commit',
+    noOperations: '没有操作记录。',
+    changeId: '变更',
+    commitId: '提交',
     root: '路径',
     description: '描述',
     updated: '更新于',
@@ -90,20 +98,23 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     running: '执行中…',
     failedCall: '调用失败',
     noConflicts: '无冲突',
-    conflicts: '冲突',
+    conflictCount: '{count} 处冲突',
+    revisionCount: '{count} 条修订',
+    rebased: '已 rebase',
+    alreadyIntegrated: '已集成',
   },
   en: {
     title: 'Jujutsu status',
     guideDescription: 'Working copy, stack, workspaces and bookmarks',
     refresh: 'Refresh',
     loading: 'Reading jj status…',
-    unavailable: 'Nothing to show (this session may not be in a jj workspace).',
+    unavailable: 'Nothing to show.',
     failed: 'Could not read jj status.',
     workingCopy: 'Working copy',
     noDescription: '(no description)',
     empty: 'empty',
     conflict: 'conflict',
-    clean: 'clean',
+    modified: 'modified',
     stale: 'stale',
     stack: 'Stack',
     noStack: 'No commits to integrate.',
@@ -112,6 +123,7 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     bookmarks: 'Bookmarks',
     noBookmarks: 'No bookmarks.',
     operations: 'Operations',
+    noOperations: 'No operations.',
     changeId: 'change',
     commitId: 'commit',
     root: 'path',
@@ -131,7 +143,10 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     running: 'Running…',
     failedCall: 'Call failed',
     noConflicts: 'no conflicts',
-    conflicts: 'conflicts',
+    conflictCount: '{count} conflicts',
+    revisionCount: '{count} revisions',
+    rebased: 'rebased',
+    alreadyIntegrated: 'already integrated',
   },
 };
 
@@ -290,6 +305,11 @@ function h(type: unknown, props?: Readonly<Record<string, unknown>> | null, ...c
 /** Short change/commit id for display. */
 function shortId(id: string, length = 10): string {
   return id.length > length ? id.slice(0, length) : id;
+}
+
+/** Fill the `{count}` placeholder of a localized count template. */
+function countText(template: string, count: number): string {
+  return template.replace('{count}', String(count));
 }
 
 /** Local wall-clock time of a jj operation timestamp (best effort, never throws). */
@@ -471,13 +491,17 @@ function JjPanelBody(props: TabProps): unknown {
       ),
     );
   } else if (overview.reason !== undefined || overview.workspace === undefined) {
+    // Keep the Host's diagnosis (jj's own wording) as a data detail under localized
+    // chrome, so an unavailable panel never opens with an untranslated sentence.
     bodyChildren.push(
       h(
         'div',
         { className: 'dshjj-empty' },
         h('span', { className: 'dshjj-empty-icon' }, 'jj'),
-        h('span', null, overview.reason ?? t('unavailable')),
-        h('span', { className: 'dshjj-note' }, t('emptyHint')),
+        h('span', null, t('unavailable')),
+        overview.reason === undefined
+          ? h('span', { className: 'dshjj-note' }, t('emptyHint'))
+          : h('span', { className: 'dshjj-note', title: overview.reason }, `${t('failedDetail')}: ${overview.reason}`),
       ),
     );
   } else {
@@ -495,7 +519,7 @@ function JjPanelBody(props: TabProps): unknown {
       const stateChips: unknown[] = [];
       if (copy.empty) stateChips.push(chip(t('empty'), 'muted'));
       if (copy.conflict) stateChips.push(chip(t('conflict'), 'error'));
-      if (!copy.empty && !copy.conflict) stateChips.push(chip(t('clean'), 'brand'));
+      if (!copy.empty && !copy.conflict) stateChips.push(chip(t('modified'), 'brand'));
       if (copy.stale === 'yes') stateChips.push(chip(t('stale'), 'warn'));
       bodyChildren.push(
         h(
@@ -623,7 +647,7 @@ function JjPanelBody(props: TabProps): unknown {
         Section,
         { title: t('operations'), count: overview.operations.length, defaultOpen: false },
         overview.operations.length === 0
-          ? h('p', { className: 'dshjj-note' }, t('empty'))
+          ? h('p', { className: 'dshjj-note' }, t('noOperations'))
           : h(
               'div',
               { className: 'dshjj-ops' },
@@ -737,7 +761,6 @@ function toolCard(props: ToolViewProps, title: string, summary: string, lines: r
 /** `jj_status` card: where the working copy is, plus the diff summary when asked for. */
 function JjStatusCard(props: ToolViewProps): unknown {
   const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
-  const args = toolArgs(props.block);
   const result = toolResult(props.block);
   const changeId = typeof result?.['changeId'] === 'string' ? shortId(result['changeId']) : '';
   const description = typeof result?.['description'] === 'string' ? result['description'] : '';
@@ -746,7 +769,6 @@ function JjStatusCard(props: ToolViewProps): unknown {
   if (result?.['conflict'] === true) state.push(t('conflict'));
   const lines: string[] = [];
   if (typeof result?.['diffStat'] === 'string') lines.push(result['diffStat'].split('\n')[0] ?? '');
-  if (args?.['details'] === true) lines.push(t('workingCopy'));
   return toolCard(props, t('statusCard'), [changeId, description, ...state].filter(Boolean).join(' · '), lines);
 }
 
@@ -757,7 +779,7 @@ function JjLogCard(props: ToolViewProps): unknown {
   const revset = typeof args?.['revset'] === 'string' ? args['revset'] : '@ | @-';
   const result = toolResult(props.block);
   const count = Array.isArray(result?.['changes']) ? result['changes'].length : undefined;
-  return toolCard(props, t('logCard'), revset, count === undefined ? [] : [`${count} revisions`]);
+  return toolCard(props, t('logCard'), revset, count === undefined ? [] : [countText(t('revisionCount'), count)]);
 }
 
 /** `jj_workspace_list` card: how many workspaces share the repository. */
@@ -782,8 +804,8 @@ function JjHandoffCard(props: ToolViewProps): unknown {
   const firstAction = recordOf(actions[0]);
   const reason = typeof firstAction?.['reason'] === 'string' ? firstAction['reason'] : '';
   return toolCard(props, t('handoffCard'), destination, [
-    rebased ? 'rebased' : 'already integrated',
-    conflicts > 0 ? `${conflicts} ${t('conflicts')}` : t('noConflicts'),
+    rebased ? t('rebased') : t('alreadyIntegrated'),
+    conflicts > 0 ? countText(t('conflictCount'), conflicts) : t('noConflicts'),
     reason,
   ]);
 }
@@ -843,8 +865,10 @@ function apply(ctx: ClientContext): void {
   }
   const registerBody = (): unknown =>
     ctx.slots?.register?.({ name: 'sidebar.right.pane.tab', key: JJ_TAB_ID, locale: JJ_LOCALE_NS }, JjPanelBody);
+  // The title seat is a separate slot: without its own `locale` it receives no `t` and
+  // falls back to the English dictionary while the body is localized.
   const registerTitle = (): unknown =>
-    ctx.slots?.register?.({ name: 'sidebar.right.pane.tab.title', key: JJ_TAB_ID }, JjPanelTitle);
+    ctx.slots?.register?.({ name: 'sidebar.right.pane.tab.title', key: JJ_TAB_ID, locale: JJ_LOCALE_NS }, JjPanelTitle);
   try {
     if (typeof ctx.slots?.inject === 'function') {
       ctx.slots.inject('sidebar.right.pane.tab', registerBody);

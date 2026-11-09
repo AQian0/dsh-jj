@@ -675,23 +675,63 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   );
 
   // The tab registration goes through the public sidebar-right API and tolerates a host
-  // that only provides some of the services.
+  // that only provides some of the services. `bind` reads the registered dictionary so
+  // the assertions below exercise the same lookup the real locale service performs.
   const tabs: Record<string, unknown>[] = [];
-  const slots: { name: string; key: string; component: unknown }[] = [];
+  const slots: { name: string; key: string; locale: unknown; component: unknown }[] = [];
   const locales: string[] = [];
+  const dictionariesByNamespace: Record<string, Record<string, Record<string, string>>> = {};
+  const translate = (namespace: string, key: string): string => dictionariesByNamespace[namespace]?.zh?.[key] ?? key;
   (clientModule.apply as (ctx: unknown) => void)({
     locale: {
-      register: (namespace: string) => locales.push(namespace),
-      bind: () => (key: string) => key,
+      register: (namespace: string, dictionaries: Record<string, Record<string, string>>) => {
+        locales.push(namespace);
+        dictionariesByNamespace[namespace] = dictionaries;
+      },
+      bind: (namespace: string) => (key: string) => translate(namespace, key),
     },
     sidebarRightTabs: { register: (definition: Record<string, unknown>) => tabs.push(definition) },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
       register: (definition: Record<string, unknown>, component: unknown) =>
-        slots.push({ name: String(definition.name), key: String(definition.key), component }),
+        slots.push({
+          name: String(definition.name),
+          key: String(definition.key),
+          locale: definition['locale'],
+          component,
+        }),
     },
   });
   assert.deepEqual(locales, ['jjPanel']);
+
+  // Both baseline dictionaries are registered with the same keys, and the Chinese copy
+  // no longer leaks English UI terms such as "change", "commit" or "stale".
+  const dictionaries = dictionariesByNamespace['jjPanel'];
+  assert.ok(dictionaries !== undefined, 'the panel registers its jjPanel dictionaries');
+  const zhDictionary = dictionaries['zh'];
+  const enDictionary = dictionaries['en'];
+  assert.ok(zhDictionary !== undefined && enDictionary !== undefined, 'both locale baselines exist');
+  assert.deepEqual(
+    Object.keys(zhDictionary).sort(),
+    Object.keys(enDictionary).sort(),
+    'zh and en must carry exactly the same keys',
+  );
+  for (const [key, value] of Object.entries(zhDictionary)) {
+    assert.equal(typeof value, 'string', `zh.${key} is a string`);
+    assert.ok(value.length > 0, `zh.${key} is not empty`);
+  }
+  for (const [key, value] of Object.entries(enDictionary)) {
+    assert.equal(typeof value, 'string', `en.${key} is a string`);
+    assert.ok(value.length > 0, `en.${key} is not empty`);
+  }
+  assert.equal(zhDictionary['changeId'], '变更');
+  assert.equal(zhDictionary['commitId'], '提交');
+  assert.equal(zhDictionary['modified'], '有改动');
+  assert.equal(zhDictionary['stale'], '过期');
+  assert.equal(zhDictionary['noOperations'], '没有操作记录。');
+  assert.match(zhDictionary['conflictCount'] ?? '', /\{count\}/);
+  assert.match(zhDictionary['revisionCount'] ?? '', /\{count\}/);
+  const zhT = (key: string): string => zhDictionary[key] ?? key;
   assert.deepEqual(
     tabs.map((tab) => tab['kind']),
     ['jj'],
@@ -701,32 +741,39 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   // throws inside the registry and silently removes the tab from the UI.
   const tabDefinition = tabs[0] as Record<string, unknown>;
   assert.equal(typeof tabDefinition['title'], 'function', 'the tab type title is a function');
-  assert.equal((tabDefinition['title'] as () => string)(), 'title');
+  assert.equal((tabDefinition['title'] as () => string)(), 'Jujutsu 状态');
   const guide = tabDefinition['guide'] as { id: string; title: () => string; description?: () => string }[];
   assert.ok(Array.isArray(guide) && guide.length === 1, 'the guide is an array of entries');
   assert.equal(guide[0]?.id, 'jj');
   assert.equal(typeof guide[0]?.title, 'function');
-  assert.equal(guide[0]?.title(), 'title');
+  assert.equal(guide[0]?.title(), 'Jujutsu 状态');
   assert.equal(typeof guide[0]?.description, 'function');
-  assert.equal(guide[0]?.description?.(), 'guideDescription');
+  assert.equal(guide[0]?.description?.(), '工作副本、栈、工作区与书签');
+  // The title seat is separate from the body: it must carry the panel namespace too, or
+  // its chip falls back to English while the body renders Chinese.
   assert.deepEqual(
-    slots.map((slot) => ({ name: slot.name, key: slot.key })),
+    slots.map((slot) => ({ name: slot.name, key: slot.key, locale: slot.locale })),
     [
-      { name: 'sidebar.right.pane.tab', key: 'jj-panel' },
-      { name: 'sidebar.right.pane.tab.title', key: 'jj-panel' },
-      { name: 'tool.call.toolview', key: 'jj_status' },
-      { name: 'tool.call.toolview', key: 'jj_log' },
-      { name: 'tool.call.toolview', key: 'jj_workspace_list' },
-      { name: 'tool.call.toolview', key: 'jj_handoff' },
+      { name: 'sidebar.right.pane.tab', key: 'jj-panel', locale: 'jjPanel' },
+      { name: 'sidebar.right.pane.tab.title', key: 'jj-panel', locale: 'jjPanel' },
+      { name: 'tool.call.toolview', key: 'jj_status', locale: 'jjPanel' },
+      { name: 'tool.call.toolview', key: 'jj_log', locale: 'jjPanel' },
+      { name: 'tool.call.toolview', key: 'jj_workspace_list', locale: 'jjPanel' },
+      { name: 'tool.call.toolview', key: 'jj_handoff', locale: 'jjPanel' },
     ],
   );
-  // The body renders its page shell even before any data arrives (no session cwd here).
+  // The body renders its page shell even before any data arrives (no session cwd here),
+  // and its chrome follows the registered Chinese dictionary.
   const body = slots[0]?.component as (props: Record<string, unknown>) => FakeElement;
-  const tree = body({ sessionId: 'session-1', useSessions: () => undefined, t: (key: string) => key });
+  const tree = body({ sessionId: 'session-1', useSessions: () => undefined, t: zhT });
   assert.equal(tree.props['className'], 'dshjj');
   assert.ok(Array.isArray(tree.props['children']) && (tree.props['children'] as unknown[]).length > 0);
+  const treeText = JSON.stringify(tree.props);
+  assert.match(treeText, /Jujutsu 状态/, 'the body header uses the localized title');
+  assert.match(treeText, /刷新/, 'the refresh control is localized');
   const title = slots[1]?.component as (props: Record<string, unknown>) => unknown;
-  assert.equal(title({ t: (key: string) => key }), 'title');
+  assert.equal(title({ t: zhT }), 'Jujutsu 状态');
+  assert.equal(title({ t: (key: string) => key }), 'title', 'an unbound title still renders its key');
 
   // Each tool card renders a compact summary from the recorded args/result JSON.
   const statusCard = slots[2]?.component as (props: Record<string, unknown>) => FakeElement;
@@ -754,10 +801,38 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   assert.match(statusText, /abcdefghij/, 'the change id is summarized (short form)');
   assert.match(statusText, /feat: seed/, 'the description is summarized');
 
+  // Card lines go through the same dictionary; a hardcoded English fragment here would
+  // reappear in the Chinese UI.
+  const logCard = slots[3]?.component as (props: Record<string, unknown>) => FakeElement;
+  const logKeys = new Set<string>();
+  const logTree = logCard({
+    phase: 'result',
+    t: (key: string) => {
+      logKeys.add(key);
+      return zhT(key);
+    },
+    block: {
+      call: { name: 'jj_log', argsRaw: JSON.stringify({ revset: '@ | @-' }) },
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ changes: [{ changeId: 'a' }, { changeId: 'b' }, { changeId: 'c' }] }),
+        },
+      ],
+      isError: false,
+    },
+  });
+  assert.ok(logKeys.has('revisionCount'), 'the log card localizes its revision count');
+  assert.match(JSON.stringify(logTree.props), /3 条修订/);
+
   const handoffCard = slots[5]?.component as (props: Record<string, unknown>) => FakeElement;
+  const handoffKeys = new Set<string>();
   const handoffTree = handoffCard({
     phase: 'result',
-    t: (key: string) => key,
+    t: (key: string) => {
+      handoffKeys.add(key);
+      return key;
+    },
     block: {
       call: { name: 'jj_handoff', argsRaw: '{}' },
       content: [
@@ -775,6 +850,26 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
     },
   });
   assert.match(JSON.stringify(handoffTree.props), /resolve the conflict/, 'the recommended action is shown');
+  assert.ok(handoffKeys.has('rebased'), 'the handoff card localizes its rebase state');
+  assert.ok(handoffKeys.has('conflictCount'), 'the handoff card localizes its conflict count');
+
+  const integratedTree = handoffCard({
+    phase: 'result',
+    t: zhT,
+    block: {
+      call: { name: 'jj_handoff', argsRaw: '{}' },
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ destination: 'trunk()', rebased: false, conflicts: [{ changeId: 'x' }] }),
+        },
+      ],
+      isError: false,
+    },
+  });
+  const integratedText = JSON.stringify(integratedTree.props);
+  assert.match(integratedText, /已集成/, 'an already-integrated hand-off is localized');
+  assert.match(integratedText, /1 处冲突/, 'the localized conflict count fills its placeholder');
 
   // A malformed payload degrades to a title-only card instead of throwing.
   assert.doesNotThrow(() =>

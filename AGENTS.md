@@ -327,6 +327,11 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - UI 遵循 DSH 官方风格:只用 `--dsw-*`/`--dsh-*` 设计令牌、scoped CSS + 唯一类前缀、roving 的圆角标度、
       hover 仅在 `@media (hover: hover)`、`aria-*` 状态跟随、主题只靠令牌;组件优先复用
       `@deepseek-ai/dsh-client-ui-primitives`(Button/Tooltip/HoverCard/Icon 等),不引第三方图标或自造按钮。
+    - 面板文案必须走 `ctx.locale.register('jjPanel', { zh, en })` + 框架注入的 `t()`;`sidebar.right.pane.tab.title`
+      的 slot 注册**必须**带 `locale: 'jjPanel'`——它是独立于正文的 slot,漏掉时 tab chip 会退回英文而正文仍是中文。
+      `zh` 是键集基准,`en` 必须同键;文案里的 `{count}` 占位符由客户端 `countText` 填充。jj 的 operation 描述、
+      commit 描述、workspace 名与路径是数据,不翻译。`test/build.test.ts` 断言 tab/guide 标题、toolview 的 slot
+      locale、zh/en 键集与关键中文文案,新增卡片文案时同步补断言。
     - 正文是会话作用域的 slot 组件:从 props 取 `sessionId` 与 `useSessions`(选择 `byId[sessionId].cwd`),
       再 `fetch('api/jj.overview?cwd=…')`;没有 cwd 时只显示加载态。所有网络与渲染失败都降级为一句说明,
       不得抛出。

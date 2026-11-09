@@ -160,6 +160,7 @@ Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Juju
 - 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、待集成栈（`::@ ~ ::immutable_heads()`，最多 20 条）、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，所有读取都用 `--ignore-working-copy`（包括栈的 `jj log`），打开面板不会触发工作副本快照。
 - 面板读取失败（jj 缺失、目录不是 jj workspace、元数据损坏）时返回 `enabled: true` + `reason`，界面上是一句说明，不会报错也不会影响会话。
 - 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。面板正文按「工作副本 → 栈 → 工作区 → 书签 → 操作日志」分区渲染，并用会话作用域的 slot props（`sessionId` + `useSessions`）取得当前目录。
+- 面板文案统一走 DSH 的 client locale（`jjPanel` 命名空间，注册 `zh` / `en` 字典）：guide 入口、右侧栏 tab 标题、正文与四个工具卡片共用同一份词典，tab 标题 slot 也绑定该命名空间，因此切换语言时 tab 与正文保持同一种语言。jj 的 operation 描述、commit 描述、workspace 名与路径属于数据，保持 jj 或用户写入时的原文；Host 返回的诊断也只在本地化的「原因」标签后作为原文展示。zh 词典里的 change / commit / stale 等标签已统一为「变更 / 提交 / 过期」，非空工作副本显示「有改动」而不是「干净」。
 - `uiPanel: off` 完全关闭面板：路由只回 `enabled: false` 且不读仓库，客户端也不会挂载 tab。headless profile 没有 `connection` 服务，路由根本不会注册。
 - 同一份客户端 bundle 还为四个工具注册了 `tool.call.toolview` 卡片（key 就是 wire 工具名）：`jj_status` 显示 change 短 id、描述与空/冲突标记（`details: true` 时多一行 diff 摘要）、`jj_log` 显示 revset 与命中条数、`jj_workspace_list` 列出工作区名、`jj_handoff` 显示目标、是否 rebase、冲突数与 `nextActions` 的第一条理由。卡片只做摘要，完整 JSON 仍在通用调用视图里；参数或结果不是合法 JSON 时退化为只有标题的行，不会抛错。
 
