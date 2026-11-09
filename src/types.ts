@@ -38,6 +38,26 @@ export interface JjWorkspaceInfo {
   readonly root: string;
 }
 
+/**
+ * One workspace with the state of its working-copy change.
+ *
+ * Produced by `JjOperations.workspaceStates` from a single `jj workspace list` call.
+ * `stale` is `'unknown'` for any workspace this session is not in: jj only reveals
+ * staleness by loading the checkout, and that read snapshots the working copy, so a
+ * read-only listing must not claim either answer.
+ */
+export interface JjWorkspaceState extends JjWorkspaceInfo {
+  /** True for the workspace this call runs in (the only one whose staleness is known). */
+  readonly current: boolean;
+  readonly changeId: string;
+  readonly commitId: string;
+  /** First line of the change description (empty when undescribed). */
+  readonly description: string;
+  readonly empty: boolean;
+  readonly conflict: boolean;
+  readonly stale: 'no' | 'unknown';
+}
+
 /** One jj change, as parsed from the JSON templates (contract §5.3). */
 export interface JjChange {
   readonly changeId: string;

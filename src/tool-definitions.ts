@@ -670,8 +670,15 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_list',
       description:
-        'List the Jujutsu (jj) workspaces of this repository. This is jj, not git: each workspace is a separate jj working copy with its own current change (@), registered with jj — not a git worktree.',
-      parameters: {},
+        'List the Jujutsu (jj) workspaces of this repository. This is jj, not git: each workspace is a separate jj working copy with its own current change (@), registered with jj — not a git worktree. Pass `detail: "full"` to also get each workspace\'s @ change id, description, empty/conflict state and whether it is the current one; the listing never snapshots any working copy.',
+      parameters: {
+        detail: {
+          type: 'string',
+          enum: ['basic', 'full'],
+          description:
+            'basic (default): name, root and which workspace is current. full: additionally the @ change id/commit id, first description line, empty/conflict flags and staleness of the current workspace.',
+        },
+      },
       output: {
         schema: {
           type: 'object',
@@ -687,6 +694,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
                   name: { type: 'string', required: true },
                   root: { type: 'string', required: true },
                   isCurrent: { type: 'boolean', required: true },
+                  changeId: { type: 'string' },
+                  commitId: { type: 'string' },
+                  description: { type: 'string' },
+                  empty: { type: 'boolean' },
+                  conflict: { type: 'boolean' },
+                  stale: { type: 'string', enum: ['yes', 'no', 'unknown'] },
                 },
               },
             },
@@ -695,16 +708,34 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         },
         render: (_args, value) => textRender(value),
       },
-      async execute(_args, exec) {
+      async execute(args, exec) {
         const { cwd, descriptor } = await openWorkspace(exec);
+        const currentWorkspace = descriptor.workspaceName ?? 'default';
+        if (args.detail === 'full') {
+          const states = await operations.workspaceStates(cwd, exec.signal);
+          return {
+            workspaces: states.map((state) => ({
+              name: state.name,
+              root: state.root,
+              isCurrent: state.current,
+              changeId: state.changeId,
+              commitId: state.commitId,
+              description: state.description,
+              empty: state.empty,
+              conflict: state.conflict,
+              stale: state.stale,
+            })),
+            currentWorkspace,
+          };
+        }
         const workspaces = await operations.workspaceList(cwd, exec.signal);
         return {
           workspaces: workspaces.map((workspace) => ({
             name: workspace.name,
             root: workspace.root,
-            isCurrent: workspace.name === (descriptor.workspaceName ?? 'default'),
+            isCurrent: workspace.name === currentWorkspace,
           })),
-          currentWorkspace: descriptor.workspaceName ?? 'default',
+          currentWorkspace,
         };
       },
     }),

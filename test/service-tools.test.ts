@@ -2266,3 +2266,46 @@ test('jj_workspace_update_stale is a no-op on a fresh workspace and returns @', 
   assert.equal(typeof value.change.changeId, 'string');
   assert.equal(value.change.currentWorkingCopy, true);
 });
+
+test('operation layer: workspaceStates lists every workspace with its @ change in one call', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-workspace-states');
+  const created = await operations.workspaceAdd(repo, join(fx.root, 'ws-state'), 'state-ws', [], undefined, undefined);
+  const states = await operations.workspaceStates(repo);
+  assert.equal(states.length, 2, 'both workspaces are listed');
+  const current = states.find((state) => state.current);
+  const other = states.find((state) => !state.current);
+  assert.ok(current !== undefined && other !== undefined, 'exactly one workspace is current');
+  assert.equal(current.name, 'default');
+  assert.equal(current.stale, 'no', 'a readable current working copy is fresh');
+  assert.deepEqual([...current.changeId], [...(await operations.readAt(repo)).changeId]);
+  assert.equal(other.name, 'state-ws');
+  assert.equal(other.changeId.length > 0, true, 'the sibling reports its own @ change');
+  assert.equal(other.stale, 'unknown', 'sibling staleness needs a snapshot, so it is not claimed');
+  assert.equal(other.empty, true);
+  assert.equal(created.name, 'state-ws');
+});
+
+test('jj_workspace_list detail full validates its output schema', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-workspace-list-full');
+  fx.cwd = repo;
+  await operations.workspaceAdd(repo, join(fx.root, 'ws-full'), 'full-ws', [], undefined, undefined);
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  const definition = definitions.get('jj_workspace_list')!;
+  const value = (await definition.execute({ detail: 'full' }, fakeExec())) as {
+    workspaces: Array<Record<string, unknown>>;
+    currentWorkspace: string;
+  };
+  assert.deepEqual(
+    validateJsonSchemaValue(definition.output.schema as JsonSchemaNode, value),
+    [],
+    'full listing satisfies its schema',
+  );
+  assert.equal(value.currentWorkspace, 'default');
+  assert.equal(value.workspaces.length, 2);
+  for (const workspace of value.workspaces) {
+    assert.equal(typeof workspace.changeId, 'string');
+    assert.equal(typeof workspace.empty, 'boolean');
+    assert.equal(typeof workspace.stale, 'string');
+  }
+});

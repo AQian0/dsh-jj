@@ -29,6 +29,7 @@ import {
   changeFromRecord,
   isRewritableChange,
   parseChangeLines,
+  parseWorkspaceStates,
   parseJsonLine,
   TemplateParseError,
   TPL_BOOKMARK_LIST,
@@ -38,10 +39,11 @@ import {
   TPL_LOG,
   TPL_OP_LOG,
   TPL_STATUS,
+  TPL_WORKSPACE_LIST_STATE,
   TPL_WORKSPACE_LIST_TAB,
   type JjChangeRecord,
 } from './jj-templates.ts';
-import type { JjOperation, JjRunResult } from './types.ts';
+import type { JjOperation, JjRunResult, JjWorkspaceState } from './types.ts';
 
 /** How `jj rebase` selects the revisions to move. */
 export type JjRebaseMode = 'revisions' | 'source' | 'branch';
@@ -1203,6 +1205,46 @@ export class JjOperations {
       workspaces.push({ name, root: absoluteRoot });
     }
     return workspaces;
+  }
+
+  /**
+   * Every workspace of this repository with the state of its working-copy change.
+   *
+   * One `jj workspace list -T <TPL_WORKSPACE_LIST_STATE> --ignore-working-copy` call:
+   * the listing never snapshots any working copy, so it is safe to run per turn from a
+   * panel or a tool. The workspace this call runs in is marked `current` by comparing
+   * its target change with `@`; every other workspace reports `stale: 'unknown'`
+   * because telling otherwise requires loading (and snapshotting) that checkout.
+   *
+   * @param cwd - any directory inside the workspace to query.
+   * @param signal - cancellation signal.
+   * @returns one state per workspace, in jj's order.
+   */
+  async workspaceStates(cwd: string, signal?: AbortSignal): Promise<readonly JjWorkspaceState[]> {
+    const argv = ['workspace', 'list', '--ignore-working-copy', '-T', TPL_WORKSPACE_LIST_STATE];
+    const result = await this.run(cwd, argv, signal);
+    const records = parseWorkspaceStates(result.stdout, argv);
+    let currentChangeId: string | undefined;
+    try {
+      currentChangeId = (await this.readAt(cwd, signal)).changeId;
+    } catch {
+      // A stale or unreadable working copy still lists other workspaces; "current" then
+      // stays unresolved instead of failing the whole listing.
+      currentChangeId = undefined;
+    }
+    return records.map((record) => ({
+      name: record.name,
+      root: record.root,
+      current: currentChangeId !== undefined && record.changeId === currentChangeId,
+      changeId: record.changeId,
+      commitId: record.commitId,
+      description: record.description,
+      empty: record.empty,
+      conflict: record.conflict,
+      // Only this workspace's readability is known: a successful `@` read proves it is
+      // fresh, and a failed one leaves the question open (a stale checkout refuses reads).
+      stale: currentChangeId !== undefined && record.changeId === currentChangeId ? 'no' : 'unknown',
+    }));
   }
 
   /**

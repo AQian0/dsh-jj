@@ -61,6 +61,73 @@ export const TPL_LOG =
 export const TPL_WORKSPACE_LIST_TAB = 'json(name) ++ "\\t" ++ json(root) ++ "\\n"';
 
 /**
+ * `jj workspace list` template that carries each workspace's working-copy state.
+ *
+ * One line of JSON per workspace: identity (`name`, `root`) plus what the panel and the
+ * `full` listing need — the target change id, commit id, first description line, and
+ * whether that change is empty or conflicted. jj templates have no object literals, so
+ * the JSON is assembled from string pieces exactly like {@link TPL_LOG}.
+ */
+export const TPL_WORKSPACE_LIST_STATE =
+  '"{\\"name\\":" ++ json(name) ++ ",\\"root\\":" ++ json(root) ++ ",\\"change_id\\":" ++ json(target.change_id()) ++ ",\\"commit_id\\":" ++ json(target.commit_id()) ++ ",\\"description\\":" ++ json(target.description().first_line()) ++ ",\\"empty\\":" ++ json(target.empty()) ++ ",\\"conflict\\":" ++ json(target.conflict()) ++ "}\\n"';
+
+/** One workspace's identity plus the state of the change its working copy is on. */
+export interface JjWorkspaceStateRecord {
+  readonly name: string;
+  /** Absolute workspace root as reported by the template's `root` field. */
+  readonly root: string;
+  readonly changeId: string;
+  readonly commitId: string;
+  readonly description: string;
+  readonly empty: boolean;
+  readonly conflict: boolean;
+}
+
+/**
+ * Parse {@link TPL_WORKSPACE_LIST_STATE} output.
+ *
+ * @param stdout - the command's standard output (one JSON object per line).
+ * @param argv - the command that produced it, for error messages.
+ * @returns one record per workspace, in jj's order.
+ * @throws TemplateParseError when a line is not a complete workspace record.
+ */
+export function parseWorkspaceStates(stdout: string, argv: readonly string[]): JjWorkspaceStateRecord[] {
+  const states: JjWorkspaceStateRecord[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line.trim().length === 0) continue;
+    let parsed: Record<string, unknown> | undefined;
+    try {
+      parsed = asRecord(JSON.parse(line));
+    } catch {
+      parsed = undefined;
+    }
+    const name = parsed?.name;
+    const root = parsed?.root;
+    const changeId = parsed?.change_id;
+    const commitId = parsed?.commit_id;
+    const description = parsed?.description;
+    const empty = parsed?.empty;
+    const conflict = parsed?.conflict;
+    if (
+      typeof name !== 'string' ||
+      typeof root !== 'string' ||
+      typeof changeId !== 'string' ||
+      typeof commitId !== 'string' ||
+      typeof description !== 'string' ||
+      typeof empty !== 'boolean' ||
+      typeof conflict !== 'boolean'
+    ) {
+      throw new TemplateParseError(
+        `\`jj ${argv.join(' ')}\` produced an unparseable workspace record: ${bound(line, 256).text}`,
+        { argv, stderr: '', stdout: bound(stdout, 512).text },
+      );
+    }
+    states.push({ name, root, changeId, commitId, description, empty, conflict });
+  }
+  return states;
+}
+
+/**
  * `jj op log` template (contract §7.3.8): `json(self)` exposes id/description/
  * time/username/hostname/workspace_name/is_snapshot/attributes.
  */
