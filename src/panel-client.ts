@@ -71,6 +71,18 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     bookmarks: '书签',
     noBookmarks: '没有书签。',
     operations: '操作日志',
+    changeId: 'change',
+    commitId: 'commit',
+    root: '路径',
+    description: '描述',
+    updated: '更新于',
+    refreshing: '刷新中…',
+    copy: '复制',
+    copied: '已复制',
+    retry: '重试',
+    failedDetail: '原因',
+    emptyHint: '这个会话的目录不在 jj 工作区里，或者 jj 服务不可用。',
+    readOnly: '只读面板 · 数据来自 jj --ignore-working-copy',
     statusCard: '工作副本',
     logCard: '提交历史',
     workspacesCard: '工作区清单',
@@ -100,6 +112,18 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     bookmarks: 'Bookmarks',
     noBookmarks: 'No bookmarks.',
     operations: 'Operations',
+    changeId: 'change',
+    commitId: 'commit',
+    root: 'path',
+    description: 'description',
+    updated: 'updated',
+    refreshing: 'Refreshing…',
+    copy: 'copy',
+    copied: 'copied',
+    retry: 'Retry',
+    failedDetail: 'reason',
+    emptyHint: 'This session is not in a jj workspace, or the jj service is unavailable.',
+    readOnly: 'Read-only panel · data from jj --ignore-working-copy',
     statusCard: 'Working copy',
     logCard: 'History',
     workspacesCard: 'Workspaces',
@@ -166,58 +190,94 @@ interface TabProps {
   readonly t?: (key: string) => string;
 }
 
-/** Design tokens only: the official theme owns every colour, size and radius. */
-const STYLE = {
-  page: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '10px',
-    padding: '10px 12px',
-    color: 'var(--dsw-alias-label-primary)',
-    fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
-    lineHeight: 1.5,
-    minHeight: 0,
-    overflow: 'auto',
-  },
-  sectionTitle: {
-    color: 'var(--dsw-alias-label-secondary)',
-    fontSize: '12px',
-    margin: '2px 0 0',
-  },
-  row: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: '6px',
-    borderRadius: 'var(--dsw-radius-md)',
-    padding: '4px 6px',
-  },
-  mono: {
-    fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
-    color: 'var(--dsw-alias-label-secondary)',
-  },
-  chip: {
-    borderRadius: 'var(--dsw-radius-sm)',
-    border: '0.5px solid var(--dsw-alias-border-l3)',
-    color: 'var(--dsw-alias-label-tertiary)',
-    fontSize: '12px',
-    padding: '0 4px',
-  },
-  note: {
-    color: 'var(--dsw-alias-label-tertiary)',
-    fontSize: '12px',
-    margin: 0,
-  },
-  action: {
-    alignSelf: 'flex-start',
-    borderRadius: 'var(--dsw-radius-sm)',
-    border: '0.5px solid var(--dsw-alias-border-l3)',
-    background: 'none',
-    color: 'var(--dsw-alias-label-secondary)',
-    fontSize: '12px',
-    padding: '2px 8px',
-    cursor: 'pointer',
-  },
-} as const;
+/**
+ * Panel styles, injected once per page. Every colour, radius and font comes from the
+ * DSH design tokens (`--dsw-*` / `--dsh-*`), so the panel follows the app theme instead
+ * of shipping its own palette.
+ */
+const PANEL_STYLE_ID = 'dshjj-panel-style';
+const PANEL_CSS = `
+.dshjj{display:flex;flex-direction:column;height:100%;min-height:0;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.5}
+.dshjj *{box-sizing:border-box}
+.dshjj-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:.5px solid var(--dsw-alias-border-l3);flex:none}
+.dshjj-head-main{display:flex;flex-direction:column;min-width:0;flex:1;gap:1px}
+.dshjj-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.dshjj-head-sub{font-size:11px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsh-font-family-code,ui-monospace,monospace)}
+.dshjj-updated{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dshjj-body{display:flex;flex-direction:column;gap:14px;padding:10px 12px 16px;overflow:auto;min-height:0}
+.dshjj-sec{display:flex;flex-direction:column;gap:4px;min-width:0}
+.dshjj-sec-head{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;cursor:pointer;user-select:none;padding:2px 0;border-radius:var(--dsw-radius-sm)}
+.dshjj-sec-head:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.dshjj-chevron{display:inline-block;width:10px;color:var(--dsw-alias-label-tertiary);transition:transform .12s ease;font-size:10px}
+.dshjj-chevron[data-open=true]{transform:rotate(90deg)}
+.dshjj-count{margin-left:auto;color:var(--dsw-alias-label-tertiary);font-weight:400;font-variant-numeric:tabular-nums}
+.dshjj-sec-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dshjj-stack{display:flex;flex-direction:column;min-width:0}
+.dshjj-stackrow{display:grid;grid-template-columns:16px 1fr;column-gap:8px;min-width:0}
+.dshjj-graph{display:flex;flex-direction:column;align-items:center;min-height:100%}
+.dshjj-node{width:9px;height:9px;border-radius:50%;margin-top:6px;flex:none;background:var(--dsw-alias-border-l4);border:1.5px solid var(--dsw-alias-bg-base)}
+.dshjj-node[data-current=true]{background:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 22%,transparent)}
+.dshjj-node[data-conflict=true]{background:var(--dsw-alias-state-error-primary);box-shadow:none}
+.dshjj-node[data-empty=true]{background:transparent;border:1.5px dashed var(--dsw-alias-label-tertiary)}
+.dshjj-rail{flex:1;width:1.5px;background:var(--dsw-alias-border-l3);margin-top:2px}
+.dshjj-row{display:flex;flex-direction:column;gap:2px;padding:3px 6px;border-radius:var(--dsw-radius-sm);min-width:0}
+@media(hover:hover){.dshjj-row:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.dshjj-row-top{display:flex;align-items:center;gap:6px;min-width:0}
+.dshjj-desc{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.dshjj-desc[data-muted=true]{color:var(--dsw-alias-label-tertiary);font-weight:400;font-style:italic}
+.dshjj-row-sub{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+.dshjj-id{font-family:var(--dsh-font-family-code,ui-monospace,monospace);font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.dshjj-chip{font-size:11px;line-height:17px;padding:0 6px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-secondary);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.dshjj-chip[data-tone=brand]{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent)}
+.dshjj-chip[data-tone=error]{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
+.dshjj-chip[data-tone=warn]{color:var(--dsw-alias-state-warn-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 45%,transparent)}
+.dshjj-chip[data-tone=muted]{color:var(--dsw-alias-label-tertiary)}
+.dshjj-card{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);padding:8px 10px;display:flex;flex-direction:column;gap:5px;background:var(--dsw-alias-bg-layer-1);min-width:0}
+.dshjj-card[data-current=true]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent)}
+.dshjj-kv{display:flex;gap:8px;align-items:baseline;min-width:0}
+.dshjj-k{color:var(--dsw-alias-label-tertiary);font-size:11px;min-width:54px;flex:none}
+.dshjj-v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary)}
+.dshjj-v[data-mono=true]{font-family:var(--dsh-font-family-code,ui-monospace,monospace);font-size:11.5px}
+.dshjj-btn{border:.5px solid var(--dsw-alias-border-l3);background:none;color:var(--dsw-alias-label-secondary);border-radius:var(--dsw-radius-sm);font-size:12px;padding:2px 8px;cursor:pointer;line-height:18px}
+.dshjj-btn:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+@media(hover:hover){.dshjj-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.dshjj-copy{border:none;background:none;color:var(--dsw-alias-label-tertiary);cursor:pointer;font-size:11px;padding:0 2px;opacity:0;transition:opacity .12s ease}
+.dshjj-row:hover .dshjj-copy,.dshjj-copy:focus-visible{opacity:1}
+.dshjj-ops{display:grid;grid-template-columns:56px 1fr;column-gap:8px;row-gap:1px;font-size:12px;min-width:0}
+.dshjj-op-time{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;font-family:var(--dsh-font-family-code,ui-monospace,monospace);font-size:11px}
+.dshjj-op-desc{color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshjj-op-desc[data-snapshot=true]{color:var(--dsw-alias-label-tertiary)}
+.dshjj-note{color:var(--dsw-alias-label-tertiary);font-size:12px;margin:0}
+.dshjj-foot{color:var(--dsw-alias-label-tertiary);font-size:11px;padding-top:2px}
+.dshjj-skel{height:12px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);animation:dshjj-pulse 1.4s ease-in-out infinite}
+@keyframes dshjj-pulse{0%,100%{opacity:.5}50%{opacity:1}}
+.dshjj-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:48px 20px;text-align:center;color:var(--dsw-alias-label-secondary)}
+.dshjj-empty-icon{width:40px;height:40px;border-radius:var(--dsw-radius-lg);border:1px dashed var(--dsw-alias-border-l3);display:flex;align-items:center;justify-content:center;font-family:var(--dsh-font-family-code,ui-monospace,monospace);color:var(--dsw-alias-label-tertiary);font-size:14px}
+.dshjj-error{border:.5px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent);border-radius:var(--dsw-radius-md);padding:10px 12px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.dshjj-error-title{color:var(--dsw-alias-state-error-primary);font-weight:500}
+`;
+
+/** Structural view of the page globals the style injection needs (no DOM lib here). */
+interface PanelDom {
+  getElementById(id: string): unknown;
+  createElement(tag: string): { id: string; textContent: string };
+  head?: { appendChild(node: unknown): void };
+}
+
+/** Inject the panel stylesheet once; a missing DOM (tests) is a no-op. */
+function ensurePanelStyles(): void {
+  const doc = (globalThis as { document?: PanelDom }).document;
+  if (doc === undefined || typeof doc.createElement !== 'function' || doc.head === undefined) return;
+  try {
+    if (doc.getElementById(PANEL_STYLE_ID) !== null) return;
+    const style = doc.createElement('style');
+    style.id = PANEL_STYLE_ID;
+    style.textContent = PANEL_CSS;
+    doc.head.appendChild(style);
+  } catch {
+    // Styling is cosmetic: a blocked <style> must not blank the panel.
+  }
+}
 
 /** React implementation captured from the host module factory. */
 let ReactImpl: ReactLike | undefined;
@@ -228,37 +288,97 @@ function h(type: unknown, props?: Readonly<Record<string, unknown>> | null, ...c
 }
 
 /** Short change/commit id for display. */
-function shortId(id: string): string {
-  return id.length > 12 ? id.slice(0, 12) : id;
+function shortId(id: string, length = 10): string {
+  return id.length > length ? id.slice(0, length) : id;
 }
 
-/** One labelled row with an optional trailing chip. */
-function row(label: unknown, value: unknown, chip?: string): unknown {
+/** Local wall-clock time of a jj operation timestamp (best effort, never throws). */
+function timeOf(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+/** One pill. */
+function chip(text: string, tone: 'brand' | 'error' | 'warn' | 'muted' = 'muted'): unknown {
+  return h('span', { className: 'dshjj-chip', 'data-tone': tone }, text);
+}
+
+/** A key/value line inside a card. */
+function kv(label: string, value: string, mono = false): unknown {
   return h(
     'div',
-    { style: STYLE.row, key: String(label) },
-    h('span', { style: STYLE.mono }, label),
-    h(
-      'span',
-      { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-      value,
-    ),
-    chip === undefined ? null : h('span', { style: STYLE.chip }, chip),
+    { className: 'dshjj-kv' },
+    h('span', { className: 'dshjj-k', style: {} }, label),
+    h('span', { className: 'dshjj-v', 'data-mono': mono, title: value }, value),
   );
 }
 
 /**
- * Tab body: fetch the read-only overview and render the four sections.
+ * Copy-to-clipboard affordance for one id.
  *
- * The request is document-relative (the host serves the Web app from a route prefix) and
- * carries the session's working directory, which the framework exposes through the
- * session-scoped slot props. Every failure renders a short note instead of an error.
+ * @param props - the text, localized labels, and the copy button's visible state.
+ * @returns the button element.
+ */
+function CopyButton(props: { text: string; copyLabel: string; copiedLabel: string }): unknown {
+  const [copied, setCopied] = ReactImpl?.useState(false) ?? [false, () => {}];
+  const copy = (): void => {
+    const clipboard = (globalThis as { navigator?: { clipboard?: { writeText(text: string): Promise<void> } } })
+      .navigator?.clipboard;
+    if (clipboard === undefined) return;
+    void clipboard.writeText(props.text).then(
+      () => setCopied(true),
+      () => undefined,
+    );
+  };
+  return h(
+    'button',
+    { type: 'button', className: 'dshjj-copy', onClick: copy, title: props.text, 'aria-label': props.copyLabel },
+    copied ? props.copiedLabel : props.copyLabel,
+  );
+}
+
+/** One collapsible section with a count badge. */
+function Section(props: { title: string; count?: number; children?: unknown; defaultOpen?: boolean }): unknown {
+  const [open, setOpen] = ReactImpl?.useState(props.defaultOpen !== false) ?? [true, () => {}];
+  return h(
+    'section',
+    { className: 'dshjj-sec' },
+    h(
+      'div',
+      {
+        className: 'dshjj-sec-head',
+        role: 'button',
+        tabIndex: 0,
+        'aria-expanded': open,
+        onClick: () => setOpen(!open),
+        onKeyDown: (event: { key?: string }) => {
+          if (event.key === 'Enter' || event.key === ' ') setOpen(!open);
+        },
+      },
+      h('span', { className: 'dshjj-chevron', 'data-open': open, 'aria-hidden': 'true' }, '▶'),
+      h('span', null, props.title),
+      props.count === undefined ? null : h('span', { className: 'dshjj-count' }, String(props.count)),
+    ),
+    open ? h('div', { className: 'dshjj-sec-body' }, props.children) : null,
+  );
+}
+
+/**
+ * Tab body: the read-only Jujutsu panel.
+ *
+ * Layout: a sticky header (workspace + refresh), then the working-copy card, the change
+ * graph (rails, nodes, bookmark labels), sibling workspaces, bookmarks and the operation
+ * timeline. Data comes from `/api/jj.overview`; the layout is a pure render of that
+ * snapshot, and every failure renders an error card with a retry button instead of
+ * blanking the tab.
  *
  * @param props - slot props (`sessionId`, `useSessions`, `t`).
  * @returns the React element tree.
  */
 function JjPanelBody(props: TabProps): unknown {
   const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+  ensurePanelStyles();
   const fallbackSessions = (): unknown => undefined;
   const useSessions = props.useSessions ?? fallbackSessions;
   const cwd = useSessions((state) => {
@@ -269,6 +389,7 @@ function JjPanelBody(props: TabProps): unknown {
   const [overview, setOverview] = ReactImpl?.useState<Overview | undefined>(undefined) ?? [undefined, () => {}];
   const [reloading, setReloading] = ReactImpl?.useState(false) ?? [false, () => {}];
   const [failure, setFailure] = ReactImpl?.useState<string | undefined>(undefined) ?? [undefined, () => {}];
+  const [updated, setUpdated] = ReactImpl?.useState<string | undefined>(undefined) ?? [undefined, () => {}];
 
   ReactImpl?.useEffect(() => {
     if (typeof cwd !== 'string' || cwd.length === 0) {
@@ -276,14 +397,13 @@ function JjPanelBody(props: TabProps): unknown {
       return undefined;
     }
     let alive = true;
-    void fetch(`api/jj.overview?cwd=${encodeURIComponent(cwd)}`, {
-      headers: { accept: 'application/json' },
-    })
+    void fetch(`api/jj.overview?cwd=${encodeURIComponent(cwd)}`, { headers: { accept: 'application/json' } })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((payload: unknown) => {
         if (alive) {
           setOverview(payload as Overview);
           setFailure(undefined);
+          setUpdated(new Date().toLocaleTimeString());
         }
       })
       .catch((error: unknown) => {
@@ -295,87 +415,240 @@ function JjPanelBody(props: TabProps): unknown {
   }, [cwd, reloading]);
 
   const reload = (): void => {
-    if (typeof cwd === 'string' && cwd.length > 0) {
-      setReloading(!reloading);
-      void fetch('api/jj.refresh', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd }),
-      }).catch(() => undefined);
-    }
+    if (typeof cwd !== 'string' || cwd.length === 0) return;
+    setReloading(!reloading);
+    void fetch('api/jj.refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd }),
+    }).catch(() => undefined);
   };
 
-  const children: unknown[] = [
+  /** Header: workspace identity, last refresh and the refresh button. */
+  const header = h(
+    'header',
+    { className: 'dshjj-head' },
     h(
-      'p',
-      { style: STYLE.sectionTitle, key: 'title' },
-      overview?.workspace !== undefined
-        ? `${overview.workspace.name} · ${overview.workspace.kind} · ${overview.workspace.root}`
-        : t('workingCopy'),
+      'div',
+      { className: 'dshjj-head-main' },
+      h('span', { className: 'dshjj-title' }, t('title')),
+      h(
+        'span',
+        { className: 'dshjj-head-sub', title: overview?.workspace?.root ?? '' },
+        overview?.workspace !== undefined
+          ? `${overview.workspace.name} · ${overview.workspace.root}`
+          : ((cwd as string | undefined) ?? ''),
+      ),
     ),
-  ];
-  if (failure !== undefined) {
-    children.push(h('p', { style: STYLE.note, key: 'failed' }, `${t('failed')} (${failure})`));
-  }
-  if (overview === undefined) {
-    if (failure === undefined) children.push(h('p', { style: STYLE.note, key: 'loading' }, t('loading')));
-  } else if (overview.reason !== undefined || overview.workspace === undefined) {
-    children.push(h('p', { style: STYLE.note, key: 'unavailable' }, overview.reason ?? t('unavailable')));
-  } else {
-    const copy = overview.workingCopy;
-    if (copy !== undefined) {
-      const chips = [copy.empty ? t('empty') : t('clean'), copy.conflict ? t('conflict') : ''].filter(
-        (chip) => chip.length > 0,
-      );
-      children.push(
-        h('p', { style: STYLE.sectionTitle, key: 'wc-title' }, t('workingCopy')),
-        row(
-          shortId(copy.changeId),
-          copy.description.length > 0 ? copy.description : t('noDescription'),
-          chips.join(' · '),
-        ),
-      );
-    }
-    children.push(h('p', { style: STYLE.sectionTitle, key: 'stack-title' }, t('stack')));
-    if (overview.stack.length === 0) children.push(h('p', { style: STYLE.note, key: 'stack-empty' }, t('noStack')));
-    for (const change of overview.stack) {
-      children.push(
-        row(
-          shortId(change.changeId),
-          change.description.length > 0 ? change.description : t('noDescription'),
-          change.currentWorkingCopy ? '@' : change.conflict ? t('conflict') : undefined,
-        ),
-      );
-    }
-    children.push(h('p', { style: STYLE.sectionTitle, key: 'ws-title' }, t('workspaces')));
-    for (const workspace of overview.workspaces) {
-      children.push(row(workspace.name, workspace.root, workspace.current ? t('current') : undefined));
-    }
-    children.push(h('p', { style: STYLE.sectionTitle, key: 'marks-title' }, t('bookmarks')));
-    if (overview.bookmarks.length === 0)
-      children.push(h('p', { style: STYLE.note, key: 'marks-empty' }, t('noBookmarks')));
-    for (const bookmark of overview.bookmarks) {
-      children.push(
-        row(
-          bookmark.name,
-          bookmark.target === undefined ? '' : shortId(bookmark.target),
-          bookmark.conflicted ? t('conflict') : undefined,
-        ),
-      );
-    }
-    children.push(h('p', { style: STYLE.sectionTitle, key: 'ops-title' }, t('operations')));
-    for (const operation of overview.operations) {
-      children.push(row(operation.shortId, operation.description));
-    }
-  }
-  children.push(
+    updated === undefined ? null : h('span', { className: 'dshjj-updated' }, `${t('updated')} ${updated}`),
     h(
       'button',
-      { type: 'button', style: STYLE.action, onClick: reload, 'aria-pressed': reloading, key: 'refresh' },
-      t('refresh'),
+      { type: 'button', className: 'dshjj-btn', onClick: reload, 'aria-busy': reloading },
+      reloading ? t('refreshing') : t('refresh'),
     ),
   );
-  return h('div', { style: STYLE.page, className: 'dshjj-panel' }, children);
+
+  const bodyChildren: unknown[] = [];
+
+  if (failure !== undefined) {
+    bodyChildren.push(
+      h(
+        'div',
+        { className: 'dshjj-error' },
+        h('span', { className: 'dshjj-error-title' }, t('failed')),
+        h('span', { className: 'dshjj-note' }, `${t('failedDetail')}: ${failure}`),
+        h('button', { type: 'button', className: 'dshjj-btn', onClick: reload }, t('retry')),
+      ),
+    );
+  } else if (overview === undefined) {
+    bodyChildren.push(
+      h(
+        'div',
+        { className: 'dshjj-sec-body', 'aria-busy': true },
+        h('span', { className: 'dshjj-skel' }),
+        h('span', { className: 'dshjj-skel' }),
+        h('span', { className: 'dshjj-skel' }),
+      ),
+    );
+  } else if (overview.reason !== undefined || overview.workspace === undefined) {
+    bodyChildren.push(
+      h(
+        'div',
+        { className: 'dshjj-empty' },
+        h('span', { className: 'dshjj-empty-icon' }, 'jj'),
+        h('span', null, overview.reason ?? t('unavailable')),
+        h('span', { className: 'dshjj-note' }, t('emptyHint')),
+      ),
+    );
+  } else {
+    const copy = overview.workingCopy;
+    const stack = overview.stack;
+    const bookmarkByCommit = new Map<string, string[]>();
+    for (const bookmark of overview.bookmarks) {
+      if (bookmark.target === undefined) continue;
+      const names = bookmarkByCommit.get(bookmark.target) ?? [];
+      names.push(bookmark.name);
+      bookmarkByCommit.set(bookmark.target, names);
+    }
+
+    if (copy !== undefined) {
+      const stateChips: unknown[] = [];
+      if (copy.empty) stateChips.push(chip(t('empty'), 'muted'));
+      if (copy.conflict) stateChips.push(chip(t('conflict'), 'error'));
+      if (!copy.empty && !copy.conflict) stateChips.push(chip(t('clean'), 'brand'));
+      if (copy.stale === 'yes') stateChips.push(chip(t('stale'), 'warn'));
+      bodyChildren.push(
+        h(
+          'div',
+          { className: 'dshjj-card', 'data-current': true },
+          h(
+            'div',
+            { className: 'dshjj-row-top' },
+            h('span', { className: 'dshjj-desc' }, copy.description.length > 0 ? copy.description : t('noDescription')),
+            ...stateChips,
+          ),
+          kv(t('changeId'), shortId(copy.changeId), true),
+          kv(t('commitId'), shortId(copy.commitId, 12), true),
+        ),
+      );
+    }
+
+    bodyChildren.push(
+      h(
+        Section,
+        { title: t('stack'), count: stack.length },
+        stack.length === 0
+          ? h('p', { className: 'dshjj-note' }, t('noStack'))
+          : h(
+              'div',
+              { className: 'dshjj-stack' },
+              stack.map((change, index) =>
+                h(
+                  'div',
+                  { className: 'dshjj-stackrow', key: change.changeId },
+                  h(
+                    'div',
+                    { className: 'dshjj-graph' },
+                    h('span', {
+                      className: 'dshjj-node',
+                      'data-current': change.currentWorkingCopy,
+                      'data-conflict': change.conflict,
+                      'data-empty': change.empty,
+                    }),
+                    index === stack.length - 1 ? null : h('span', { className: 'dshjj-rail' }),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dshjj-row' },
+                    h(
+                      'div',
+                      { className: 'dshjj-row-top' },
+                      h(
+                        'span',
+                        { className: 'dshjj-desc', 'data-muted': change.description.length === 0 },
+                        change.description.length > 0 ? change.description : t('noDescription'),
+                      ),
+                      change.currentWorkingCopy ? chip('@', 'brand') : null,
+                      change.empty ? chip(t('empty'), 'muted') : null,
+                      change.conflict ? chip(t('conflict'), 'error') : null,
+                    ),
+                    h(
+                      'div',
+                      { className: 'dshjj-row-sub' },
+                      h('span', { className: 'dshjj-id' }, shortId(change.changeId)),
+                      h('span', { className: 'dshjj-id' }, shortId(change.commitId, 8)),
+                      ...(bookmarkByCommit.get(change.commitId) ?? []).map((name) => chip(name, 'brand')),
+                      h(CopyButton, {
+                        text: change.changeId,
+                        copyLabel: t('copy'),
+                        copiedLabel: t('copied'),
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+      ),
+    );
+
+    bodyChildren.push(
+      h(
+        Section,
+        { title: t('workspaces'), count: overview.workspaces.length },
+        overview.workspaces.map((workspace) =>
+          h(
+            'div',
+            { className: 'dshjj-card', key: workspace.name, 'data-current': workspace.current },
+            h(
+              'div',
+              { className: 'dshjj-row-top' },
+              h('span', { className: 'dshjj-desc' }, workspace.name),
+              workspace.current ? chip(t('current'), 'brand') : null,
+              workspace.stale === 'yes' ? chip(t('stale'), 'warn') : null,
+              workspace.conflict ? chip(t('conflict'), 'error') : null,
+            ),
+            kv(t('root'), workspace.root, true),
+            kv(t('changeId'), shortId(workspace.changeId), true),
+            kv(t('description'), workspace.description.length > 0 ? workspace.description : t('noDescription')),
+          ),
+        ),
+      ),
+    );
+
+    bodyChildren.push(
+      h(
+        Section,
+        { title: t('bookmarks'), count: overview.bookmarks.length },
+        overview.bookmarks.length === 0
+          ? h('p', { className: 'dshjj-note' }, t('noBookmarks'))
+          : h(
+              'div',
+              { className: 'dshjj-row-sub' },
+              overview.bookmarks.map((bookmark) =>
+                chip(
+                  bookmark.conflicted
+                    ? `${bookmark.name} ${t('conflict')}`
+                    : bookmark.target === undefined
+                      ? bookmark.name
+                      : `${bookmark.name} @ ${shortId(bookmark.target, 8)}`,
+                  bookmark.conflicted ? 'error' : 'muted',
+                ),
+              ),
+            ),
+      ),
+    );
+
+    bodyChildren.push(
+      h(
+        Section,
+        { title: t('operations'), count: overview.operations.length, defaultOpen: false },
+        overview.operations.length === 0
+          ? h('p', { className: 'dshjj-note' }, t('empty'))
+          : h(
+              'div',
+              { className: 'dshjj-ops' },
+              overview.operations.map((operation) => [
+                h('span', { className: 'dshjj-op-time', key: `${operation.id}-t` }, timeOf(operation.time)),
+                h(
+                  'span',
+                  {
+                    className: 'dshjj-op-desc',
+                    'data-snapshot': operation.isSnapshot,
+                    key: operation.id,
+                    title: operation.id,
+                  },
+                  operation.description,
+                  operation.workspaceName !== null ? ` · ${operation.workspaceName}` : '',
+                ),
+              ]),
+            ),
+      ),
+    );
+
+    bodyChildren.push(h('span', { className: 'dshjj-foot' }, t('readOnly')));
+  }
+
+  return h('div', { className: 'dshjj' }, header, h('div', { className: 'dshjj-body' }, ...bodyChildren));
 }
 
 /** Slot props the framework composes for a keyed tool view. */
@@ -434,8 +707,7 @@ function toolResult(block: unknown): Record<string, unknown> | undefined {
 
 /** Human-readable state of one tool call. */
 function callState(props: ToolViewProps, t: (key: string) => string): string {
-  if (props.phase === 'preparing') return t('running');
-  if (props.phase === 'start') return t('running');
+  if (props.phase === 'preparing' || props.phase === 'start') return t('running');
   const block = recordOf(props.block);
   if (block?.['isError'] === true) return t('failedCall');
   return '';
@@ -445,58 +717,20 @@ function callState(props: ToolViewProps, t: (key: string) => string): string {
 function toolCard(props: ToolViewProps, title: string, summary: string, lines: readonly string[]): unknown {
   const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
   const state = callState(props, t);
-  const chips = [summary, state].filter((chip) => chip.length > 0);
   return h(
     'div',
-    {
-      className: 'dshjj-toolview',
-      style: {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '2px',
-        borderRadius: 'var(--dsw-radius-md)',
-        border: '0.5px solid var(--dsw-alias-border-l3)',
-        padding: '6px 8px',
-        color: 'var(--dsw-alias-label-primary)',
-        fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
-      },
-    },
+    { className: 'dshjj-card' },
     h(
       'div',
-      { style: { display: 'flex', alignItems: 'baseline', gap: '6px' } },
-      h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, title),
-      h(
-        'span',
-        {
-          style: {
-            flex: 1,
-            minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          },
-        },
-        chips.join(' · '),
-      ),
+      { className: 'dshjj-row-top' },
+      h('span', { className: 'dshjj-k' }, title),
+      h('span', { className: 'dshjj-desc' }, summary),
+      state.length > 0 ? chip(state, 'muted') : null,
     ),
     ...lines
       .filter((line) => line.length > 0)
       .slice(0, 3)
-      .map((line) =>
-        h(
-          'span',
-          {
-            style: {
-              color: 'var(--dsw-alias-label-tertiary)',
-              fontSize: '12px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            },
-          },
-          line,
-        ),
-      ),
+      .map((line) => h('span', { className: 'dshjj-note' }, line)),
   );
 }
 
@@ -507,13 +741,13 @@ function JjStatusCard(props: ToolViewProps): unknown {
   const result = toolResult(props.block);
   const changeId = typeof result?.['changeId'] === 'string' ? shortId(result['changeId']) : '';
   const description = typeof result?.['description'] === 'string' ? result['description'] : '';
-  const chips: string[] = [];
-  if (result?.['empty'] === true) chips.push(t('empty'));
-  if (result?.['conflict'] === true) chips.push(t('conflict'));
+  const state: string[] = [];
+  if (result?.['empty'] === true) state.push(t('empty'));
+  if (result?.['conflict'] === true) state.push(t('conflict'));
   const lines: string[] = [];
   if (typeof result?.['diffStat'] === 'string') lines.push(result['diffStat'].split('\n')[0] ?? '');
   if (args?.['details'] === true) lines.push(t('workingCopy'));
-  return toolCard(props, t('statusCard'), [changeId, description, ...chips].filter(Boolean).join(' · '), lines);
+  return toolCard(props, t('statusCard'), [changeId, description, ...state].filter(Boolean).join(' · '), lines);
 }
 
 /** `jj_log` card: the requested revset and how many revisions came back. */

@@ -723,7 +723,7 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   // The body renders its page shell even before any data arrives (no session cwd here).
   const body = slots[0]?.component as (props: Record<string, unknown>) => FakeElement;
   const tree = body({ sessionId: 'session-1', useSessions: () => undefined, t: (key: string) => key });
-  assert.equal(tree.props['className'], 'dshjj-panel');
+  assert.equal(tree.props['className'], 'dshjj');
   assert.ok(Array.isArray(tree.props['children']) && (tree.props['children'] as unknown[]).length > 0);
   const title = slots[1]?.component as (props: Record<string, unknown>) => unknown;
   assert.equal(title({ t: (key: string) => key }), 'title');
@@ -749,9 +749,9 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
       isError: false,
     },
   });
-  assert.equal(statusTree.props['className'], 'dshjj-toolview');
+  assert.equal(statusTree.props['className'], 'dshjj-card');
   const statusText = JSON.stringify(statusTree.props);
-  assert.match(statusText, /abcdefghijkl/, 'the change id is summarized');
+  assert.match(statusText, /abcdefghij/, 'the change id is summarized (short form)');
   assert.match(statusText, /feat: seed/, 'the description is summarized');
 
   const handoffCard = slots[5]?.component as (props: Record<string, unknown>) => FakeElement;
