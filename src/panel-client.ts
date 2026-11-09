@@ -597,8 +597,11 @@ function apply(ctx: ClientContext): void {
         },
       ],
     });
-  } catch {
-    // Without the sidebar-right plugin there is no place to mount the tab.
+  } catch (error) {
+    // Without the sidebar-right plugin there is no place to mount the tab, but a real
+    // registration failure must be visible: this exact path hid a wrong declaration
+    // shape for two release cycles of testing.
+    console.error('[dsh-jj] sidebar tab registration failed:', error);
   }
   const registerBody = (): unknown =>
     ctx.slots?.register?.({ name: 'sidebar.right.pane.tab', key: JJ_TAB_ID, locale: JJ_LOCALE_NS }, JjPanelBody);
