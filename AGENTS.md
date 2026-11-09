@@ -9,7 +9,7 @@
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
 - 四个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
-  - `dsh-jj/tools`(`jj-tools`):23 个 `jj_*` 模型工具;
+  - `dsh-jj/tools`(`jj-tools`):24 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护;
   - `dsh-jj/changes`(`jj-changes`):用 jj 工作副本快照实现每轮「已编辑 N 个文件」变更卡片,并通过 bundle patch
     禁用 DSH 内置的 Git-only `workspace-changes` 行、在隔离 service scope 里复用它的记录器。
@@ -78,7 +78,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
 | `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
 | `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
-| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 23 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
+| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 24 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
 | `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
 | `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
 | `src/policies.ts`                                              | 纯模块:工作区所有权注册表、根 workspace 判定、cleanup 决策、stale 错误识别;工具/flow/guard 共用同一份规则                                                                               |
@@ -234,6 +234,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - `JjOperations.workspaceAdd` 必须显式传 `--name`(缺省名用 `basename`)并按名字/规范路径解析返回的
       workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
       `workspace list` 模板对 `name`/`root` 都用 `json(...)`(名字可含空格/制表符);比较名字时用解码后的裸名。
+    - `jj_workspace_restore` 只重建**本进程通过 `jj_workspace_add` 创建**的工作区:注册表记录的基础提交
+      (`baseChangeId`,仅在未传显式 parents 时记录)必须仍存在;名字仍注册时拒绝(用 `jj_workspace_enter` /
+      `jj_workspace_update_stale`),目录非空时拒绝且绝不删除文件;重建方式就是用记录的 base 再跑一次
+      `workspaceAdd`,成功后重新登记所有权。清理/恢复都不改写别人的提交。
     - `workspaceAdd` 的 parents 必须**按 revision 解析**而不是按字符串匹配:`(parent) & @` 非空即表示该 parent
       指向当前工作副本——`@` 为空时丢弃这个 parent 并在结果 `note` 里说明,`@` 有未提交内容或多 parent 混用时
       抛 `JJ_BAD_INPUT`,绝不把工作副本提交塞进新 workspace 的链(从 `jj_status` 复制 change id 也不能绕过)。

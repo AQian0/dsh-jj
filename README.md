@@ -6,7 +6,7 @@
 
 - **仓库识别**：自动区分 git 仓库、jj-colocated、jj-native 与非仓库；jj 与 git 嵌套时也能判断真正的归属。
 - **防 git 混淆**：在 jj 仓库里执行 `git commit`、`git reset` 等命令时，默认放行并在结果中提示等价的 jj 命令，也可以配置为直接拒绝。
-- **jj 原生工具**：提供 23 个 `jj_*` 工具，覆盖状态查看、提交、撤销、workspace、bookmark 与收尾集成。
+- **jj 原生工具**：提供 24 个 `jj_*` 工具，覆盖状态查看、提交、撤销、workspace、bookmark 与收尾集成。
 - **提交习惯**：默认沿用仓库最近的提交描述风格，风格不明确时先询问你；同时引导模型分步骤小步提交。
 - **修正折叠**：本会话已做的提交在你推送之前仍可改写；你要求修正时，模型把改动折进原提交（`jj_amend`），而不是追加一个 `fix:` 提交。
 - **会话上下文**：在 jj 仓库里自动提示模型优先用 jj；检测到并行会话时，引导模型先隔离 workspace，收尾时用 `jj_handoff` 完成集成。
@@ -34,18 +34,19 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 安装后自动生效，不需要手工写 profile。典型的 agent 用法：
 
-| 你说                              | 模型调用                               |
-| --------------------------------- | -------------------------------------- |
-| “看下当前 jj 状态”                | `jj_status`                            |
-| “列出最近 10 个提交”              | `jj_log`                               |
-| “把当前改动并进上一个提交”        | `jj_squash`                            |
-| “把这个修正并进刚才那个提交”      | `jj_amend`                             |
-| “改一下当前 change 的描述”        | `jj_describe`                          |
-| “把这步提交了，继续下一项”        | `jj_commit`                            |
-| “这个仓库的提交信息是什么风格？”  | `jj_commit_style`                      |
-| “撤销刚才那次 jj 操作”            | `jj_undo`                              |
-| “新建一个 workspace 放到 /tmp/wt” | `jj_workspace_add`（默认把会话切过去） |
-| “切到另一个 workspace”            | `jj_workspace_enter`                   |
+| 你说                                | 模型调用                               |
+| ----------------------------------- | -------------------------------------- |
+| “看下当前 jj 状态”                  | `jj_status`                            |
+| “列出最近 10 个提交”                | `jj_log`                               |
+| “把当前改动并进上一个提交”          | `jj_squash`                            |
+| “把这个修正并进刚才那个提交”        | `jj_amend`                             |
+| “改一下当前 change 的描述”          | `jj_describe`                          |
+| “把这步提交了，继续下一项”          | `jj_commit`                            |
+| “这个仓库的提交信息是什么风格？”    | `jj_commit_style`                      |
+| “撤销刚才那次 jj 操作”              | `jj_undo`                              |
+| “新建一个 workspace 放到 /tmp/wt”   | `jj_workspace_add`（默认把会话切过去） |
+| “切到另一个 workspace”              | `jj_workspace_enter`                   |
+| “把被删掉的临时 workspace 恢复回来” | `jj_workspace_restore`                 |
 
 在 jj 仓库里直接让 agent 跑 `git commit` 之类的命令时，工具结果里会追加「优先用 jj」的提示；把 `guardMutatingGit` 设为 `deny` 后会直接拒绝并给出等价命令（节选）：
 
@@ -87,7 +88,7 @@ Use the jj equivalent instead:
 
 检测到并行时：
 
-- **共用同一个工作副本**：动文件前先用 `jj_workspace_add` 在仓库外建一个独立的 workspace（例如 `<仓库同级目录>/repo-session-a`）；它默认就把会话切进新 workspace（`enter: false` 可只创建不切换，`jj_workspace_enter` 用于切到已存在的工作区）。不要放在仓库内部，也不要复用别人的 workspace。
+- **共用同一个工作副本**：动文件前先用 `jj_workspace_add` 在仓库外建一个独立的 workspace（例如 `<仓库同级目录>/repo-session-a`）；它默认就把会话切进新 workspace（`enter: false` 可只创建不切换，`jj_workspace_enter` 用于切到已存在的工作区，目录被误删后可用 `jj_workspace_restore` 按创建时记录的基础提交重建）。不要放在仓库内部，也不要复用别人的 workspace。
   如果已经在这个共用工作副本里改过文件，先**只提交自己的路径**（`jj_commit` 传 `paths`），再**不带 `parents`** 调用 `jj_workspace_add`：jj 会以当前 change 的父提交为起点，也就把你刚提交的那一步带进新 workspace。不要传 `parents: ["@"]`——`@` 是工作副本提交（提交后通常是空的），把它当 parent 会把一个空提交塞进新 workspace 的提交链，最后出现在收尾和推送的历史里。工具层面也做了防护：与当前 `@` 重叠的 parent 会被拒绝或忽略（空 `@` 自动忽略并返回提示，非空 `@` 报错要求先提交）。
 - **同一仓库的不同 workspace**：工作副本互不影响，但 bookmark 和 operation log 是共享的。只改自己的提交，不要 rebase、undo 或移动别人 workspace 的 bookmark。
 

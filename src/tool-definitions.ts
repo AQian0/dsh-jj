@@ -1,5 +1,5 @@
 /**
- * The 18 `jj_*` tool definitions (design contract §7.3).
+ * The 24 `jj_*` tool definitions (design contract §7.3).
  *
  * Every tool is jj-native: it names "Jujutsu (jj)" in its first sentence, states
  * that it is *not* git, and never falls back to Git commands. Outside a usable jj
@@ -9,6 +9,7 @@
  *
  * @module dsh-jj/tool-definitions
  */
+import { existsSync, readdirSync } from 'node:fs';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
   COMMIT_STYLE_CHOICES,
@@ -687,16 +688,25 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
       async execute(args, exec) {
         const { cwd } = await openWorkspace(exec);
+        // Remember the base the new working copy starts on, so a later restore can
+        // recreate the workspace on the same parent after its directory is gone. Only
+        // the implicit-parents form is recorded: explicit multi-parent bases cannot be
+        // reproduced from a single change id.
+        const explicitParents = args.parents ?? [];
+        const baseChange =
+          explicitParents.length === 0
+            ? await operations.readAt(cwd, exec.signal, '@-').catch(() => undefined)
+            : undefined;
         const result = await operations.workspaceAdd(
           cwd,
           args.path,
           args.name,
-          args.parents ?? [],
+          explicitParents,
           args.message,
           args.colocate,
           exec.signal,
         );
-        ownership.remember(exec.agent, result.name, result.path);
+        ownership.remember(exec.agent, result.name, result.path, baseChange?.changeId);
         const enter = args.enter !== false;
         const workingDirectory = context.host.workingDirectory;
         const canEnter = exec.agent !== undefined && typeof workingDirectory?.set === 'function';
@@ -879,6 +889,117 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           workspaceRoot: target.root,
           alreadyCurrent: false,
           change: changeView(await operations.readAt(target.root, exec.signal)),
+        };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_workspace_restore',
+      description:
+        'Rebuild a temporary Jujutsu (jj) workspace this session created with jj_workspace_add after its directory was deleted or its registration was forgotten. This is jj, not git: it re-runs `jj workspace add` on the recorded base change, so the rebuilt working copy starts on exactly the same parent. It only restores workspaces this process created, refuses to touch a non-empty directory, refuses a name that is still registered (use jj_workspace_enter or jj_workspace_update_stale instead) and never deletes files.',
+      parameters: {
+        name: {
+          type: 'string',
+          description: 'Workspace name as reported by jj_workspace_add earlier in this session.',
+          required: true,
+        },
+        message: { type: 'string', description: 'Description for the rebuilt working-copy change.' },
+        enter: {
+          type: 'boolean',
+          description: 'Move this session into the rebuilt workspace (default true).',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
+            path: { type: 'string', required: true },
+            name: { type: 'string', required: true },
+            changeId: { type: 'string', required: true },
+            commitId: { type: 'string', required: true },
+            baseChangeId: { type: 'string', required: true },
+            entered: { type: 'boolean', required: true },
+            note: { type: 'string' },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const { cwd } = await openWorkspace(exec);
+        const requested = args.name.trim();
+        if (requested.length === 0) {
+          throw new Error('jj_workspace_restore needs the workspace name recorded by jj_workspace_add.');
+        }
+        const owned = ownership.list(exec.agent).find((entry) => entry.name === requested);
+        if (owned === undefined) {
+          throw new Error(
+            `jj_workspace_restore only rebuilds a workspace this session created with jj_workspace_add (no record for ${JSON.stringify(requested)}): the directory and registration are both gone, so use jj_workspace_add with a new name, or ask the user to recreate it.`,
+          );
+        }
+        if (owned.baseChangeId === undefined) {
+          throw new Error(
+            `jj_workspace_restore has no base change for ${JSON.stringify(requested)}: it was created with explicit parents, so the base cannot be reproduced from one change id. Create it again with jj_workspace_add and an explicit parents list.`,
+          );
+        }
+        const baseChangeId = owned.baseChangeId;
+        const states = await operations.workspaceStates(cwd, exec.signal);
+        if (states.some((state) => canonicalWorkspacePath(state.root) === owned.root)) {
+          throw new Error(
+            `jj_workspace_restore: ${JSON.stringify(requested)} is still registered at ${owned.root}. Use jj_workspace_enter to switch to it, or jj_workspace_update_stale when its working copy is stale.`,
+          );
+        }
+        if (!(await operations.changeExists(cwd, baseChangeId, exec.signal))) {
+          throw new Error(
+            `jj_workspace_restore: the recorded base change ${baseChangeId} no longer exists (it was abandoned or garbage-collected), so the workspace cannot be rebuilt on its original base. Create it again with jj_workspace_add.`,
+          );
+        }
+        if (existsSync(owned.root) && readdirSync(owned.root).length > 0) {
+          throw new Error(
+            `jj_workspace_restore refuses to write into ${owned.root}: the directory exists and is not empty. Move or delete it yourself, then call the tool again — the plugin never deletes files.`,
+          );
+        }
+        const result = await operations.workspaceAdd(
+          cwd,
+          owned.root,
+          owned.name,
+          [baseChangeId],
+          args.message,
+          undefined,
+          exec.signal,
+        );
+        ownership.remember(exec.agent, result.name, result.path, baseChangeId);
+        const enter = args.enter !== false;
+        const workingDirectory = context.host.workingDirectory;
+        const canEnter = exec.agent !== undefined && typeof workingDirectory?.set === 'function';
+        let entered = false;
+        let enterNote = '';
+        if (enter && canEnter) {
+          await (workingDirectory as { set(agent: unknown, path: string, signal?: AbortSignal): Promise<string> }).set(
+            exec.agent,
+            result.path,
+            exec.signal,
+          );
+          entered = true;
+        } else if (enter) {
+          enterNote =
+            ' The session could not be moved into the rebuilt workspace (the host exposes no workingDirectory.set); switch with the working_directory tool before editing files.';
+        }
+        return {
+          path: result.path,
+          name: result.name,
+          changeId: result.change.changeId,
+          commitId: result.change.commitId,
+          baseChangeId,
+          entered,
+          ...(enterNote.length > 0 ? { note: enterNote } : {}),
+          nextActions: nextActions({
+            tool: 'jj_status',
+            reason: entered
+              ? 'Confirm the rebuilt workspace is the current working copy before editing files.'
+              : 'Switch into the rebuilt workspace, then confirm it before editing files.',
+          }),
         };
       },
     }),

@@ -7,6 +7,7 @@
  * assert that **no** jj path ever falls back to git.
  */
 import { test } from 'node:test';
+import { rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
@@ -243,7 +244,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
-test('all 23 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
+test('all 24 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-defs');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   fx.cwd = repo;
@@ -267,6 +268,7 @@ test('all 23 jj_* tools are defined with contract names, descriptions, and schem
     'jj_workspace_add',
     'jj_workspace_list',
     'jj_workspace_enter',
+    'jj_workspace_restore',
     'jj_bookmark_list',
     'jj_bookmark_set',
     'jj_rebase',
@@ -592,7 +594,7 @@ test('registerJjTools registers and disposes every tool', async (t) => {
     },
   };
   const dispose = registerJjTools(host, { service: toolService(fx, operations), config: {} });
-  assert.equal(registered.length, 23);
+  assert.equal(registered.length, 24);
   dispose();
   assert.equal(registered.length, 0);
   dispose();
@@ -1350,6 +1352,73 @@ test('jj_handoff dryRun reports the plan without fetching, rebasing or moving bo
   const actions = value['nextActions'] as { tool: string; args?: Record<string, unknown> }[];
   assert.equal(actions[0]?.tool, 'jj_handoff');
   assert.equal(actions[0]?.args?.['dryRun'], false);
+});
+
+test('jj_workspace_restore rebuilds a deleted session workspace on its recorded base', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const fx = makeFixture(t, 'dsh-jj-workspace-restore');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'base.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const agent = {};
+  const moved: string[] = [];
+  const workingDirectory = {
+    ensure: async () => repo,
+    get: () => repo,
+    set: async (_agent: unknown, path: string) => {
+      moved.push(path);
+      return path;
+    },
+  };
+  const context = {
+    ...toolContext(fx, toolService(fx, operations), resolveConfig({}), workingDirectory),
+    cwdFor: async () => repo,
+  };
+  const definitions = definitionsByName(jjToolDefinitions(context));
+  const add = definitions.get('jj_workspace_add')!;
+  const restore = definitions.get('jj_workspace_restore')!;
+  const sessionPath = fx.path('session-ws');
+
+  const created = (await add.execute({ path: sessionPath, name: 'session' }, fakeExec(agent))) as {
+    path: string;
+    changeId: string;
+  };
+  assert.equal(created.path, sessionPath);
+
+  // Simulate a lost working copy: forget the registration and delete the directory.
+  await operations.workspaceForget(repo, 'session', undefined);
+  rmSync(sessionPath, { recursive: true, force: true });
+
+  // A name this session never created is refused.
+  await assert.rejects(
+    () => restore.execute({ name: 'nope' }, fakeExec(agent)),
+    /only rebuilds a workspace this session created/,
+  );
+
+  // The rebuild starts on the recorded base and the session enters it.
+  const value = (await restore.execute({ name: 'session' }, fakeExec(agent))) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(restore.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  assert.equal(value['path'], sessionPath);
+  assert.equal(value['name'], 'session');
+  assert.equal(value['entered'], true);
+  assert.equal(moved.at(-1), sessionPath);
+  const restoredParent = await operations.log(sessionPath, '@-', 1);
+  assert.equal(restoredParent[0]?.changeId, value['baseChangeId'], 'the rebuilt workspace sits on the recorded base');
+
+  // A second restore refuses while the workspace is registered again.
+  await assert.rejects(() => restore.execute({ name: 'session' }, fakeExec(agent)), /still registered/);
+
+  // A non-empty directory is never overwritten.
+  await operations.workspaceForget(repo, 'session', undefined);
+  await writeFixtureFile(fx, repo, '../session-ws/keep.txt', 'keep');
+  await assert.rejects(
+    () => restore.execute({ name: 'session' }, fakeExec(agent)),
+    /exists and is not empty/,
+    'the tool refuses to write into a non-empty directory',
+  );
 });
 
 test('jj_workspace_cleanup tool: unregisters only a session-created workspace and returns to the default workspace', async (t) => {

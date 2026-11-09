@@ -65,6 +65,13 @@ export interface OwnedWorkspace {
   readonly name: string;
   /** Canonical root (realpath), so symlinked paths compare equal. */
   readonly root: string;
+  /**
+   * Change the workspace's first working copy was created on top of (the parents
+   * `jj workspace add` used). `jj_workspace_restore` recreates a deleted workspace on
+   * exactly this base; `undefined` when the workspace was created with explicit
+   * parents, because a multi-parent base cannot be reproduced from one change id.
+   */
+  readonly baseChangeId?: string;
 }
 
 /**
@@ -87,12 +94,16 @@ export class WorkspaceOwnership {
    * @param name - jj workspace name.
    * @param root - workspace root as reported by jj.
    */
-  remember(agent: unknown, name: string, root: string): void {
+  remember(agent: unknown, name: string, root: string, baseChangeId?: string): void {
     if (typeof agent !== 'object' || agent === null) return;
     const owned = this.byAgent.get(agent) ?? [];
     const canonicalRoot = canonicalWorkspacePath(root);
-    if (!owned.some((entry) => entry.name === name && entry.root === canonicalRoot)) {
-      owned.push({ name, root: canonicalRoot });
+    const existing = owned.find((entry) => entry.name === name && entry.root === canonicalRoot);
+    if (existing !== undefined) {
+      if (baseChangeId === undefined || existing.baseChangeId === baseChangeId) return;
+      owned[owned.indexOf(existing)] = { ...existing, baseChangeId };
+    } else {
+      owned.push({ name, root: canonicalRoot, ...(baseChangeId !== undefined ? { baseChangeId } : {}) });
     }
     this.byAgent.set(agent, owned);
   }
