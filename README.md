@@ -158,6 +158,7 @@ Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Juju
 - 面板读取失败（jj 缺失、目录不是 jj workspace、元数据损坏）时返回 `enabled: true` + `reason`，界面上是一句说明，不会报错也不会影响会话。
 - 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。面板正文按「工作副本 → 栈 → 工作区 → 书签 → 操作日志」分区渲染，并用会话作用域的 slot props（`sessionId` + `useSessions`）取得当前目录。
 - `uiPanel: off` 完全关闭面板：路由只回 `enabled: false` 且不读仓库，客户端也不会挂载 tab。headless profile 没有 `connection` 服务，路由根本不会注册。
+- 同一份客户端 bundle 还为四个工具注册了 `tool.call.toolview` 卡片（key 就是 wire 工具名）：`jj_status` 显示 change 短 id、描述与空/冲突标记（`details: true` 时多一行 diff 摘要）、`jj_log` 显示 revset 与命中条数、`jj_workspace_list` 列出工作区名、`jj_handoff` 显示目标、是否 rebase、冲突数与 `nextActions` 的第一条理由。卡片只做摘要，完整 JSON 仍在通用调用视图里；参数或结果不是合法 JSON 时退化为只有标题的行，不会抛错。
 
 ## 配置
 

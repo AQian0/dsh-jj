@@ -68,6 +68,14 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     bookmarks: '书签',
     noBookmarks: '没有书签。',
     operations: '操作日志',
+    statusCard: '工作副本',
+    logCard: '提交历史',
+    workspacesCard: '工作区清单',
+    handoffCard: '收尾集成',
+    running: '执行中…',
+    failedCall: '调用失败',
+    noConflicts: '无冲突',
+    conflicts: '冲突',
   },
   en: {
     title: 'Jujutsu',
@@ -88,6 +96,14 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     bookmarks: 'Bookmarks',
     noBookmarks: 'No bookmarks.',
     operations: 'Operations',
+    statusCard: 'Working copy',
+    logCard: 'History',
+    workspacesCard: 'Workspaces',
+    handoffCard: 'Hand-off',
+    running: 'Running…',
+    failedCall: 'Call failed',
+    noConflicts: 'no conflicts',
+    conflicts: 'conflicts',
   },
 };
 
@@ -356,6 +372,182 @@ function JjPanelBody(props: TabProps): unknown {
   return h('div', { style: STYLE.page, className: 'dshjj-panel' }, children);
 }
 
+/** Slot props the framework composes for a keyed tool view. */
+interface ToolViewProps {
+  readonly phase?: string;
+  readonly block?: unknown;
+  readonly t?: (key: string) => string;
+}
+
+/** Read a nested record without trusting its shape. */
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Parse a tool call's arguments from the recorded raw JSON.
+ *
+ * The framework exposes partial (preparing) arguments through accessors and the final
+ * call through `argsRaw`; only the latter is stable across tool phases, so both are read
+ * defensively and an unparsable payload simply yields no summary.
+ */
+function toolArgs(block: unknown): Record<string, unknown> | undefined {
+  const record = recordOf(block);
+  if (record === undefined) return undefined;
+  const accessors = recordOf(record['args']);
+  if (accessors !== undefined) return accessors;
+  const call = recordOf(record['call']);
+  const raw = call?.['argsRaw'] ?? record['argsRaw'];
+  if (typeof raw !== 'string') return undefined;
+  try {
+    return recordOf(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parse a tool result's JSON payload from its first text content item. */
+function toolResult(block: unknown): Record<string, unknown> | undefined {
+  const record = recordOf(block);
+  const content = record?.['content'];
+  if (!Array.isArray(content)) return undefined;
+  for (const item of content) {
+    const entry = recordOf(item);
+    const text = entry?.['text'];
+    if (typeof text !== 'string') continue;
+    try {
+      return recordOf(JSON.parse(text));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** Human-readable state of one tool call. */
+function callState(props: ToolViewProps, t: (key: string) => string): string {
+  if (props.phase === 'preparing') return t('running');
+  if (props.phase === 'start') return t('running');
+  const block = recordOf(props.block);
+  if (block?.['isError'] === true) return t('failedCall');
+  return '';
+}
+
+/** One compact tool card: a title row plus at most three detail lines. */
+function toolCard(props: ToolViewProps, title: string, summary: string, lines: readonly string[]): unknown {
+  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+  const state = callState(props, t);
+  const chips = [summary, state].filter((chip) => chip.length > 0);
+  return h(
+    'div',
+    {
+      className: 'dshjj-toolview',
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '2px',
+        borderRadius: 'var(--dsw-radius-md)',
+        border: '0.5px solid var(--dsw-alias-border-l3)',
+        padding: '6px 8px',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
+      },
+    },
+    h(
+      'div',
+      { style: { display: 'flex', alignItems: 'baseline', gap: '6px' } },
+      h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, title),
+      h(
+        'span',
+        {
+          style: {
+            flex: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          },
+        },
+        chips.join(' · '),
+      ),
+    ),
+    ...lines
+      .filter((line) => line.length > 0)
+      .slice(0, 3)
+      .map((line) =>
+        h(
+          'span',
+          {
+            style: {
+              color: 'var(--dsw-alias-label-tertiary)',
+              fontSize: '12px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            },
+          },
+          line,
+        ),
+      ),
+  );
+}
+
+/** `jj_status` card: where the working copy is, plus the diff summary when asked for. */
+function JjStatusCard(props: ToolViewProps): unknown {
+  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+  const args = toolArgs(props.block);
+  const result = toolResult(props.block);
+  const changeId = typeof result?.['changeId'] === 'string' ? shortId(result['changeId']) : '';
+  const description = typeof result?.['description'] === 'string' ? result['description'] : '';
+  const chips: string[] = [];
+  if (result?.['empty'] === true) chips.push(t('empty'));
+  if (result?.['conflict'] === true) chips.push(t('conflict'));
+  const lines: string[] = [];
+  if (typeof result?.['diffStat'] === 'string') lines.push(result['diffStat'].split('\n')[0] ?? '');
+  if (args?.['details'] === true) lines.push(t('workingCopy'));
+  return toolCard(props, t('statusCard'), [changeId, description, ...chips].filter(Boolean).join(' · '), lines);
+}
+
+/** `jj_log` card: the requested revset and how many revisions came back. */
+function JjLogCard(props: ToolViewProps): unknown {
+  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+  const args = toolArgs(props.block);
+  const revset = typeof args?.['revset'] === 'string' ? args['revset'] : '@ | @-';
+  const result = toolResult(props.block);
+  const count = Array.isArray(result?.['changes']) ? result['changes'].length : undefined;
+  return toolCard(props, t('logCard'), revset, count === undefined ? [] : [`${count} revisions`]);
+}
+
+/** `jj_workspace_list` card: how many workspaces share the repository. */
+function JjWorkspacesCard(props: ToolViewProps): unknown {
+  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+  const result = toolResult(props.block);
+  const workspaces = Array.isArray(result?.['workspaces']) ? result['workspaces'] : undefined;
+  const names = (workspaces ?? [])
+    .map((workspace) => recordOf(workspace)?.['name'])
+    .filter((name): name is string => typeof name === 'string');
+  return toolCard(props, t('workspacesCard'), names.length > 0 ? names.join(', ') : '', []);
+}
+
+/** `jj_handoff` card: destination and how the integration ended. */
+function JjHandoffCard(props: ToolViewProps): unknown {
+  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+  const result = toolResult(props.block);
+  const destination = typeof result?.['destination'] === 'string' ? result['destination'] : '';
+  const rebased = result?.['rebased'] === true;
+  const conflicts = Array.isArray(result?.['conflicts']) ? result['conflicts'].length : 0;
+  const actions = Array.isArray(result?.['nextActions']) ? result['nextActions'] : [];
+  const firstAction = recordOf(actions[0]);
+  const reason = typeof firstAction?.['reason'] === 'string' ? firstAction['reason'] : '';
+  return toolCard(props, t('handoffCard'), destination, [
+    rebased ? 'rebased' : 'already integrated',
+    conflicts > 0 ? `${conflicts} ${t('conflicts')}` : t('noConflicts'),
+    reason,
+  ]);
+}
+
 /** Tab title: the localized name printed on the tab chip. */
 function JjPanelTitle(props: { readonly t?: (key: string) => string }): unknown {
   const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
@@ -401,6 +593,25 @@ function apply(ctx: ClientContext): void {
     }
   } catch {
     // Slot registration failures stay inside this bundle.
+  }
+  // Keyed tool views: the key is the wire tool name, so a typo silently falls back to
+  // the generic row (that is the framework contract). Cards only summarize; the full
+  // JSON stays available through the generic call payload.
+  const views: readonly (readonly [string, (props: ToolViewProps) => unknown])[] = [
+    ['jj_status', JjStatusCard],
+    ['jj_log', JjLogCard],
+    ['jj_workspace_list', JjWorkspacesCard],
+    ['jj_handoff', JjHandoffCard],
+  ];
+  for (const [key, component] of views) {
+    const registerView = (): unknown =>
+      ctx.slots?.register?.({ name: 'tool.call.toolview', key, locale: JJ_LOCALE_NS }, component);
+    try {
+      if (typeof ctx.slots?.inject === 'function') ctx.slots.inject('tool.call.toolview', registerView);
+      else registerView();
+    } catch {
+      // One tool view failing must not affect the others or the tab.
+    }
   }
 }
 

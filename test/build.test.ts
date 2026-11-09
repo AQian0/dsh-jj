@@ -624,6 +624,10 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
     [
       { name: 'sidebar.right.pane.tab', key: 'jj-panel' },
       { name: 'sidebar.right.pane.tab.title', key: 'jj-panel' },
+      { name: 'tool.call.toolview', key: 'jj_status' },
+      { name: 'tool.call.toolview', key: 'jj_log' },
+      { name: 'tool.call.toolview', key: 'jj_workspace_list' },
+      { name: 'tool.call.toolview', key: 'jj_handoff' },
     ],
   );
   // The body renders its page shell even before any data arrives (no session cwd here).
@@ -633,6 +637,59 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   assert.ok(Array.isArray(tree.props['children']) && (tree.props['children'] as unknown[]).length > 0);
   const title = slots[1]?.component as (props: Record<string, unknown>) => unknown;
   assert.equal(title({ t: (key: string) => key }), 'title');
+
+  // Each tool card renders a compact summary from the recorded args/result JSON.
+  const statusCard = slots[2]?.component as (props: Record<string, unknown>) => FakeElement;
+  const statusTree = statusCard({
+    phase: 'result',
+    t: (key: string) => key,
+    block: {
+      call: { name: 'jj_status', argsRaw: JSON.stringify({ details: true }) },
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            changeId: 'abcdefghijkl',
+            description: 'feat: seed',
+            empty: false,
+            diffStat: '1 file',
+          }),
+        },
+      ],
+      isError: false,
+    },
+  });
+  assert.equal(statusTree.props['className'], 'dshjj-toolview');
+  const statusText = JSON.stringify(statusTree.props);
+  assert.match(statusText, /abcdefghijkl/, 'the change id is summarized');
+  assert.match(statusText, /feat: seed/, 'the description is summarized');
+
+  const handoffCard = slots[5]?.component as (props: Record<string, unknown>) => FakeElement;
+  const handoffTree = handoffCard({
+    phase: 'result',
+    t: (key: string) => key,
+    block: {
+      call: { name: 'jj_handoff', argsRaw: '{}' },
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            destination: 'main',
+            rebased: true,
+            conflicts: [{ changeId: 'x' }],
+            nextActions: [{ tool: 'jj_status', reason: 'resolve the conflict' }],
+          }),
+        },
+      ],
+      isError: false,
+    },
+  });
+  assert.match(JSON.stringify(handoffTree.props), /resolve the conflict/, 'the recommended action is shown');
+
+  // A malformed payload degrades to a title-only card instead of throwing.
+  assert.doesNotThrow(() =>
+    statusCard({ phase: 'result', t: (key: string) => key, block: { call: { argsRaw: 'not json' } } }),
+  );
   // A host without sidebar-right must not throw during activation.
   assert.doesNotThrow(() => (clientModule.apply as (ctx: unknown) => void)({}));
 });
