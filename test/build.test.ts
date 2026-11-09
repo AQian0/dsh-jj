@@ -225,6 +225,7 @@ const REQUIRED_EXPORTS = [
   './commit-style',
   './multi-session',
   './prompt-context',
+  './client',
 ] as const;
 
 /** `files` entries the published package must ship (`lib/` artifacts plus the runtime data). */
@@ -551,6 +552,66 @@ test('each component publishes its implementation on its own subpath', async () 
   for (const name of ['jjToolDefinitions', 'registerJjTools', 'jjRefusalText'] as const) {
     assert.equal(typeof tools[name], 'function', `${name} lives on ./tools`);
   }
+});
+
+test('the client bundle is a classic script that registers a lazy sidebar tab', async () => {
+  const bundlePath = join(packageDir, 'lib', 'panel-client.js');
+  const source = readFileSync(bundlePath, 'utf8');
+  assert.doesNotMatch(source, /^\s*(import|export)\s/m, 'a client bundle must be a classic script, not an ES module');
+  assert.match(source, /__ModuleLoader__|globalThis/, 'the bundle registers itself through the module loader');
+  assert.match(source, /@aqian0\/dsh-jj/, 'the loader id is the package name the host resolves');
+
+  // Evaluate the bundle the way the browser does: a global loader captures the factory,
+  // then the factory runs with a stubbed host `require`.
+  interface LoaderModule {
+    readonly id: string;
+    readonly factory: (require: (id: string) => unknown) => { readonly apply?: unknown; readonly inject?: unknown };
+  }
+  const captured: LoaderModule[] = [];
+  const globalWithLoader = globalThis as unknown as {
+    __ModuleLoader__?: { load(module: LoaderModule): void };
+  };
+  const previous = globalWithLoader.__ModuleLoader__;
+  globalWithLoader.__ModuleLoader__ = { load: (module) => captured.push(module) };
+  try {
+    await import(pathToFileURL(bundlePath).href);
+  } finally {
+    globalWithLoader.__ModuleLoader__ = previous;
+  }
+  const loaded = captured[0];
+  assert.ok(loaded !== undefined, 'evaluating the bundle registers exactly one module');
+  assert.equal(loaded.id, '@aqian0/dsh-jj', 'the bundle id must match the package name');
+  const clientModule = loaded.factory((id) => {
+    throw new Error(`unexpected host module request: ${id}`);
+  });
+  assert.equal(typeof clientModule.apply, 'function', 'the client module exposes apply');
+  assert.deepEqual([...(clientModule.inject as readonly string[])], ['slots', 'locale', 'sidebarRight']);
+
+  // The tab registration goes through the public sidebar-right API and tolerates a host
+  // that only provides some of the services.
+  const tabs: Record<string, unknown>[] = [];
+  const slots: { name: string; key: string }[] = [];
+  const locales: string[] = [];
+  (clientModule.apply as (ctx: unknown) => void)({
+    locale: { register: (namespace: string) => locales.push(namespace) },
+    sidebarRightTabs: { register: (definition: Record<string, unknown>) => tabs.push(definition) },
+    slots: {
+      inject: (_name: string, callback: () => unknown) => callback(),
+      register: (definition: Record<string, unknown>) =>
+        slots.push({ name: String(definition.name), key: String(definition.key) }),
+    },
+  });
+  assert.deepEqual(locales, ['jjPanel']);
+  assert.deepEqual(
+    tabs.map((tab) => tab['kind']),
+    ['jj'],
+  );
+  assert.deepEqual(slots, [
+    { name: 'sidebar.right.pane.tab', key: 'jj-panel' },
+    { name: 'sidebar.right.pane.tab.title', key: 'jj-panel' },
+  ]);
+  // A host without sidebar-right must not throw during activation.
+  assert.doesNotThrow(() => (clientModule.apply as (ctx: unknown) => void)({}));
 });
 
 test('the built guard entry installs a working guard against a real jj workspace', async (t) => {

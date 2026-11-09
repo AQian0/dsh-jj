@@ -148,6 +148,15 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 
 相关配置写在 `jj-changes` 行（见下方配置表）。`workspaceChanges: builtin` 可以临时退回内置实现；`workspaceChanges: off` 关闭 jj 记录与卡片数据，但仍提供一个只读空服务（不产生卡片数据），以免连带禁用 Web 端 deliverables/present 相关路由与文件引用提示词。
 
+### 可视化面板（只读）
+
+Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Jujutsu tab（可在侧栏的「添加」里打开）。它不写仓库：不 commit、不 rebase、不清 workspace，也不触发工作副本快照。
+
+- 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，冷启动也只读 `--ignore-working-copy` 的数据。
+- 面板读取失败（jj 缺失、目录不是 jj workspace、元数据损坏）时返回 `enabled: true` + `reason`，界面上是一句说明，不会报错也不会影响会话。
+- 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。
+- `uiPanel: off` 完全关闭面板：路由只回 `enabled: false` 且不读仓库，客户端也不会挂载 tab。headless profile 没有 `connection` 服务，路由根本不会注册。
+
 ## 配置
 
 所有配置键均可选，写在 profile 中对应 bundle 行的 `config` 里：

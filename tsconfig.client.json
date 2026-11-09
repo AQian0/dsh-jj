@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "legacy",
+    "declaration": true,
+    "declarationDir": "lib/types",
+    "outDir": "lib",
+    "rootDir": "src"
+  },
+  "include": ["src/panel-client.ts"],
+  "exclude": []
+}

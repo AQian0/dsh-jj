@@ -84,6 +84,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/policies.ts`                                              | 纯模块:工作区所有权注册表、根 workspace 判定、cleanup 决策、stale 错误识别;工具/flow/guard 共用同一份规则                                                                               |
 | `src/session-heartbeat.ts`                                     | 纯模块:跨进程会话心跳（`<jjRepoPath>/dsh-jj/sessions/*.json`），多会话检测在 `auto` 模式下的第二个来源                                                                                  |
 | `src/flows/cleanup.ts`                                         | 具名流程:离开并注销本会话创建的 workspace（所有权、stale 恢复、切换目录与 forget 的顺序都在这一个地方）                                                                                 |
+| `src/panel-host.ts`                                            | 只读面板 Host 半侧:`/api/jj.overview` + `/api/jj.refresh` 聚合快照、5s 缓存、失败降级;绝不写仓库                                                                                        |
+| `src/panel-client.ts`                                          | 只读面板浏览器半侧:经典 script + `__ModuleLoader__.load` 包裹,注册右侧栏 tab 与 locale;唯一客户端入口                                                                                   |
 | `src/capabilities.ts`                                          | 纯模块:jj 子命令 → 处置（tool / shell / blocked）的能力矩阵；`test/capabilities.test.ts` 断言覆盖 guard 表与已注册工具                                                                  |
 | `src/git-command.ts`                                           | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
 | `src/git-tokenize.ts`                                          | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                   |
@@ -106,6 +108,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `test/changes-service.test.ts`                                 | `changes-service` 合并/路由测试(fake recorder + upstream)                                                                                                                               |
 | `test/changes-entry.test.ts`                                   | `jj-changes` 入口端到端测试(真实 Cordis + 真实 jj/git 夹具:jj-native 卡片、colocated 合并、纯 Git 回退、三种模式)                                                                       |
 | `test/jj-command.test.ts`                                      | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试                                                                                                                         |
+| `tsconfig.client.json`                                         | 单独编译 `src/panel-client.ts`:ES2022 + Bundler + legacy 模块检测,保证产物是无 import/export 的经典脚本                                                                                 |
 | `vite.config.ts`                                               | Vite+ 工具链配置:Oxfmt(`printWidth: 120` / `singleQuote`)与 Oxlint(`unicorn` / `typescript` / `oxc` / `import`),格式与 lint 规则的唯一来源                                              |
 | `pnpm-workspace.yaml`                                          | 单包 pnpm 设置:把 `vite` 别名到 `vite-plus` 自带 core、把 `vitest` 钉到自带运行器,并放行对应 peer 版本(别名版本与 `vite-plus` devDependency 同步,`build.test.ts` 会校验)                |
 | `pnpm-lock.yaml`                                               | 提交的锁文件:工具链与公开 peer 依赖的唯一解析来源,由 `pnpm install` 生成/更新                                                                                                           |
@@ -301,6 +304,23 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - 修改这些守卫/文案时同步 `test/service-tools.test.ts`(commit/new 空提交拒绝、workspaceAdd parent
       丢弃/拒绝、handoff 空 change 上报、cleanup stale 恢复与保留提示)、`test/multi-session.test.ts`(隔离与
       收尾文案、prompt token 预算)与 README「多会话协作」「任务收尾」「已知限制」。
+
+17. **可视化面板(`panel-host` / `panel-client`)**:
+    - Host 半侧只读:`buildJjOverview` 聚合 `detect`/`workspaceStates`/`readAt`/`bookmarkList`/`opLog`,
+      所有读取都用 `--ignore-working-copy`;路由经 `ctx.connection.fetch.register`(与 deliverables 同一 seam),
+      GET 有 5s 缓存 + 在飞去重,异常一律降级为带 `reason` 的快照,不得向 Host 抛 500;`uiPanel: off` 时不读仓库,
+      headless(无 `connection`)时根本不注册。
+    - 浏览器半侧是**经典 script**:`window.__ModuleLoader__.load({ id: <包名>, factory })`,id 必须等于
+      `package.json` 的包名;`package.json` 需要 `dsh.client = { platform: 'web', inject: [客户端包...] }`
+      与 `exports["./client"]`。**不引入打包器**:`src/panel-client.ts` 不写任何运行时 `import`/`export`,
+      由 `tsconfig.client.json`(`module: ES2022` + `moduleResolution: Bundler` + `moduleDetection: legacy`,
+      主 tsconfig 明确 exclude 它)单独编译成 `lib/panel-client.js`,这样 `tsc` 不会追加 `export {}` 把它变成 ESM。
+    - UI 遵循 DSH 官方风格:只用 `--dsw-*`/`--dsh-*` 设计令牌、scoped CSS + 唯一类前缀、roving 的圆角标度、
+      hover 仅在 `@media (hover: hover)`、`aria-*` 状态跟随、主题只靠令牌;组件优先复用
+      `@deepseek-ai/dsh-client-ui-primitives`(Button/Tooltip/HoverCard/Icon 等),不引第三方图标或自造按钮。
+    - `apply` 的每个注册都要 try/catch 并可降级:宿主缺少 sidebar-right/locale 时只登记能登记的部分,
+      客户端 bundle 激活失败会拖垮整个页面。改面板时同步 `test/build.test.ts`(bundle 形态与 loader id)、
+      `test/panel-host.test.ts` 与 README「可视化面板」。
 
 ## 代码约定
 

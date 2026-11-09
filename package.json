@@ -50,6 +50,10 @@
       "types": "./lib/types/detect.d.ts",
       "default": "./lib/detect.js"
     },
+    "./client": {
+      "types": "./lib/types/panel-client.d.ts",
+      "default": "./lib/panel-client.js"
+    },
     "./service": {
       "types": "./lib/types/service.d.ts",
       "default": "./lib/service.js"
@@ -89,7 +93,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "prepack": "pnpm run build",
     "format": "vp fmt",
     "format:check": "vp fmt --check",
@@ -120,6 +124,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
     }
   }
 }
