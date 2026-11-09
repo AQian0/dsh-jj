@@ -41,6 +41,7 @@ function fakeHost(): JjPanelRouteHost & { routes: RegisteredRoute[] } {
 interface Calls {
   detect: number;
   readAt: number;
+  stack: number;
   workspaces: number;
   bookmarks: number;
   operations: number;
@@ -86,6 +87,24 @@ function fakeService(
           paths: [],
         };
       },
+      log: async () => {
+        calls.stack += 1;
+        return [
+          {
+            changeId: 'abcabcabcabc',
+            commitId: '111122223333',
+            description: 'feat: overview',
+            empty: false,
+            conflict: false,
+            currentWorkingCopy: true,
+            bookmarks: [],
+            remoteBookmarks: [],
+            immutable: false,
+            author: 'dev@example.com',
+            paths: [],
+          },
+        ];
+      },
       workspaceStates: async () => {
         calls.workspaces += 1;
         return [
@@ -127,7 +146,7 @@ function fakeService(
 
 /** Zeroed call counters. */
 function zeroCalls(): Calls {
-  return { detect: 0, readAt: 0, workspaces: 0, bookmarks: 0, operations: 0 };
+  return { detect: 0, readAt: 0, stack: 0, workspaces: 0, bookmarks: 0, operations: 0 };
 }
 
 test('the overview reports workspace, working copy, bookmarks and operations', async () => {
@@ -137,6 +156,11 @@ test('the overview reports workspace, working copy, bookmarks and operations', a
   assert.deepEqual(overview.workspace, { kind: 'jj-colocated', root: '/repo', name: 'default' });
   assert.equal(overview.workingCopy?.changeId, 'abcabcabcabc');
   assert.equal(overview.workingCopy?.stale, 'no');
+  assert.deepEqual(
+    overview.stack.map((entry) => entry.changeId),
+    ['abcabcabcabc'],
+    'the stack is read from jj without snapshotting',
+  );
   assert.equal(overview.workspaces.length, 1);
   assert.deepEqual(overview.bookmarks, [{ name: 'main', target: '111122223333', conflicted: false }]);
   assert.equal(overview.operations[0]?.shortId, 'ffff1111');

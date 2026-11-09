@@ -51,47 +51,309 @@ interface ClientContext {
 const DICTIONARIES: Record<string, Record<string, string>> = {
   zh: {
     title: 'Jujutsu',
-    loading: '正在读取 jj 状态…',
-    unavailable: '这个会话不在 jj 仓库中，或 jj 服务不可用。',
     refresh: '刷新',
-    empty: '暂无可显示的内容。',
+    loading: '正在读取 jj 状态…',
+    unavailable: '暂无可显示的内容（这个会话可能不在 jj 仓库里）。',
+    failed: '读取 jj 状态失败。',
+    workingCopy: '工作副本',
+    noDescription: '（无描述）',
+    empty: '空',
+    conflict: '冲突',
+    clean: '干净',
+    stale: 'stale',
+    stack: '栈',
+    noStack: '没有待集成的提交。',
+    workspaces: '工作区',
+    current: '当前',
+    bookmarks: '书签',
+    noBookmarks: '没有书签。',
+    operations: '操作日志',
   },
   en: {
     title: 'Jujutsu',
-    loading: 'Reading jj status…',
-    unavailable: 'This session is not in a jj workspace, or the jj service is unavailable.',
     refresh: 'Refresh',
-    empty: 'Nothing to show yet.',
+    loading: 'Reading jj status…',
+    unavailable: 'Nothing to show (this session may not be in a jj workspace).',
+    failed: 'Could not read jj status.',
+    workingCopy: 'Working copy',
+    noDescription: '(no description)',
+    empty: 'empty',
+    conflict: 'conflict',
+    clean: 'clean',
+    stale: 'stale',
+    stack: 'Stack',
+    noStack: 'No commits to integrate.',
+    workspaces: 'Workspaces',
+    current: 'current',
+    bookmarks: 'Bookmarks',
+    noBookmarks: 'No bookmarks.',
+    operations: 'Operations',
   },
 };
 
+/** One change row as the Host sends it. */
+interface OverviewChange {
+  readonly changeId: string;
+  readonly commitId: string;
+  readonly description: string;
+  readonly empty: boolean;
+  readonly conflict: boolean;
+  readonly currentWorkingCopy: boolean;
+}
+
+/** One workspace row as the Host sends it. */
+interface OverviewWorkspace {
+  readonly name: string;
+  readonly root: string;
+  readonly current: boolean;
+  readonly changeId: string;
+  readonly description: string;
+  readonly empty: boolean;
+  readonly conflict: boolean;
+  readonly stale: 'yes' | 'no' | 'unknown';
+}
+
+/** The `/api/jj.overview` payload this bundle renders. */
+interface Overview {
+  readonly enabled: boolean;
+  readonly workspace?: { readonly kind: string; readonly root: string; readonly name: string };
+  readonly workingCopy?: {
+    readonly changeId: string;
+    readonly commitId: string;
+    readonly description: string;
+    readonly empty: boolean;
+    readonly conflict: boolean;
+    readonly stale: 'yes' | 'no' | 'unknown';
+  };
+  readonly stack: readonly OverviewChange[];
+  readonly workspaces: readonly OverviewWorkspace[];
+  readonly bookmarks: readonly { readonly name: string; readonly target?: string; readonly conflicted: boolean }[];
+  readonly operations: readonly {
+    readonly id: string;
+    readonly shortId: string;
+    readonly description: string;
+    readonly time: string;
+    readonly workspaceName: string | null;
+    readonly isSnapshot: boolean;
+  }[];
+  readonly reason?: string;
+}
+
+/** Slot props the framework composes for a session-scoped tab body. */
+interface TabProps {
+  readonly sessionId?: unknown;
+  readonly useSessions?: (selector: (state: unknown) => unknown) => unknown;
+  readonly t?: (key: string) => string;
+}
+
+/** Design tokens only: the official theme owns every colour, size and radius. */
+const STYLE = {
+  page: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    padding: '10px 12px',
+    color: 'var(--dsw-alias-label-primary)',
+    fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
+    lineHeight: 1.5,
+    minHeight: 0,
+    overflow: 'auto',
+  },
+  sectionTitle: {
+    color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '12px',
+    margin: '2px 0 0',
+  },
+  row: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '6px',
+    borderRadius: 'var(--dsw-radius-md)',
+    padding: '4px 6px',
+  },
+  mono: {
+    fontFamily: 'var(--dsw-font-family-mono, ui-monospace, monospace)',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
+  chip: {
+    borderRadius: 'var(--dsw-radius-sm)',
+    border: '0.5px solid var(--dsw-alias-border-l3)',
+    color: 'var(--dsw-alias-label-tertiary)',
+    fontSize: '12px',
+    padding: '0 4px',
+  },
+  note: {
+    color: 'var(--dsw-alias-label-tertiary)',
+    fontSize: '12px',
+    margin: 0,
+  },
+  action: {
+    alignSelf: 'flex-start',
+    borderRadius: 'var(--dsw-radius-sm)',
+    border: '0.5px solid var(--dsw-alias-border-l3)',
+    background: 'none',
+    color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '12px',
+    padding: '2px 8px',
+    cursor: 'pointer',
+  },
+} as const;
+
+/** React implementation captured from the host module factory. */
+let ReactImpl: ReactLike | undefined;
+
+/** Create one element (the bundle cannot use JSX: it is a classic script). */
+function h(type: unknown, props?: Readonly<Record<string, unknown>> | null, ...children: unknown[]): unknown {
+  return ReactImpl?.createElement(type, props, ...children);
+}
+
+/** Short change/commit id for display. */
+function shortId(id: string): string {
+  return id.length > 12 ? id.slice(0, 12) : id;
+}
+
+/** One labelled row with an optional trailing chip. */
+function row(label: unknown, value: unknown, chip?: string): unknown {
+  return h(
+    'div',
+    { style: STYLE.row, key: String(label) },
+    h('span', { style: STYLE.mono }, label),
+    h(
+      'span',
+      { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+      value,
+    ),
+    chip === undefined ? null : h('span', { style: STYLE.chip }, chip),
+  );
+}
+
 /**
- * Tab body: a placeholder that the data slice replaces with the overview sections.
+ * Tab body: fetch the read-only overview and render the four sections.
  *
- * @param props - slot props; only the translation function is used.
+ * The request is document-relative (the host serves the Web app from a route prefix) and
+ * carries the session's working directory, which the framework exposes through the
+ * session-scoped slot props. Every failure renders a short note instead of an error.
+ *
+ * @param props - slot props (`sessionId`, `useSessions`, `t`).
  * @returns the React element tree.
  */
-function JjPanelBody(props: { readonly t?: (key: string) => string; readonly React?: ReactLike }): unknown {
-  const React = props.React;
-  if (React === undefined) return null;
+function JjPanelBody(props: TabProps): unknown {
   const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
-  const [refreshing, setRefreshing] = React.useState(false);
-  React.useEffect(() => {
-    // Data loading arrives with the overview slice; keep the body side-effect free.
-    setRefreshing(false);
-  }, []);
-  const refresh = (): void => setRefreshing(!refreshing);
-  return React.createElement(
-    'div',
-    { className: 'dshjj-panel' },
-    React.createElement('p', { className: 'dshjj-panel__note' }, t('loading')),
-    React.createElement('p', { className: 'dshjj-panel__note' }, t('empty')),
-    React.createElement(
+  const fallbackSessions = (): unknown => undefined;
+  const useSessions = props.useSessions ?? fallbackSessions;
+  const cwd = useSessions((state) => {
+    const byId = (state as { byId?: Record<string, { cwd?: unknown }> } | undefined)?.byId;
+    const id = typeof props.sessionId === 'string' ? props.sessionId : undefined;
+    return id === undefined ? undefined : byId?.[id]?.cwd;
+  });
+  const [overview, setOverview] = ReactImpl?.useState<Overview | undefined>(undefined) ?? [undefined, () => {}];
+  const [reloading, setReloading] = ReactImpl?.useState(false) ?? [false, () => {}];
+  const [failed, setFailed] = ReactImpl?.useState(false) ?? [false, () => {}];
+
+  ReactImpl?.useEffect(() => {
+    if (typeof cwd !== 'string' || cwd.length === 0) {
+      setOverview(undefined);
+      return undefined;
+    }
+    let alive = true;
+    void fetch(`api/jj.overview?cwd=${encodeURIComponent(cwd)}`, {
+      headers: { accept: 'application/json' },
+    })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
+      .then((payload: unknown) => {
+        if (alive) {
+          setOverview(payload as Overview);
+          setFailed(false);
+        }
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [cwd, reloading]);
+
+  const reload = (): void => {
+    if (typeof cwd === 'string' && cwd.length > 0) {
+      setReloading(!reloading);
+      void fetch('api/jj.refresh', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd }),
+      }).catch(() => undefined);
+    }
+  };
+
+  const children: unknown[] = [
+    h(
+      'p',
+      { style: STYLE.sectionTitle, key: 'title' },
+      overview?.workspace !== undefined
+        ? `${overview.workspace.name} · ${overview.workspace.kind} · ${overview.workspace.root}`
+        : t('workingCopy'),
+    ),
+  ];
+  if (failed) children.push(h('p', { style: STYLE.note, key: 'failed' }, t('failed')));
+  if (overview === undefined) {
+    children.push(h('p', { style: STYLE.note, key: 'loading' }, t('loading')));
+  } else if (overview.reason !== undefined || overview.workspace === undefined) {
+    children.push(h('p', { style: STYLE.note, key: 'unavailable' }, overview.reason ?? t('unavailable')));
+  } else {
+    const copy = overview.workingCopy;
+    if (copy !== undefined) {
+      const chips = [copy.empty ? t('empty') : t('clean'), copy.conflict ? t('conflict') : ''].filter(
+        (chip) => chip.length > 0,
+      );
+      children.push(
+        h('p', { style: STYLE.sectionTitle, key: 'wc-title' }, t('workingCopy')),
+        row(
+          shortId(copy.changeId),
+          copy.description.length > 0 ? copy.description : t('noDescription'),
+          chips.join(' · '),
+        ),
+      );
+    }
+    children.push(h('p', { style: STYLE.sectionTitle, key: 'stack-title' }, t('stack')));
+    if (overview.stack.length === 0) children.push(h('p', { style: STYLE.note, key: 'stack-empty' }, t('noStack')));
+    for (const change of overview.stack) {
+      children.push(
+        row(
+          shortId(change.changeId),
+          change.description.length > 0 ? change.description : t('noDescription'),
+          change.currentWorkingCopy ? '@' : change.conflict ? t('conflict') : undefined,
+        ),
+      );
+    }
+    children.push(h('p', { style: STYLE.sectionTitle, key: 'ws-title' }, t('workspaces')));
+    for (const workspace of overview.workspaces) {
+      children.push(row(workspace.name, workspace.root, workspace.current ? t('current') : undefined));
+    }
+    children.push(h('p', { style: STYLE.sectionTitle, key: 'marks-title' }, t('bookmarks')));
+    if (overview.bookmarks.length === 0)
+      children.push(h('p', { style: STYLE.note, key: 'marks-empty' }, t('noBookmarks')));
+    for (const bookmark of overview.bookmarks) {
+      children.push(
+        row(
+          bookmark.name,
+          bookmark.target === undefined ? '' : shortId(bookmark.target),
+          bookmark.conflicted ? t('conflict') : undefined,
+        ),
+      );
+    }
+    children.push(h('p', { style: STYLE.sectionTitle, key: 'ops-title' }, t('operations')));
+    for (const operation of overview.operations) {
+      children.push(row(operation.shortId, operation.description));
+    }
+  }
+  children.push(
+    h(
       'button',
-      { type: 'button', className: 'dshjj-panel__action', onClick: refresh, 'aria-pressed': refreshing },
+      { type: 'button', style: STYLE.action, onClick: reload, 'aria-pressed': reloading, key: 'refresh' },
       t('refresh'),
     ),
   );
+  return h('div', { style: STYLE.page, className: 'dshjj-panel' }, children);
 }
 
 /** Tab title: the localized name printed on the tab chip. */
@@ -157,7 +419,8 @@ loader?.load({
   id: PANEL_BUNDLE_ID,
   factory: (require: RequireFn) => {
     const module = { exports: {} as { apply: (ctx: ClientContext) => void; inject: readonly string[] } };
-    void require; // React is required by the data slice; the skeleton renders text only.
+    // React is provided by the host's frozen module table; the bundle never ships its own.
+    ReactImpl = require('react') as ReactLike;
     module.exports.apply = apply;
     module.exports.inject = inject;
     return module.exports;

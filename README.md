@@ -152,9 +152,9 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 
 Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Jujutsu tab（可在侧栏的「添加」里打开）。它不写仓库：不 commit、不 rebase、不清 workspace，也不触发工作副本快照。
 
-- 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，冷启动也只读 `--ignore-working-copy` 的数据。
+- 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、待集成栈（`::@ ~ ::immutable_heads()`，最多 20 条）、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，所有读取都用 `--ignore-working-copy`（包括栈的 `jj log`），打开面板不会触发工作副本快照。
 - 面板读取失败（jj 缺失、目录不是 jj workspace、元数据损坏）时返回 `enabled: true` + `reason`，界面上是一句说明，不会报错也不会影响会话。
-- 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。
+- 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。面板正文按「工作副本 → 栈 → 工作区 → 书签 → 操作日志」分区渲染，并用会话作用域的 slot props（`sessionId` + `useSessions`）取得当前目录。
 - `uiPanel: off` 完全关闭面板：路由只回 `enabled: false` 且不读仓库，客户端也不会挂载 tab。headless profile 没有 `connection` 服务，路由根本不会注册。
 
 ## 配置

@@ -25,13 +25,16 @@ export const JJ_REFRESH_PATH = '/api/jj.refresh';
 /** Default cache lifetime for one overview snapshot. */
 export const JJ_OVERVIEW_TTL_MS = 5_000;
 
+/** How many stack rows the panel shows. */
+export const JJ_OVERVIEW_STACK_LIMIT = 20;
+
 /** How many recent operations the panel shows. */
 export const JJ_OVERVIEW_OPERATION_LIMIT = 10;
 
 /** The subset of `JjService` the panel reads (a live service satisfies it). */
 export interface JjPanelServiceLike {
   detect(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor>;
-  readonly operations: Pick<JjOperations, 'readAt' | 'workspaceStates' | 'bookmarkList' | 'opLog'>;
+  readonly operations: Pick<JjOperations, 'readAt' | 'log' | 'workspaceStates' | 'bookmarkList' | 'opLog'>;
 }
 
 /** One bookmark as the panel shows it. */
@@ -39,6 +42,16 @@ export interface JjPanelBookmark {
   readonly name: string;
   readonly target?: string;
   readonly conflicted: boolean;
+}
+
+/** One change as the panel shows it (stack rows). */
+export interface JjPanelChange {
+  readonly changeId: string;
+  readonly commitId: string;
+  readonly description: string;
+  readonly empty: boolean;
+  readonly conflict: boolean;
+  readonly currentWorkingCopy: boolean;
 }
 
 /** One operation as the panel shows it. */
@@ -68,6 +81,8 @@ export interface JjOverview {
     readonly conflict: boolean;
     readonly stale: 'yes' | 'no' | 'unknown';
   };
+  /** The stack above the integration base (`::@ ~ ::immutable_heads()`), newest first. */
+  readonly stack: readonly JjPanelChange[];
   readonly workspaces: readonly JjWorkspaceState[];
   readonly bookmarks: readonly JjPanelBookmark[];
   readonly operations: readonly JjPanelOperation[];
@@ -124,6 +139,29 @@ function toPanelOperation(operation: JjOperation): JjPanelOperation {
   };
 }
 
+/** Read the current stack without snapshotting the working copy. */
+async function readStack(
+  service: JjPanelServiceLike,
+  cwd: string,
+  signal: AbortSignal | undefined,
+): Promise<JjPanelChange[]> {
+  try {
+    const changes = await service.operations.log(cwd, '::@ ~ ::immutable_heads()', JJ_OVERVIEW_STACK_LIMIT, signal, {
+      ignoreWorkingCopy: true,
+    });
+    return changes.map((change) => ({
+      changeId: change.changeId,
+      commitId: change.commitId,
+      description: change.description,
+      empty: change.empty,
+      conflict: change.conflict,
+      currentWorkingCopy: change.currentWorkingCopy,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 /** Read the bookmarks, tolerating a repository without any. */
 async function readBookmarks(
   service: JjPanelServiceLike,
@@ -173,6 +211,7 @@ export async function buildJjOverview(
   const kind = descriptor.kind;
   const empty: JjOverview = {
     enabled: options.enabled,
+    stack: [],
     workspaces: [],
     bookmarks: [],
     operations: [],
@@ -190,8 +229,9 @@ export async function buildJjOverview(
     root: descriptor.root,
     name: descriptor.workspaceName ?? 'default',
   } as const;
-  const [change, workspaces, bookmarks, operations] = await Promise.all([
+  const [change, stack, workspaces, bookmarks, operations] = await Promise.all([
     service.operations.readAt(cwd, options.signal).catch(() => undefined),
+    readStack(service, cwd, options.signal),
     service.operations.workspaceStates(cwd, options.signal).catch(() => [] as JjWorkspaceState[]),
     readBookmarks(service, cwd, options.signal),
     readOperations(service, cwd, options.signal),
@@ -212,6 +252,7 @@ export async function buildJjOverview(
           },
         }
       : {}),
+    stack,
     workspaces,
     bookmarks,
     operations,
@@ -255,6 +296,7 @@ export function registerJjPanelRoutes(host: JjPanelRouteHost, options: JjPanelRo
         // the client show that the repository state is unavailable.
         return {
           enabled: options.enabled,
+          stack: [],
           workspaces: [],
           bookmarks: [],
           operations: [],
@@ -276,7 +318,7 @@ export function registerJjPanelRoutes(host: JjPanelRouteHost, options: JjPanelRo
     requestBody: 'buffered',
     fetch: async (request: Request): Promise<Response> => {
       if (!options.enabled) {
-        return Response.json({ enabled: false, workspaces: [], bookmarks: [], operations: [] });
+        return Response.json({ enabled: false, stack: [], workspaces: [], bookmarks: [], operations: [] });
       }
       const cwd = cwdFromRequest(request);
       if (cwd === undefined) {

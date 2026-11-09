@@ -92,9 +92,10 @@ function assertBookmarkName(name: string): void {
 }
 
 /** `jj log -r <revset> --no-graph [--limit <n>] -T <template>`: the argv every change read shares. */
-function logArgv(revset: string, template: string, limit?: number): string[] {
+function logArgv(revset: string, template: string, limit?: number, ignoreWorkingCopy = false): string[] {
   const boundedBy = limit === undefined ? [] : ['--limit', String(limit)];
-  return ['log', '-r', revset, '--no-graph', ...boundedBy, '-T', template];
+  const staticCopy = ignoreWorkingCopy ? ['--ignore-working-copy'] : [];
+  return ['log', '-r', revset, '--no-graph', ...staticCopy, ...boundedBy, '-T', template];
 }
 
 /**
@@ -458,11 +459,18 @@ export class JjOperations {
   }
 
   /** `jj log -r <revset> --no-graph --limit <n> -T <TPL_LOG>`. */
-  async log(cwd: string, revset: string, limit: number, signal?: AbortSignal): Promise<readonly JjChangeRecord[]> {
+  async log(
+    cwd: string,
+    revset: string,
+    limit: number,
+    signal?: AbortSignal,
+    options: { readonly ignoreWorkingCopy?: boolean } = {},
+  ): Promise<readonly JjChangeRecord[]> {
     // Content-reporting reads intentionally snapshot: `jj log -r @` must show the
     // current working-copy content (contract §5.8's --ignore-working-copy applies
-    // to metadata reads, which are listed below).
-    const argv = logArgv(revset, TPL_LOG, limit);
+    // to metadata reads, which are listed below). Read-only callers (the panel) pass
+    // `ignoreWorkingCopy` so opening a panel never rewrites the snapshot commit.
+    const argv = logArgv(revset, TPL_LOG, limit, options.ignoreWorkingCopy === true);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecords(result.stdout, argv);
   }

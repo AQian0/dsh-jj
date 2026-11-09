@@ -581,7 +581,20 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   const loaded = captured[0];
   assert.ok(loaded !== undefined, 'evaluating the bundle registers exactly one module');
   assert.equal(loaded.id, '@aqian0/dsh-jj', 'the bundle id must match the package name');
+  interface FakeElement {
+    readonly type: unknown;
+    readonly props: Record<string, unknown>;
+  }
+  const reactStub = {
+    createElement: (type: unknown, props?: Record<string, unknown> | null, ...children: unknown[]): FakeElement => ({
+      type,
+      props: { ...props, children },
+    }),
+    useState: <T>(initial: T): [T, (next: T) => void] => [initial, () => {}],
+    useEffect: (): void => {},
+  };
   const clientModule = loaded.factory((id) => {
+    if (id === 'react') return reactStub;
     throw new Error(`unexpected host module request: ${id}`);
   });
   assert.equal(typeof clientModule.apply, 'function', 'the client module exposes apply');
@@ -590,15 +603,15 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   // The tab registration goes through the public sidebar-right API and tolerates a host
   // that only provides some of the services.
   const tabs: Record<string, unknown>[] = [];
-  const slots: { name: string; key: string }[] = [];
+  const slots: { name: string; key: string; component: unknown }[] = [];
   const locales: string[] = [];
   (clientModule.apply as (ctx: unknown) => void)({
     locale: { register: (namespace: string) => locales.push(namespace) },
     sidebarRightTabs: { register: (definition: Record<string, unknown>) => tabs.push(definition) },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
-      register: (definition: Record<string, unknown>) =>
-        slots.push({ name: String(definition.name), key: String(definition.key) }),
+      register: (definition: Record<string, unknown>, component: unknown) =>
+        slots.push({ name: String(definition.name), key: String(definition.key), component }),
     },
   });
   assert.deepEqual(locales, ['jjPanel']);
@@ -606,10 +619,20 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
     tabs.map((tab) => tab['kind']),
     ['jj'],
   );
-  assert.deepEqual(slots, [
-    { name: 'sidebar.right.pane.tab', key: 'jj-panel' },
-    { name: 'sidebar.right.pane.tab.title', key: 'jj-panel' },
-  ]);
+  assert.deepEqual(
+    slots.map((slot) => ({ name: slot.name, key: slot.key })),
+    [
+      { name: 'sidebar.right.pane.tab', key: 'jj-panel' },
+      { name: 'sidebar.right.pane.tab.title', key: 'jj-panel' },
+    ],
+  );
+  // The body renders its page shell even before any data arrives (no session cwd here).
+  const body = slots[0]?.component as (props: Record<string, unknown>) => FakeElement;
+  const tree = body({ sessionId: 'session-1', useSessions: () => undefined, t: (key: string) => key });
+  assert.equal(tree.props['className'], 'dshjj-panel');
+  assert.ok(Array.isArray(tree.props['children']) && (tree.props['children'] as unknown[]).length > 0);
+  const title = slots[1]?.component as (props: Record<string, unknown>) => unknown;
+  assert.equal(title({ t: (key: string) => key }), 'title');
   // A host without sidebar-right must not throw during activation.
   assert.doesNotThrow(() => (clientModule.apply as (ctx: unknown) => void)({}));
 });

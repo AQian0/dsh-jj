@@ -318,9 +318,12 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - UI 遵循 DSH 官方风格:只用 `--dsw-*`/`--dsh-*` 设计令牌、scoped CSS + 唯一类前缀、roving 的圆角标度、
       hover 仅在 `@media (hover: hover)`、`aria-*` 状态跟随、主题只靠令牌;组件优先复用
       `@deepseek-ai/dsh-client-ui-primitives`(Button/Tooltip/HoverCard/Icon 等),不引第三方图标或自造按钮。
+    - 正文是会话作用域的 slot 组件:从 props 取 `sessionId` 与 `useSessions`(选择 `byId[sessionId].cwd`),
+      再 `fetch('api/jj.overview?cwd=…')`;没有 cwd 时只显示加载态。所有网络与渲染失败都降级为一句说明,
+      不得抛出。
     - `apply` 的每个注册都要 try/catch 并可降级:宿主缺少 sidebar-right/locale 时只登记能登记的部分,
-      客户端 bundle 激活失败会拖垮整个页面。改面板时同步 `test/build.test.ts`(bundle 形态与 loader id)、
-      `test/panel-host.test.ts` 与 README「可视化面板」。
+      客户端 bundle 激活失败会拖垮整个页面。改面板时同步 `test/build.test.ts`(bundle 形态与 loader id、
+      body 冒烟渲染)、`test/panel-host.test.ts` 与 README「可视化面板」。
 
 ## 代码约定
 
