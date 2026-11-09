@@ -1039,6 +1039,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           description:
             'Run `jj git fetch` first (default true). Set false when the user explicitly asked to stay offline.',
         },
+        dryRun: {
+          type: 'boolean',
+          description:
+            'Plan only (default false): resolve the target, run the same boundary validations and read the stack, but do not fetch, rebase or move a bookmark. Use it when the user asks what a hand-off would do.',
+        },
       },
       output: {
         schema: {
@@ -1063,6 +1068,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             alreadyIntegrated: { type: 'boolean', required: true },
             onTarget: { type: 'boolean', required: true },
             needsCommit: { type: 'boolean', required: true },
+            dryRun: { type: 'boolean', required: true },
             ambiguousRoots: { type: 'array', items: { type: 'string' }, required: true },
             conflicts: {
               type: 'array',
@@ -1143,6 +1149,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             ...(explicitFirst !== undefined && explicitFirst.length > 0 ? { firstChange: explicitFirst } : {}),
             ...(args.bookmark !== undefined ? { bookmark: args.bookmark } : {}),
             ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
+            ...(args.dryRun !== undefined ? { dryRun: args.dryRun } : {}),
           },
           exec.signal,
         );
@@ -1159,6 +1166,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           alreadyIntegrated: result.alreadyIntegrated,
           onTarget: result.onTarget,
           needsCommit: result.needsCommit,
+          dryRun: result.dryRun,
           ambiguousRoots: [...result.ambiguousRoots],
           conflicts: result.conflicts.map((conflict) => ({
             changeId: conflict.changeId,
@@ -1181,6 +1189,21 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             workspaceName,
           },
           nextActions: nextActions(
+            ...(result.dryRun
+              ? [
+                  {
+                    tool: 'jj_handoff',
+                    args: {
+                      ...(args.destination !== undefined ? { destination: args.destination } : {}),
+                      ...(explicitFirst !== undefined && explicitFirst.length > 0
+                        ? { firstChange: explicitFirst }
+                        : {}),
+                      dryRun: false,
+                    },
+                    reason: 'The plan was accepted: run the same hand-off without dryRun to rebase the stack.',
+                  },
+                ]
+              : []),
             ...(result.needsCommit
               ? [
                   {

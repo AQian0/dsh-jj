@@ -105,6 +105,8 @@ Use the jj equivalent instead:
 
 `jj_handoff` 只在确实找不到集成目标时才需要你指定 revision；它不会自动 push，推送仍由你执行。请求移动的 bookmark 指向共享历史或处于冲突状态（并发操作分别移动/删除了它）时，`jj_handoff` 不会替你选边，只在结果里说明原因。单会话默认不会自动收到这段收尾提示，需要时可以直接让模型调用 `jj_handoff`。
 
+`jj_handoff { dryRun: true }` 只做计划：跳过 fetch、解析目标、跑同一套边界校验并读出栈，返回 `dryRun: true` 且 `rebased: false`，不改任何 change id、不移动 bookmark；确认计划后再不带 `dryRun` 调一次即可执行。
+
 `jj_handoff` 还会检查整合后的栈里是否残留空提交（并行的重复改动 rebase 后会变空，或历史遗留的其它 workspace 空 `@`），并把这些空提交以结构化字段 `emptyChanges`（change id、描述、是否为当前工作副本）一起返回：本会话自己的、rebase 后才变空的已描述 change 可以用 `jj_abandon` 丢弃；没有描述的空 change 通常是别的 workspace 的工作副本，不要 abandon，报告给你。`jj_workspace_cleanup` 注销 workspace 后，如果其空工作副本因为已有描述或还有后代而没有被 jj 自动丢弃，也会在结果里提示（不会自动改写或 abandon）；如果默认 workspace 因兄弟 workspace 的 rebase 变成 stale，清理时会先自动恢复再注销。
 
 每个工具结果的 JSON 里都有一个可选的 **`nextActions`** 字段：最多 3 条 `{ tool, args?, reason }`，只列真实存在的 `jj_*` 工具。它取代了用散文写「下一步该做什么」，客户端或模型可以直接照着调用；`jj_commit` / `jj_amend` / `jj_handoff` / `jj_workspace_add` / `jj_workspace_cleanup` / `jj_abandon` / `jj_fetch` 都会在合适的时候给出。

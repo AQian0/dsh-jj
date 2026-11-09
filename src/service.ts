@@ -261,6 +261,12 @@ export interface JjHandoffOptions {
   readonly bookmark?: string;
   /** Run `jj git fetch` first (default true; a repository without remotes is fine). */
   readonly fetch?: boolean;
+  /**
+   * Plan only: resolve the target, validate the boundaries and read the stack, but do
+   * not fetch, rebase or move a bookmark (default false). A dry run never touches the
+   * repository, so the reported conflicts are the ones already present in the stack.
+   */
+  readonly dryRun?: boolean;
 }
 
 /** One conflicted change reported by a hand-off. */
@@ -322,6 +328,8 @@ export interface JjHandoffResult {
   readonly conflicts: readonly JjHandoffConflict[];
   /** True when `@` has uncommitted content and must be committed before a hand-off. */
   readonly needsCommit: boolean;
+  /** True when nothing was fetched, rebased or moved (planning only). */
+  readonly dryRun: boolean;
   readonly message: string;
   readonly bookmark?: JjHandoffBookmark;
   /** Why a requested bookmark move was skipped (conflicts, empty stack). */
@@ -1619,6 +1627,7 @@ export class JjOperations {
         ambiguousRoots: [],
         conflicts: [],
         needsCommit: true,
+        dryRun: options.dryRun === true,
         message:
           "The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository's style), then call jj_handoff again.",
       };
@@ -1631,8 +1640,10 @@ export class JjOperations {
     const requestedBookmark = options.bookmark?.trim();
     if (requestedBookmark !== undefined && requestedBookmark.length > 0) assertBookmarkName(requestedBookmark);
 
-    const fetchResult: JjFetchResult =
-      options.fetch === false
+    const dryRun = options.dryRun === true;
+    const fetchResult: JjFetchResult = dryRun
+      ? { status: 'skipped', message: 'jj git fetch was skipped because this is a dry run.' }
+      : options.fetch === false
         ? { status: 'skipped', message: 'jj git fetch was disabled for this call.' }
         : await this.fetch(cwd, signal);
     const target = await this.resolveHandoffTarget(
@@ -1666,6 +1677,7 @@ export class JjOperations {
       ambiguousRoots: [],
       conflicts: [],
       needsCommit: false,
+      dryRun: options.dryRun === true,
       message: '',
     };
 
@@ -1749,6 +1761,22 @@ export class JjOperations {
     // source-mode rebase would rewrite trunk history (A2-F1).
     await this.assertStackNotShared(cwd, first.changeId, requestedBookmark, signal);
     await this.assertDestinationCoversBase(cwd, target.revset, signal);
+
+    if (dryRun) {
+      // Planning only: the same validations ran, so a refused dry run is as meaningful
+      // as a refused real one, but nothing was fetched, rebased or moved.
+      const stack = await this.stackFrom(cwd, first.changeId, signal);
+      return {
+        ...base,
+        firstChangeId: first.changeId,
+        stack,
+        conflicts: this.conflictsIn(stack),
+        message: `Dry run: ${stack.length} change${stack.length === 1 ? '' : 's'} would be rebased onto ${target.revset}. Nothing was fetched, rebased or moved; call jj_handoff again without dryRun to perform it.${this.stackTruncationNote(stack)}`,
+        ...(requestedBookmark !== undefined && requestedBookmark.length > 0
+          ? { bookmarkSkipped: `Bookmark ${requestedBookmark} was not moved because this was a dry run.` }
+          : {}),
+      };
+    }
 
     const message = await this.rebase(cwd, first.changeId, target.revset, signal, 'source');
     const stack = await this.stackFrom(cwd, first.changeId, signal);

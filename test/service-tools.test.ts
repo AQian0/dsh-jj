@@ -1308,6 +1308,50 @@ test('jj_handoff: a rebase that empties a session change reports it instead of c
   );
 });
 
+test('jj_handoff dryRun reports the plan without fetching, rebasing or moving bookmarks', async (t) => {
+  const { fx, repo, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-dry-run');
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await mustRun(fx.run, ['jj', 'new', 'main', '-m', 'chore: advance'], repo);
+  await writeFixtureFile(fx, repo, 'adv.txt', 'advance');
+  await commitWorkingCopy(fx, repo, 'chore: advance');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+
+  const before = await operations.log(ws, '::@', 10);
+  const plan = await operations.handoff(ws, { dryRun: true, bookmark: 'feature' });
+  assert.equal(plan.dryRun, true);
+  assert.equal(plan.rebased, false);
+  assert.equal(plan.fetch.status, 'skipped');
+  assert.match(plan.fetch.message, /dry run/);
+  assert.match(plan.message, /Dry run/);
+  assert.ok(
+    plan.stack.some((change) => change.description === 'feat: one'),
+    'the stack is reported',
+  );
+  assert.match(String(plan.bookmarkSkipped), /dry run/, 'the requested bookmark is not moved by a dry run');
+
+  const after = await operations.log(ws, '::@', 10);
+  assert.deepEqual(
+    after.map((change) => change.changeId),
+    before.map((change) => change.changeId),
+    'a dry run changes no change id (nothing was rebased)',
+  );
+
+  // The real hand-off afterwards still rebases the stack onto main.
+  const real = await operations.handoff(ws, { bookmark: 'feature', fetch: false });
+  assert.equal(real.rebased, true);
+  assert.equal(real.dryRun, false);
+
+  // The tool exposes the flag and recommends the real run next.
+  const handoff = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations)))).get('jj_handoff')!;
+  fx.cwd = ws;
+  const value = (await handoff.execute({ dryRun: true }, fakeExec())) as Record<string, unknown>;
+  assert.equal(value['dryRun'], true);
+  const actions = value['nextActions'] as { tool: string; args?: Record<string, unknown> }[];
+  assert.equal(actions[0]?.tool, 'jj_handoff');
+  assert.equal(actions[0]?.args?.['dryRun'], false);
+});
+
 test('jj_workspace_cleanup tool: unregisters only a session-created workspace and returns to the default workspace', async (t) => {
   const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
   const fx = makeFixture(t, 'dsh-jj-tool-cleanup');

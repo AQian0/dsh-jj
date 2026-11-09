@@ -194,6 +194,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       必须列出 change id / 描述 / 是否当前工作副本,但不自动 abandon(可能是别的 workspace 的空工作副本),也不在
       `nextActions` 里给 `jj_abandon`(归属无法判定);本会话自己的、rebase 后才变空的已描述 change 只由模型按
       指引用 `jj_abandon` 丢弃。
+    - **`dryRun` 只做计划**:dryRun **跳过** fetch(`fetch.status: 'skipped'`),在
+      `assertStackNotShared` / `assertDestinationCoversBase` 两个 fail-closed 校验之后、`rebase()` 之前返回:
+      `rebased:false`、`onTarget:false`、`conflicts` 是栈里**已有**的冲突、`bookmarkSkipped` 说明 bookmark 未移动。
+      dryRun 不得改写任何 change id,`nextActions` 第一项是带 `dryRun:false` 的同参数 `jj_handoff`。
     - **stale 恢复必须包住整个流程**:stale 时连目标/栈的 `jj log` 读取都会失败,所以 `handoff()` 用
       「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
       rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
