@@ -502,7 +502,6 @@ test('each component publishes its implementation on its own subpath', async () 
     'resolveCommitStylePolicy',
     'classifyDescriptionStyle',
     'commitStylePromptText',
-    'commitCorrectionHint',
     'firstDescriptionLine',
   ] as const) {
     assert.equal(typeof commitStyle[name], 'function', `${name} lives on ./commit-style`);

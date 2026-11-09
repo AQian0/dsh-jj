@@ -666,12 +666,21 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
   const result = (await definitions
     .get('jj_commit')!
     .execute({ message: 'feat: tool commit', paths: ['one.txt'] }, fakeExec())) as {
-    readonly committed: { readonly description: string; readonly empty: boolean; readonly currentWorkingCopy: boolean };
+    readonly committed: {
+      readonly changeId: string;
+      readonly description: string;
+      readonly empty: boolean;
+      readonly currentWorkingCopy: boolean;
+    };
     readonly workingCopy: { readonly empty: boolean; readonly currentWorkingCopy: boolean };
     readonly committedPaths: readonly string[];
     readonly workingCopyPaths: readonly string[];
     readonly warnings: readonly string[];
-    readonly nextStep: string;
+    readonly nextActions: readonly {
+      readonly tool: string;
+      readonly args?: Record<string, unknown>;
+      readonly reason: string;
+    }[];
   };
   assert.equal(result.committed.description, 'feat: tool commit');
   assert.equal(result.committed.currentWorkingCopy, false);
@@ -680,8 +689,10 @@ test('jj_commit tool commits the change and reports the fresh working copy', asy
   assert.deepEqual([...result.committedPaths], ['one.txt']);
   assert.deepEqual([...result.workingCopyPaths], ['two.txt']);
   assert.deepEqual([...result.warnings], []);
-  assert.match(result.nextStep, /unpushed|rewritable/);
-  assert.match(result.nextStep, /jj_amend/);
+  const amendAction = result.nextActions.find((action) => action.tool === 'jj_amend');
+  assert.ok(amendAction !== undefined, 'an unpushed commit offers the amend follow-up');
+  assert.equal(amendAction.args?.['into'], result.committed.changeId, 'the amend hint targets the commit just made');
+  assert.match(amendAction.reason, /unpushed|jj_amend/);
   const status = await operations.status(repo);
   assert.deepEqual([...status.changedPaths], ['two.txt']);
 
@@ -1227,11 +1238,15 @@ test('jj_handoff tool: runs the whole hand-off and reports model next steps', as
   assert.equal(value['workspaceName'], 'session');
   assert.equal(value['destinationSource'], 'main');
   assert.equal(value['rebased'], true);
-  assert.match(String(value['nextSteps']), /Report the rebased change ids/);
-  assert.match(
-    String(value['nextSteps']),
-    /user action/,
+  assert.deepEqual(value['emptyChanges'], []);
+  assert.deepEqual(
+    value['cleanup'],
+    { required: true, owned: false, workspaceName: 'session' },
     'cleanup of a workspace not created through jj_workspace_add stays with the user',
+  );
+  assert.ok(
+    !(value['nextActions'] as { tool: string }[]).some((action) => action.tool === 'jj_workspace_cleanup'),
+    'the tool never offers cleanup for a workspace this session does not own',
   );
 
   // The root workspace requires the explicit stack bottom: never rebase foreign history.
@@ -1279,10 +1294,18 @@ test('jj_handoff: a rebase that empties a session change reports it instead of c
   fx.cwd = ws;
   const value = (await handoff.execute({}, fakeExec())) as Record<string, unknown>;
   assert.deepEqual(validateJsonSchemaValue(handoff.output.schema, value), [], `output: ${JSON.stringify(value)}`);
-  const nextSteps = String(value['nextSteps']);
-  assert.match(nextSteps, /empty change/, 'the empty change is named in next steps');
-  assert.match(nextSteps, /jj_abandon/, 'the described empty change can be dropped with the tool');
-  assert.match(nextSteps, /never abandon/i, 'a foreign empty working-copy change must not be abandoned');
+  const emptyChanges = value['emptyChanges'] as {
+    changeId: string;
+    description: string;
+    currentWorkingCopy: boolean;
+  }[];
+  assert.equal(emptyChanges.length, 1, 'the empty change is reported as structured data');
+  assert.equal(emptyChanges[0]?.description, 'feat: parallel duplicate');
+  assert.equal(emptyChanges[0]?.currentWorkingCopy, false);
+  assert.ok(
+    !(value['nextActions'] as { tool: string }[]).some((action) => action.tool === 'jj_abandon'),
+    'the tool reports empty changes but never offers to abandon them itself',
+  );
 });
 
 test('jj_workspace_cleanup tool: unregisters only a session-created workspace and returns to the default workspace', async (t) => {
@@ -2266,7 +2289,7 @@ test('jj_amend tool folds the correction, reports descendants, and validates its
     readonly sourceAbandoned: boolean;
     readonly rewritten: readonly { readonly changeId: string; readonly conflict: boolean }[];
     readonly warnings: readonly string[];
-    readonly nextStep: string;
+    readonly nextActions: readonly { readonly tool: string; readonly reason: string }[];
   };
   assert.equal(value.amended.changeId, one);
   assert.equal(value.sourceAbandoned, false);
@@ -2275,7 +2298,10 @@ test('jj_amend tool folds the correction, reports descendants, and validates its
     [three, two],
   );
   assert.equal(value.workingCopy.empty, true);
-  assert.match(value.nextStep, new RegExp(one));
+  assert.ok(
+    value.nextActions.some((action) => action.tool === 'jj_log'),
+    'a clean fold recommends confirming the rewritten stack',
+  );
 
   const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
   assert.deepEqual(

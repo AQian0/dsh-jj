@@ -14,7 +14,6 @@ import {
   COMMIT_STYLE_CHOICES,
   COMMIT_STYLE_IDS,
   CONCRETE_COMMIT_STYLE_IDS,
-  commitCorrectionHint,
   detectCommitStyle,
   resolveCommitStylePolicy,
 } from './commit-style.ts';
@@ -30,7 +29,7 @@ import {
 } from './tool-schemas.ts';
 import type { VcsDescriptor } from './types.ts';
 import { cleanupWorkspace } from './flows/cleanup.ts';
-import { amendNextSteps, handoffNextSteps, requireWorkspace, type ToolContext, type ToolExec } from './tool-shared.ts';
+import { requireWorkspace, type ToolContext, type ToolExec } from './tool-shared.ts';
 import { canonicalWorkspacePath, isRootWorkspace } from './policies.ts';
 
 /**
@@ -269,12 +268,6 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             committedPaths: { type: 'array', items: { type: 'string' }, required: true },
             workingCopyPaths: { type: 'array', items: { type: 'string' }, required: true },
             warnings: { type: 'array', items: { type: 'string' }, required: true },
-            nextStep: {
-              type: 'string',
-              required: true,
-              description:
-                'Correction hint for the committed change: while it remains unpushed, corrections belong in it via jj_amend; once published they must be new commits.',
-            },
           },
         },
         render: (_args, value) => textRender(value),
@@ -288,14 +281,21 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           committedPaths: [...result.committed.paths],
           workingCopyPaths: [...result.workingCopy.paths],
           warnings: [...result.warnings],
-          nextStep: commitCorrectionHint({
-            changeId: result.committed.changeId,
-            rewritable: isRewritableChange(result.committed),
-          }),
-          nextActions: nextActions({
-            tool: 'jj_handoff',
-            reason: 'When this stack is finished, integrate it onto the rebase target with one call.',
-          }),
+          nextActions: nextActions(
+            ...(isRewritableChange(result.committed)
+              ? [
+                  {
+                    tool: 'jj_amend',
+                    args: { into: result.committed.changeId },
+                    reason: 'While this commit is unpushed, corrections belong in it via jj_amend.',
+                  },
+                ]
+              : []),
+            {
+              tool: 'jj_handoff',
+              reason: 'When this stack is finished, integrate it onto the rebase target with one call.',
+            },
+          ),
         };
       },
     }),
@@ -511,7 +511,6 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
               },
             },
             warnings: { type: 'array', items: { type: 'string' }, required: true },
-            nextStep: { type: 'string', required: true },
           },
         },
         render: (_args, value) => textRender(value),
@@ -525,7 +524,6 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           sourceAbandoned: result.sourceAbandoned,
           rewritten: result.rewritten.map((change) => ({ ...change })),
           warnings: [...result.warnings],
-          nextStep: amendNextSteps(result),
           nextActions: nextActions(
             ...(result.rewritten.some((change) => change.conflict)
               ? [
@@ -1098,7 +1096,33 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
               },
             },
             bookmarkSkipped: { type: 'string' },
-            nextSteps: { type: 'string', required: true },
+            emptyChanges: {
+              type: 'array',
+              required: true,
+              description:
+                "Empty changes carried by the integrated stack. A described one may be dropped with jj_abandon only when it is this session's own unpushed change; an undescribed one is usually another workspace's empty working-copy change and must never be abandoned.",
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  changeId: { type: 'string', required: true },
+                  description: { type: 'string', required: true },
+                  currentWorkingCopy: { type: 'boolean', required: true },
+                },
+              },
+            },
+            cleanup: {
+              type: 'object',
+              required: true,
+              description:
+                'Who unregisters this workspace after the hand-off: `owned` means this session created it with jj_workspace_add, so jj_workspace_cleanup may run; otherwise the user runs jj workspace forget.',
+              additionalProperties: false,
+              properties: {
+                required: { type: 'boolean', required: true },
+                owned: { type: 'boolean', required: true },
+                workspaceName: { type: 'string', required: true },
+              },
+            },
           },
         },
         render: (_args, value) => textRender(value),
@@ -1144,7 +1168,18 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           message: result.message,
           ...(result.bookmark !== undefined ? { bookmark: result.bookmark } : {}),
           ...(result.bookmarkSkipped !== undefined ? { bookmarkSkipped: result.bookmarkSkipped } : {}),
-          nextSteps: handoffNextSteps(result, descriptor, cleanupOwned),
+          emptyChanges: result.stack
+            .filter((change) => change.empty && !change.currentWorkingCopy)
+            .map((change) => ({
+              changeId: change.changeId,
+              description: change.description,
+              currentWorkingCopy: change.currentWorkingCopy,
+            })),
+          cleanup: {
+            required: workspaceName !== 'default',
+            owned: cleanupOwned,
+            workspaceName,
+          },
           nextActions: nextActions(
             ...(result.needsCommit
               ? [

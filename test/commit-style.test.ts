@@ -17,7 +17,6 @@ import {
   MIN_COMMIT_STYLE_SAMPLES,
   SPLIT_COMMITS_GUIDANCE,
   classifyDescriptionStyle,
-  commitCorrectionHint,
   commitStylePromptText,
   detectCommitStyle,
   firstDescriptionLine,
@@ -189,18 +188,6 @@ test('commitStylePromptText always carries the style policy and the split-commit
   const noCorrections = commitStylePromptText({ preferAmendCorrections: false });
   assert.ok(!noCorrections.includes(CORRECTION_GUIDANCE), 'correction guidance can be disabled');
   assert.ok(noCorrections.includes(SPLIT_COMMITS_GUIDANCE), 'disabling corrections keeps the split-commit workflow');
-});
-
-test('the correction hint follows the publication boundary of the committed change', () => {
-  const unpushed = commitCorrectionHint({ changeId: 'abc123', rewritable: true });
-  assert.match(unpushed, /unpushed|rewritable/);
-  assert.match(unpushed, /jj_amend/);
-  assert.match(unpushed, /abc123/);
-
-  const published = commitCorrectionHint({ changeId: 'def456', rewritable: false });
-  assert.match(published, /published/);
-  assert.match(published, /new commit/);
-  assert.doesNotMatch(published, /call jj_amend/);
 });
 
 test('style constants stay internally consistent', () => {

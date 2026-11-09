@@ -105,7 +105,7 @@ Use the jj equivalent instead:
 
 `jj_handoff` 只在确实找不到集成目标时才需要你指定 revision；它不会自动 push，推送仍由你执行。请求移动的 bookmark 指向共享历史或处于冲突状态（并发操作分别移动/删除了它）时，`jj_handoff` 不会替你选边，只在结果里说明原因。单会话默认不会自动收到这段收尾提示，需要时可以直接让模型调用 `jj_handoff`。
 
-`jj_handoff` 还会检查整合后的栈里是否残留空提交（并行的重复改动 rebase 后会变空，或历史遗留的其它 workspace 空 `@`），并在 `nextSteps` 里列出 change id 和处理建议：本会话自己的、rebase 后才变空的已描述 change 可以用 `jj abandon <change id>` 丢弃；没有描述的空 change 通常是别的 workspace 的工作副本，不要 abandon，报告给你。`jj_workspace_cleanup` 注销 workspace 后，如果其空工作副本因为已有描述或还有后代而没有被 jj 自动丢弃，也会在结果里提示（不会自动改写或 abandon）；如果默认 workspace 因兄弟 workspace 的 rebase 变成 stale，清理时会先自动恢复再注销。
+`jj_handoff` 还会检查整合后的栈里是否残留空提交（并行的重复改动 rebase 后会变空，或历史遗留的其它 workspace 空 `@`），并把这些空提交以结构化字段 `emptyChanges`（change id、描述、是否为当前工作副本）一起返回：本会话自己的、rebase 后才变空的已描述 change 可以用 `jj_abandon` 丢弃；没有描述的空 change 通常是别的 workspace 的工作副本，不要 abandon，报告给你。`jj_workspace_cleanup` 注销 workspace 后，如果其空工作副本因为已有描述或还有后代而没有被 jj 自动丢弃，也会在结果里提示（不会自动改写或 abandon）；如果默认 workspace 因兄弟 workspace 的 rebase 变成 stale，清理时会先自动恢复再注销。
 
 每个工具结果的 JSON 里都有一个可选的 **`nextActions`** 字段：最多 3 条 `{ tool, args?, reason }`，只列真实存在的 `jj_*` 工具。它取代了用散文写「下一步该做什么」，客户端或模型可以直接照着调用；`jj_commit` / `jj_amend` / `jj_handoff` / `jj_workspace_add` / `jj_workspace_cleanup` / `jj_abandon` / `jj_fetch` 都会在合适的时候给出。
 
@@ -231,7 +231,7 @@ Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Juju
 - **多会话检测跨进程但限同一仓库**：同一进程内的顶层会话直接可见；其它 `dsh` 进程通过仓库元数据目录 `<.jj/repo>/dsh-jj/sessions/*.json` 的心跳（每次组装提示词时刷新，15 分钟过期）识别，因此需要共享同一份仓库元数据与文件系统。心跳不可用时退回进程内检测，跨机器/无共享文件系统的并行仍需配置 `multiSessionGuidance: always`。
 - **子代理不受多会话指引覆盖**：子代理与父会话共享工作副本，父会话继续运行时两者可能同时写文件；需要严格隔离时，由父会话为子任务指定独立 workspace。
 - **临时 workspace 清理有前提**：`jj_workspace_cleanup` 只能注销本会话通过 `jj_workspace_add` 创建、且没有未提交改动或冲突的 workspace；其它 workspace 需要你手动执行 `jj workspace forget <name>` 并删除目录（或直接 `jj workspace remove <name>`），插件不会自动删除目录，shell 里的 `jj workspace remove` 也会被 guard 拒绝。 注销时如果默认 workspace 因兄弟 workspace 的收尾 rebase 变成 stale，会先自动恢复再注销；如果被注销 workspace 的空工作副本因为已有描述或有后代而没有被 jj 丢弃，结果里会提示它仍留在共享历史里、可能显示为空提交。
-- **空提交防护**：`jj_commit` 在 `@` 没有内容改动时直接拒绝（避免在单链里留下空提交；带 `paths` 但一个文件都不匹配时仍可能创建空提交，但会返回警告并提示用 `jj abandon` 清理）；`jj_new` 在 `@` 已经为空且没有显式 parents 时拒绝；`jj_workspace_add` 会拒绝或忽略映射到当前 `@` 的 parent。`jj_handoff` 对 rebase 后才变空的提交只报告不自动删除（不会替你 abandon 可能是别的 workspace 工作副本的 change），按 `nextSteps` 的说明用 `jj abandon <change id>` 清理本会话自己的空 change。
+- **空提交防护**：`jj_commit` 在 `@` 没有内容改动时直接拒绝（避免在单链里留下空提交；带 `paths` 但一个文件都不匹配时仍可能创建空提交，但会返回警告并提示用 `jj abandon` 清理）；`jj_new` 在 `@` 已经为空且没有显式 parents 时拒绝；`jj_workspace_add` 会拒绝或忽略映射到当前 `@` 的 parent。`jj_handoff` 对 rebase 后才变空的提交只报告不自动删除（不会替你 abandon 可能是别的 workspace 工作副本的 change），按返回的 `emptyChanges` 用 `jj_abandon` 清理本会话自己的空 change。
 - **`.jj` 项目根标记仅部分 profile 生效**：Web profile 在 bundle 层禁用了该行，headless / CLI profile 才会把 `.jj` 当作项目根。
 - **jj-native 下项目级 skill 定位可能不准**：项目级 skill 根按最近的 `.git` 祖先查找（上游硬编码）；jj-native 仓库没有 `.git` 时会退回当前会话目录，通常只有会话正好位于仓库根时才符合预期。
 - **不自动推送**：`jj_handoff` 只保证本地集成到目标，推送仍需你执行 `jj git push --bookmark <name>`。

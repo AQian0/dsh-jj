@@ -190,9 +190,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       模型错误,必须报错而不是静默换目标;全失败才报「问用户」)→ `roots(::@ ~ ::target)` 探测整段栈 →
       `jj rebase -s` → 复核 base 并返回冲突数据。不要把这些步骤拆回 prompt;`needsCommit` 时先让模型
       `jj_commit`,不要代为描述。
-    - rebase 后要检查 `stack` 里残留的空 change(`empty && !currentWorkingCopy`):`handoffNextSteps` 的 `nextSteps`
-      必须列出它们的 change id 与处理建议,但不自动 abandon(可能是别的 workspace 的空工作副本);本会话自己的、
-      rebase 后才变空的已描述 change 才提示用 `jj_abandon` 丢弃。
+    - rebase 后要检查 `stack` 里残留的空 change(`empty && !currentWorkingCopy`):结果里的 `emptyChanges`
+      必须列出 change id / 描述 / 是否当前工作副本,但不自动 abandon(可能是别的 workspace 的空工作副本),也不在
+      `nextActions` 里给 `jj_abandon`(归属无法判定);本会话自己的、rebase 后才变空的已描述 change 只由模型按
+      指引用 `jj_abandon` 丢弃。
     - **stale 恢复必须包住整个流程**:stale 时连目标/栈的 `jj log` 读取都会失败,所以 `handoff()` 用
       「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
       rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
@@ -282,8 +283,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       拒绝 merge 目标、空源与冲突源。任何校验失败都是 `JJ_BAD_INPUT`,执行前绝不落一次 squash。目标描述默认用
       `--use-destination-message` 保留(永不打开编辑器),需要时用 `message` 改写;stale 时 `updateStale()` 后重跑一次
       (与 handoff 相同),不要只在外层重试。
-    - `jj_amend` 工具只做参数映射与 `nextStep` 文案;`jj_commit` 的输出必须带 `commitCorrectionHint`,把规则放在
-      「刚提交完」这个决策点上。`jj_squash` 执行前同样校验发布边界 `((from)|(into))::@`(与 amend 一致),
+    - `jj_amend` 工具只做参数映射与 `nextActions`;`jj_commit` 在提交仍可改写时返回
+      `jj_amend { into: <committed change id> }` 这个 nextAction,把规则放在「刚提交完」这个决策点上。`jj_squash` 执行前同样校验发布边界 `((from)|(into))::@`(与 amend 一致),
       并把 jj 的 immutable 拒绝映射成 `JJ_BAD_INPUT`——两条改写路径的安全等级不允许不同。
     - 指引在 `commit-style.ts` 的 `CORRECTION_GUIDANCE`(与 `SPLIT_COMMITS_GUIDANCE` 分开),受 `preferAmendCorrections`
       (默认 true,runtime 行)控制;`false` 只关指引,不禁用工具。默认不要改成「所有后续改动都追加提交」或
@@ -332,7 +333,8 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - 每个工具的 output schema 都带共享的 `NEXT_ACTIONS_SCHEMA`(`tool-schemas.ts`):可选数组,元素是
       `{ tool, args?, reason }`;**最多 3 条**,`tool` 必须是真实注册的 `jj_*` 工具,`args` 只放
       `string | number | boolean`(schema 派生的 JSON 类型不允许 `unknown`),`reason` 一句话说明为什么。
-    - 用 `nextActions` 表达「下一步」,不要新增散文字段(`nextStep`/`nextSteps` 是待删除的过渡字段,见规则 19)。
+    - 用 `nextActions` 表达「下一步」;结果里不再有 `nextStep`/`nextSteps` 这类散文(需要的数据用结构化字段,
+      如 handoff 的 `emptyChanges` / `cleanup`),新增字段一律是结构化数据。
       动作要具体、可执行:冲突→`jj_status {details:true}`、未提交→`jj_commit`、收尾→`jj_handoff`、
       自己的临时 workspace→`jj_workspace_cleanup`、丢弃后→`jj_log`。
     - `jj_status` 默认走便宜的 `operations.status(cwd, signal, {details:false})`(不跑 `jj status`、模板不含
@@ -384,8 +386,9 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 `test/service-tools.test.ts`;默认保持 `auto`(继承历史、无法确定时询问用户),不要改成静默固定风格,
 也不要让默认 `preferSplitCommits` 退化回「只改当前工作区」。提交策略以 `ctx.jj`(runtime 行)的配置为
 唯一来源:`jj_commit_style` 读 `service.operations.config`,不要改回读 tools 行配置,否则 prompt 与工具
-会给出互相矛盾的风格。修正折叠与描述风格是两条独立策略:指引在 `CORRECTION_GUIDANCE`、`commitCorrectionHint`
-与 `preferAmendCorrections`,动作为 `JjOperations.amend()` 与 `jj_amend`,窗口判定在 `isRewritableChange`;
+会给出互相矛盾的风格。修正折叠与描述风格是两条独立策略:指引在 `CORRECTION_GUIDANCE` 与
+`preferAmendCorrections`,动作为 `JjOperations.amend()` 与 `jj_amend`,窗口判定在 `isRewritableChange`;
+「刚提交完」这个决策点由 `jj_commit` 返回的 `jj_amend` nextAction 承担(不再有 `commitCorrectionHint`);
 改其中任何一处都要同时看本文件规则 15 的测试清单。
 
 **修改 guard 行为**:命令分类表在 `git-rules.ts` / `jj-rules.ts`(解析原语在 `git-tokenize.ts`,均保持纯函数)→
