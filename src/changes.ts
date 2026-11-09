@@ -35,10 +35,18 @@
  * @module dsh-jj/changes
  */
 
-import z from '@deepseek-ai/schemastery';
 import type { Context } from '@deepseek-ai/cordis';
 import type { WorkspaceChanges } from '@deepseek-ai/dsh-workspace-changes/types';
-import { resolveConfig, type ResolvedJjConfig } from './config.ts';
+import {
+  WORKSPACE_CHANGES_MODES,
+  assertScopedConfig,
+  assertServiceableConfig,
+  configSchemaFor,
+  resolveConfig,
+  type JjPluginConfig,
+  type ResolvedJjConfig,
+  type WorkspaceChangesMode,
+} from './config.ts';
 import { createRunJj } from './jj-command.ts';
 import { createChangesService, createEmptyChangesService } from './changes-service.ts';
 import { createJjChangesReader } from './changes-jj.ts';
@@ -61,71 +69,46 @@ export const name = 'jj-changes';
  */
 export const inject = ['subprocess', 'fs', 'jj'] as const;
 
-/**
- * How this row serves the Host's `workspaceChanges` service.
- *
- * - `auto`: jj recording for jj-workspace Sessions plus the built-in recorder
- *   for everything else, merged per turn.
- * - `builtin`: the unmodified built-in recorder (no jj recording).
- * - `off`: no jj recording and no card data; a read-only empty service keeps the
- *   deliverables row (which injects `workspaceChanges`) active.
- */
-export const WORKSPACE_CHANGES_MODES = ['auto', 'builtin', 'off'] as const;
-export type WorkspaceChangesMode = (typeof WORKSPACE_CHANGES_MODES)[number];
+export { WORKSPACE_CHANGES_MODES };
+export type { WorkspaceChangesMode };
 
-/** Cordis config schema for the `jj-changes` bundle row. */
-export const Config = z.object({
-  /** Serving strategy; see {@link WORKSPACE_CHANGES_MODES}. */
-  workspaceChanges: z.union(['auto', 'builtin', 'off']).default('auto'),
-  /** Maximum files one summary carries; `total` still reports the complete count. */
-  maxFiles: z.natural().default(500),
-  /** Largest per-file diff the comparison view serves; a larger change is refused as oversized. */
-  maxFileBytes: z.natural().default(2 * 1024 * 1024),
-  /** Bytes of `jj diff` output retained per turn; a larger diff abandons that turn's record. */
-  outputMaxBytes: z.natural().default(8 * 1024 * 1024),
-  /** Milliseconds the built-in recorder's line comparison may run before it degrades. */
-  diffTimeoutMs: z.natural().default(100),
-});
+/**
+ * Configuration schema of the `jj-changes` row.
+ *
+ * The keys live in the plugin's single union schema (`config.ts`) and this row's
+ * projection selects them, so the README table, the other rows' rejection messages and
+ * this schema cannot disagree about ownership.
+ */
+export const Config = configSchemaFor('changes');
 
 /** Resolved configuration of the `jj-changes` row (schema defaults applied). */
-export type ResolvedChangesConfig = Schemastery.TypeT<typeof Config>;
+export type ResolvedChangesConfig = Pick<
+  ResolvedJjConfig,
+  'workspaceChanges' | 'maxFiles' | 'maxFileBytes' | 'outputMaxBytes' | 'diffTimeoutMs'
+>;
 
 /** Configuration accepted by {@link apply} (every key optional; defaults from {@link Config}). */
 export type ChangesConfig = Partial<ResolvedChangesConfig>;
 
-/** Schema defaults: the single source of truth for this row's resolved values. */
-const SCHEMA_DEFAULTS: ResolvedChangesConfig = Config({});
-
 /**
  * Apply contract defaults to a partial configuration.
+ *
+ * Defaults come from the union schema through {@link resolveConfig}, so a new changes
+ * key needs no second default declaration here.
  *
  * @param config - partial plugin configuration (schema-validated when the Cordis
  *   loader mounts this row).
  * @returns a fully populated configuration.
  */
 export function resolveChangesConfig(config: ChangesConfig = {}): ResolvedChangesConfig {
-  const resolved: ResolvedChangesConfig = { ...SCHEMA_DEFAULTS };
-  const writable = resolved as Record<string, unknown>;
-  for (const key of Object.keys(SCHEMA_DEFAULTS) as (keyof ResolvedChangesConfig)[]) {
-    const value = config[key];
-    if (value !== undefined) writable[key] = value;
-  }
-  return resolved;
-}
-
-/**
- * Construction-time validation of the bound values.
- *
- * @param config - resolved configuration.
- * @throws Error naming the offending key when a bound is not a positive safe integer.
- */
-function assertServiceableChangesConfig(config: ResolvedChangesConfig): void {
-  for (const key of ['maxFiles', 'maxFileBytes', 'outputMaxBytes', 'diffTimeoutMs'] as const) {
-    const value = config[key];
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      throw new Error(`dsh-jj: \`${key}\` must be a positive safe integer, received ${String(value)}`);
-    }
-  }
+  const resolved = resolveConfig(config as JjPluginConfig);
+  return {
+    workspaceChanges: resolved.workspaceChanges,
+    maxFiles: resolved.maxFiles,
+    maxFileBytes: resolved.maxFileBytes,
+    outputMaxBytes: resolved.outputMaxBytes,
+    diffTimeoutMs: resolved.diffTimeoutMs,
+  };
 }
 
 /** The subset of one DSH Session this row reads. */
@@ -225,8 +208,9 @@ export function jjWorkspaceRootAt(cwd: string): string | undefined {
  * @param config - partial row configuration; the Cordis loader passes the schema-resolved value.
  */
 export async function apply(ctx: Context, config: ChangesConfig = {}): Promise<void> {
+  assertScopedConfig(config as JjPluginConfig, 'changes');
   const resolved = resolveChangesConfig(config);
-  assertServiceableChangesConfig(resolved);
+  assertServiceableConfig(resolveConfig(config as JjPluginConfig));
   const logger = (ctx as unknown as { logger?: LoggerLike }).logger;
   const warn = (message: string): void => {
     try {

@@ -12,7 +12,7 @@
 
 import { resolve } from 'node:path';
 import { Service, type Context } from '@deepseek-ai/cordis';
-import { assertServiceableConfig, Config, resolveConfig, type JjPluginConfig } from './config.ts';
+import { assertServiceableConfig, configSchemaFor, resolveConfig, type JjPluginConfig } from './config.ts';
 import { detectVcs } from './detect.ts';
 import { createRunGit, createRunJj } from './jj-command.ts';
 import { JjOperations } from './service.ts';
@@ -50,7 +50,7 @@ export class JjService extends Service {
   static readonly DETECT_CACHE_MIN_MAX_AGE_MS = 5 * 60_000;
 
   static inject = ['subprocess', 'workingDirectory'];
-  static Config = Config;
+  static Config = configSchemaFor('runtime');
 
   readonly operations: JjOperations;
   private readonly lifetime = new AbortController();

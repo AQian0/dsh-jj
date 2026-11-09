@@ -141,16 +141,17 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    (测试 V2/V4 覆盖)。新增 jj 命令不要绕过这层。
 8. **拒绝文案**:「非 jj 仓库 / jj 缺失 / 元数据损坏」的模型可见文案集中在 `tool-shared.ts` 的 `jjRefusalText`;
    guard 拒绝文案在 `guard.ts` 的 `build*` 函数。任何路径都不得静默回退到 git。
-9. **配置一致**:`Config` 是默认值与键集合的唯一来源;`ResolvedJjConfig` / `JjPluginConfig` 由
-   schemastery `Schemastery.TypeT` / `Partial<...>` 派生,`resolveConfig` 用 `Config({})` 的默认值 + 调用方覆盖,
-   `assertServiceableConfig` 只做构造期业务校验——新增键只需改 `Config` 一处。三个入口 `apply` 都会在构造期
-   校验配置(`assertServiceableConfig`),并对「放错 bundle 行」的**显式**键与未知/拼错键 `logger.warn`
-   (归属表 `CONFIG_OWNERSHIP`、共享键 `CONFIG_SHARED_OWNERSHIP`;仅告警、不阻断启动)。「显式」的判定是
-   「键值与该键的 schema 默认值不同」——Cordis 在 `apply` 前会把默认值填满,不能用 `undefined` 判定;显式写成
-   默认值的键无法区分(已知局限,JSDoc 已注明)。真实 `ctx.logger` 是可调用对象(function),告警 helper 必须按
-   `.warn` 可调用判定而不是 `typeof logger === 'object'`。
-   `jj-changes` 行有**自己**的 schema(`src/changes.ts` 的 `Config`:workspaceChanges 模式与变更卡片上限),
-   不进入 `CONFIG_OWNERSHIP`;新增这类键改 changes 的 schema 与 README「配置」的 changes 小节。
+9. **配置一致**:`src/config.ts` 的 `Config` 是默认值与键集合的唯一来源;`ResolvedJjConfig` /
+   `JjPluginConfig` 由 schemastery `Schemastery.TypeT` / `Partial<...>` 派生,`resolveConfig` 用 `Config({})`
+   的默认值 + 调用方覆盖,`assertServiceableConfig` 只做构造期业务校验——新增键只需改 `Config` 一处。
+   **归属表 `ROW_CONFIG_KEYS` 是唯一事实来源**:每个入口行用 `configSchemaFor(owner)` 得到只含自己键的
+   scoped schema(行级 `Config` 就是它),`CONFIG_OWNERSHIP` / `CONFIG_SHARED_OWNERSHIP` / `configKeyOwners` /
+   README 表格都由它派生;模块加载时校验「schema 每个键恰好有一个归属行」,漏登记直接抛错。
+   四个入口 `apply` 都在构造期调用 `assertScopedConfig(config, owner)`:**放错行**或**拼错/未知**的键会被
+   直接拒绝并说明它属于哪一行(不再只 `warn`、不再静默忽略)。scoped schema 只为本行键填默认值,因此
+   「显式写成默认值的键」也能识别(旧的 `undefined`/默认值启发式已删除)。
+   `jj-changes` 行的键(workspaceChanges 模式与变更卡片上限)同样在 `Config` 里,归属 `changes`;新增这类键
+   改 `Config` + `ROW_CONFIG_KEYS` + README「配置」的 changes 小节。
 10. **bundle patch 语义**:`cordis.patch.yml` 里非 `insert` 行会**整体替换**目标行 config:只写改动项会清掉其余键,
     必须重述所有要保留的键(如 `maxBytes: 65536`),并在 `build.test.ts` 里补对应断言。非 `insert` 行也可以用
     `disabled: true` 按 id 禁用**其它 bundle 的**行——changes 行就是这样禁用 Web app 的 Git-only

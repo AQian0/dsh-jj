@@ -21,15 +21,16 @@
 import { realpathSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import {
+  assertScopedConfig,
   assertServiceableConfig,
-  Config,
+  configSchemaFor,
   resolveConfig,
-  warnMisplacedConfig,
   type JjPluginConfig,
   type ResolvedJjConfig,
 } from './config.ts';
 
-export { Config };
+/** Configuration schema of the guard row (the keys this row reads). */
+export const Config = configSchemaFor('guard');
 import { sniffVcsSync } from './detect.ts';
 import {
   classifyGitInvocation,
@@ -1249,7 +1250,7 @@ export function apply(
   };
   // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
   // Warn (never fail) so a key placed on the wrong bundle row is visible.
-  warnMisplacedConfig(host.logger, config, 'guard');
+  assertScopedConfig(config, 'guard');
   const guard = installGitConfusionGuard(host, { config, ...(ctx.jj !== undefined ? { service: ctx.jj } : {}) });
   if (typeof ctx.effect === 'function') ctx.effect(() => () => guard.dispose(), 'dsh-jj: git-confusion guard');
 }

@@ -13,6 +13,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { ROW_CONFIG_KEYS } from '../src/config.ts';
 import { createGuardContext, initJjColocated, makeFixture } from './helpers/fixtures.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -417,8 +418,15 @@ test('the bare package name resolves each documented export', async () => {
   assert.ok(changes.Config !== undefined, 'the changes row validates its own configuration schema');
   assert.equal(typeof changes.apply, 'function');
   assert.equal(typeof changes.jjWorkspaceRootAt, 'function', 'jj workspace classification is part of the public API');
-  assert.equal(root.Config, tools.Config, 'the same schemastery Config is shared');
-  assert.equal(tools.Config, guard.Config);
+  // Each row validates its own scoped schema: the rows must not share one schema object
+  // (that is what let a key be accepted on a row that never reads it).
+  const rowKeys = (module: { Config?: unknown }): string[] =>
+    Object.keys((module.Config as { dict?: Record<string, unknown> } | undefined)?.dict ?? {}).sort();
+  assert.notEqual(root.Config, tools.Config, 'each row exports its own scoped configuration schema');
+  assert.deepEqual(rowKeys(root), [...ROW_CONFIG_KEYS.runtime].sort(), 'the runtime schema is scoped to runtime keys');
+  assert.deepEqual(rowKeys(tools), [...ROW_CONFIG_KEYS.tools].sort());
+  assert.deepEqual(rowKeys(guard), [...ROW_CONFIG_KEYS.guard].sort());
+  assert.deepEqual(rowKeys(changes), [...ROW_CONFIG_KEYS.changes].sort());
   assert.equal(typeof root.detectVcs, 'function');
   assert.equal(typeof root.classifyGitInvocation, 'function');
   assert.equal(typeof root.gitEquivalence, 'function');

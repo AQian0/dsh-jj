@@ -178,11 +178,12 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 > `guard*` 开头的键和 `readOnlyGitNotice` 由 `jj-guard` 行读取，`defaultLogLimit` / `maxLogLimit` 由 `jj-tools`
 > 行读取，`defaultCwd` 由 `jj-tools` 与 `jj-guard` 两行读取。
 >
-> 把某个键写到不读取它的入口行时，该行启动时输出一条 `logger.warn` 提示并忽略它，不会阻断启动。判定「显式配置」的
-> 依据是该键的值与 schema 默认值不同，因此把键显式写成默认值（如 `commitStyle: auto`）不会告警；拼错/未知键也会
-> 在每行启动时 `warn`（仅提示，不阻断）。
+> 每个入口行只校验自己读取的键（`src/config.ts` 的 `ROW_CONFIG_KEYS` 是唯一归属表，配置 schema、README 表格与
+> 拒绝文案都由它派生）。把某个键写到不读取它的入口行、或拼错键名时，该行在构造期直接报错并说明它属于哪一行，
+> 不会再静默忽略；显式写成默认值（如把 `commitStyle: auto` 写到 `jj-guard`）同样会被识别并拒绝。
 
-`jj-changes` 行有自己的一组配置（变更卡片）。这些键写在 `jj-changes` 行的 `config` 里；写到其它入口行不会被读取：
+`jj-changes` 行有自己的一组配置（变更卡片）。这些键写在 `jj-changes` 行的 `config` 里；写到其它入口行会在该行
+构造期报错（归属表见 `src/config.ts` 的 `ROW_CONFIG_KEYS`）：
 
 ```yaml
 - id: jj-changes

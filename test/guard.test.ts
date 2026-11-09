@@ -934,28 +934,23 @@ test('L3: the repo-wide refusal text distinguishes the workspace root from subdi
 // Cross-row config ownership warnings (audit core M8) at the guard entry.
 // ---------------------------------------------------------------------------
 
-test('the guard entry warns once about config keys owned by other rows', () => {
+test('the guard entry rejects config keys owned by other rows', () => {
   const harness = createGuardContext();
   const ctx = harness.ctx as unknown as Parameters<typeof applyGuardEntry>[0];
-  applyGuardEntry(ctx, { guardMutatingGit: 'deny', commitStyle: 'angular', defaultLogLimit: 10 });
-  const messages = harness.logged.map((entry) => String(entry));
-  assert.ok(
-    messages.some((message) =>
-      /`commitStyle` belongs to the jj-runtime row; this row \(jj-guard\) ignores it/.test(message),
-    ),
-    `expected a commitStyle ownership warning, got: ${messages.join(' | ')}`,
+  // A key owned by another row is a configuration mistake: the row fails construction
+  // instead of accepting a value it will never read.
+  assert.throws(
+    () => applyGuardEntry(ctx, { guardMutatingGit: 'deny', commitStyle: 'angular' }),
+    /`commitStyle` belongs to the jj-runtime row/,
   );
-  assert.ok(
-    messages.some((message) => /`defaultLogLimit` belongs to the jj-tools row/.test(message)),
-    'expected a defaultLogLimit ownership warning',
+  assert.equal(harness.guards.length, 0, 'an invalid row config must not install a guard');
+  assert.throws(
+    () => applyGuardEntry(ctx, { guardMutatingGit: 'deny', defaultLogLimit: 10 }),
+    /`defaultLogLimit` belongs to the jj-tools row/,
   );
-  assert.ok(
-    !messages.some((message) => /`guardMutatingGit` belongs to/.test(message)),
-    'a key on its own row must not be reported',
-  );
-  assert.equal(harness.guards.length, 1, 'the warning must not change guard registration');
-  harness.runGuard(bash('git commit -m x'));
-  assert.equal(harness.guards.length, 1);
+  // The guard's own keys, and the shared `defaultCwd`, are accepted.
+  applyGuardEntry(ctx, { guardMutatingGit: 'deny', defaultCwd: '/tmp' });
+  assert.equal(harness.guards.length, 1, 'a valid guard config still installs the guard');
 });
 
 // ---------------------------------------------------------------------------

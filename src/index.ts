@@ -17,11 +17,10 @@ import type { VcsKind } from './types.ts';
 // Type-only: loads the `@deepseek-ai/dsh-tools` module augmentation that adds `ctx.tools`.
 import type {} from '@deepseek-ai/dsh-tools';
 import {
+  assertScopedConfig,
   assertServiceableConfig,
-  Config,
-  readHostLogger,
+  configSchemaFor,
   resolveConfig,
-  warnMisplacedConfig,
   type JjPluginConfig,
 } from './config.ts';
 import {
@@ -40,7 +39,14 @@ export const name = 'jj';
 /** Services required before `apply` runs (the tools layer adds `tools`-dependent work). */
 export const inject = ['subprocess', 'workingDirectory'] as const;
 
-export { Config };
+/**
+ * Configuration schema of the runtime row.
+ *
+ * Every bundle row exports its own scoped schema ({@link configSchemaFor}); this is the
+ * runtime row's projection of the union, so a profile editor shows exactly the keys
+ * this row reads.
+ */
+export const Config = configSchemaFor('runtime');
 export type { JjPluginConfig };
 
 /**
@@ -139,9 +145,10 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
       return undefined;
     }
   };
-  // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
-  // Warn (never fail) so a key placed on the wrong bundle row is visible.
-  warnMisplacedConfig(readHostLogger(ctx), config, 'runtime');
+  // Each row validates its own scoped schema; a key belonging to another row is a
+  // configuration mistake, so fail construction with a message naming that row instead
+  // of silently ignoring the value here.
+  assertScopedConfig(config, 'runtime');
   /**
    * Whether one live session's agent is inside an open turn right now.
    *

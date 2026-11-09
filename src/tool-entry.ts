@@ -9,10 +9,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import {
+  assertScopedConfig,
   assertServiceableConfig,
-  readHostLogger,
+  configSchemaFor,
   resolveConfig,
-  warnMisplacedConfig,
   type JjPluginConfig,
 } from './config.ts';
 import { jjToolDefinitions } from './tool-definitions.ts';
@@ -81,6 +81,9 @@ export function registerJjTools(
 /** Cordis plugin name for the tools entry. */
 export const name = 'jj-tools';
 
+/** Configuration schema of the tools row (the keys this row reads). */
+export const Config = configSchemaFor('tools');
+
 /**
  * Services required by the tools entry (`jj` is the service from the runtime entry).
  *
@@ -104,9 +107,9 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // like the runtime/guard entries, instead of surfacing at tool-call time (for example
   // `maxLogLimit: 0` silently clamping jj_log to one entry).
   assertServiceableConfig(resolveConfig(config));
-  // Every row re-exports the same Config, so Cordis accepts keys this row ignores.
-  // Warn (never fail) so a key placed on the wrong bundle row is visible.
-  warnMisplacedConfig(readHostLogger(ctx), config, 'tools');
+  // Scoped schema: a key owned by another row is a configuration mistake, not a value
+  // this row silently ignores.
+  assertScopedConfig(config, 'tools');
   const service = (ctx as unknown as { jj: JjToolService }).jj;
   const disposer = registerJjTools(ctx as unknown as JjToolsHost, { service, config });
   const effect = (ctx as unknown as { effect?: (body: () => () => void, label?: string) => unknown }).effect;

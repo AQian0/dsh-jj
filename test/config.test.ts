@@ -18,12 +18,14 @@ import {
   CONFIG_OWNERSHIP,
   CONFIG_SHARED_OWNERSHIP,
   Config,
+  ROW_CONFIG_KEYS,
+  assertScopedConfig,
   assertServiceableConfig,
   configKeyOwners,
+  configSchemaFor,
   misplacedConfigKeys,
   resolveConfig,
   unknownConfigKeys,
-  warnMisplacedConfig,
   type ConfigOwner,
 } from '../src/config.ts';
 import * as runtimeEntry from '../src/index.ts';
@@ -197,8 +199,9 @@ test('CONFIG_OWNERSHIP maps every config key to exactly one bundle row', () => {
       'guardCreateWorktree',
       'readOnlyGitNotice',
     ],
+    changes: ['workspaceChanges', 'maxFiles', 'maxFileBytes', 'outputMaxBytes', 'diffTimeoutMs'],
   };
-  for (const owner of ['runtime', 'tools', 'guard'] as const) {
+  for (const owner of ['runtime', 'tools', 'guard', 'changes'] as const) {
     const actual = (Object.keys(CONFIG_OWNERSHIP) as (keyof typeof CONFIG_OWNERSHIP)[])
       .filter((key) => CONFIG_OWNERSHIP[key] === owner)
       .sort();
@@ -206,9 +209,28 @@ test('CONFIG_OWNERSHIP maps every config key to exactly one bundle row', () => {
   }
   assert.deepEqual(
     { ...CONFIG_OWNER_ENTRY },
-    { runtime: 'jj-runtime', tools: 'jj-tools', guard: 'jj-guard' },
-    'warnings must name the row the model sees in its profile',
+    { runtime: 'jj-runtime', tools: 'jj-tools', guard: 'jj-guard', changes: 'jj-changes' },
+    'messages must name the row the user sees in the profile',
   );
+});
+
+test('ROW_CONFIG_KEYS partitions the union schema, and only defaultCwd is shared', () => {
+  const declared = new Set<string>();
+  for (const keys of Object.values(ROW_CONFIG_KEYS)) {
+    for (const key of keys) {
+      assert.ok(!declared.has(key) || key === 'defaultCwd', `${key} must have exactly one owning row`);
+      declared.add(key);
+    }
+  }
+  assert.deepEqual([...declared].sort(), Object.keys(resolveConfig({})).sort(), 'every schema key owns a row');
+  assert.deepEqual(Object.keys(CONFIG_SHARED_OWNERSHIP), ['defaultCwd']);
+});
+
+test('each row schema declares exactly the keys that row reads', () => {
+  for (const owner of ['runtime', 'tools', 'guard', 'changes'] as const) {
+    const fields = Object.keys(configSchemaFor(owner).dict ?? {}).sort();
+    assert.deepEqual(fields, [...ROW_CONFIG_KEYS[owner]].sort(), `the ${owner} schema must be scoped to its keys`);
+  }
 });
 
 test('defaultCwd is shared by the tools and guard rows, not the runtime row', () => {
@@ -222,14 +244,14 @@ test('defaultCwd is shared by the tools and guard rows, not the runtime row', ()
   assert.deepEqual(misplacedConfigKeys({ defaultCwd: '/tmp' }, 'tools'), []);
   assert.deepEqual(misplacedConfigKeys({ defaultCwd: '/tmp' }, 'guard'), []);
   assert.deepEqual(misplacedConfigKeys({ defaultCwd: '/tmp' }, 'runtime'), ['defaultCwd']);
-
-  const messages: string[] = [];
-  warnMisplacedConfig({ warn: (message: string) => messages.push(message) }, { defaultCwd: '/tmp' }, 'runtime');
-  assert.equal(messages.length, 1);
-  assert.match(messages[0] ?? '', /`defaultCwd` belongs to the jj-tools \/ jj-guard rows/);
+  assert.doesNotThrow(() => assertScopedConfig({ defaultCwd: '/tmp' }, 'guard'));
+  assert.throws(
+    () => assertScopedConfig({ defaultCwd: '/tmp' }, 'runtime'),
+    /belongs to the jj-tools \/ jj-guard rows/,
+  );
 });
 
-test('misplacedConfigKeys reports only explicitly configured keys owned by other rows', () => {
+test('misplacedConfigKeys reports every explicitly written key owned by another row', () => {
   assert.deepEqual(misplacedConfigKeys({}, 'runtime'), [], 'nothing configured means nothing to report');
   assert.deepEqual(misplacedConfigKeys({ commitStyle: 'angular' }, 'runtime'), [], 'a key on its own row is fine');
   assert.deepEqual(misplacedConfigKeys({ guardMutatingGit: 'deny' }, 'runtime'), ['guardMutatingGit']);
@@ -244,95 +266,57 @@ test('misplacedConfigKeys reports only explicitly configured keys owned by other
       'runtime',
     ),
     ['defaultCwd', 'guardTools', 'maxLogLimit', 'readOnlyGitNotice'],
-    'results are sorted so warnings and tests are deterministic',
+    'results are sorted so messages and tests are deterministic',
   );
   assert.deepEqual(
     misplacedConfigKeys({ defaultLogLimit: 5, defaultCwd: '/tmp' }, 'tools'),
     [],
     'the tools row owns both',
   );
-  assert.deepEqual(misplacedConfigKeys({ commitStyle: 'auto', defaultLogLimit: 5 }, 'guard'), ['defaultLogLimit']);
+  assert.deepEqual(misplacedConfigKeys({ commitStyle: 'auto', defaultLogLimit: 5 }, 'guard'), [
+    'commitStyle',
+    'defaultLogLimit',
+  ]);
+  assert.deepEqual(misplacedConfigKeys({ maxFiles: 10 }, 'runtime'), ['maxFiles'], 'the changes row is scoped too');
 });
 
-test('misplacedConfigKeys treats schema-default values as not configured (Cordis normalization)', () => {
-  // Cordis hands `apply` the schema-normalized config with every default filled in, so
-  // a value equal to the default must not be reported. Documented limitation: a user
-  // who explicitly writes a default value gets no diagnostic (the value is still the
-  // intended/default one, so behavior is unaffected).
-  assert.deepEqual(misplacedConfigKeys({ guardMutatingGit: 'warn' }, 'runtime'), []);
-  assert.deepEqual(misplacedConfigKeys({ guardTools: ['bash', 'pwsh', 'terminal_send'] }, 'runtime'), []);
-  // A different array content (even the same items in another order) is explicit.
-  assert.deepEqual(misplacedConfigKeys({ guardTools: ['pwsh', 'bash', 'terminal_send'] }, 'runtime'), ['guardTools']);
-  assert.deepEqual(misplacedConfigKeys({ readOnlyGitNotice: false }, 'runtime'), ['readOnlyGitNotice']);
-});
-
-test('warnMisplacedConfig warns once per key and also reports unknown keys', () => {
-  const messages: string[] = [];
-  const logger = { warn: (message: string) => messages.push(message) };
-  warnMisplacedConfig(
-    logger,
-    { guardMutatingGit: 'deny', readOnlyGitNotice: false, commitStyle: 'angular' },
-    'runtime',
-  );
-  assert.equal(messages.length, 2, 'one warning per misplaced key, none for the local commitStyle');
-  assert.match(messages[0] ?? '', /`guardMutatingGit` belongs to the jj-guard row; this row \(jj-runtime\) ignores it/);
-  assert.match(messages[1] ?? '', /`readOnlyGitNotice` belongs to the jj-guard row/);
-
-  // A missing, malformed, or throwing logger must never break startup.
-  assert.doesNotThrow(() => warnMisplacedConfig(undefined, { guardTools: ['bash'] }, 'runtime'));
-  assert.doesNotThrow(() => warnMisplacedConfig({}, { guardTools: ['bash'] }, 'runtime'));
-  assert.doesNotThrow(() => warnMisplacedConfig({ warn: 'not-a-function' }, { guardTools: ['bash'] }, 'runtime'));
-  assert.doesNotThrow(() =>
-    warnMisplacedConfig(
-      {
-        warn: () => {
-          throw new Error('logger down');
-        },
-      },
-      { guardTools: ['bash'] },
-      'runtime',
-    ),
+test('a scoped schema fills defaults only for its own keys, so explicit defaults are detectable', () => {
+  // The scoped row schema never fills another row's key, so an explicitly written value
+  // that happens to equal that key's default is present in the config object and can be
+  // reported — the limitation of the old global-schema heuristic is gone.
+  const guardConfig = configSchemaFor('guard') as unknown as (
+    value: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  const normalized = guardConfig({ guardMutatingGit: 'warn', commitStyle: 'auto' });
+  assert.equal(normalized.commitStyle, 'auto');
+  assert.deepEqual(misplacedConfigKeys(normalized as never, 'guard'), ['commitStyle']);
+  assert.deepEqual(
+    misplacedConfigKeys(guardConfig({}) as never, 'guard'),
+    [],
+    'schema defaults are not mistaken for input',
   );
 });
 
-test('warnMisplacedConfig supports a callable Cordis-style logger', () => {
-  // The real Cordis `ctx.logger` is a callable object (`typeof === 'function'`); the
-  // audit found the warning path silently dropped it because it only accepted objects.
-  const messages: string[] = [];
-  const callable = Object.assign((..._args: unknown[]) => undefined, {
-    warn: (message: string) => messages.push(message),
-  });
-  warnMisplacedConfig(callable, { guardMutatingGit: 'deny' }, 'runtime');
-  assert.equal(messages.length, 1);
-  assert.match(messages[0] ?? '', /`guardMutatingGit` belongs to the jj-guard row/);
-
-  // Also accepts a callable with a throwing `warn`.
-  const throwing = Object.assign((..._args: unknown[]) => undefined, {
-    warn: () => {
-      throw new Error('logger down');
-    },
-  });
-  assert.doesNotThrow(() => warnMisplacedConfig(throwing, { guardMutatingGit: 'deny' }, 'runtime'));
+test('assertScopedConfig rejects a misplaced key and names the owning row', () => {
+  assert.throws(
+    () => assertScopedConfig({ guardMutatingGit: 'deny', readOnlyGitNotice: false }, 'runtime'),
+    /`guardMutatingGit` belongs to the jj-guard row; the jj-runtime row does not read it/,
+  );
+  assert.doesNotThrow(() => assertScopedConfig({ guardMutatingGit: 'deny' }, 'guard'));
+  assert.doesNotThrow(() => assertScopedConfig({}, 'runtime'));
 });
 
-test('unknownConfigKeys reports misspelled keys that resolveConfig silently drops', () => {
+test('assertScopedConfig rejects a misspelled key instead of dropping it silently', () => {
+  assert.throws(
+    () => assertScopedConfig({ rebaseTargt: 'main' } as never, 'runtime'),
+    /`rebaseTargt` is not a known dsh-jj configuration key/,
+  );
   assert.deepEqual(unknownConfigKeys({ rebaseTargt: 'main' } as never), ['rebaseTargt']);
   assert.deepEqual(unknownConfigKeys({ guardMutatingGti: 'deny', preferJjContxt: false } as never), [
     'guardMutatingGti',
     'preferJjContxt',
   ]);
   assert.deepEqual(unknownConfigKeys({ rebaseTargt: undefined } as never), [], 'undefined is not a mistake');
-
-  // A misspelled key used to survive the schema and vanish in resolveConfig with no
-  // feedback; it must now produce one warning naming the key.
-  const messages: string[] = [];
-  warnMisplacedConfig(
-    { warn: (message: string) => messages.push(message) },
-    { rebaseTargt: 'main' } as never,
-    'runtime',
-  );
-  assert.equal(messages.length, 1);
-  assert.match(messages[0] ?? '', /`rebaseTargt` is not a known dsh-jj configuration key/);
 });
 
 // ---------------------------------------------------------------------------
@@ -411,10 +395,10 @@ function provideSystemPrompt(fixture: HostFixture): () => unknown {
  * entry would couple this test file to the concurrently edited guard implementation. */
 const syntheticGuardRow = {
   name: 'jj-guard-test-row',
-  Config,
+  Config: configSchemaFor('guard'),
   inject: [] as const,
-  apply(ctx: Context, config: Record<string, unknown>): void {
-    warnMisplacedConfig((ctx as unknown as { logger?: unknown }).logger, config as never, 'guard');
+  apply(_ctx: Context, config: Record<string, unknown>): void {
+    assertScopedConfig(config as never, 'guard');
   },
 };
 
@@ -449,38 +433,34 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 test('real Cordis: a clean boot of the three rows emits no warnings', async () => {
   const fixture = createHost({ systemPrompt: true });
   await bootThreeRows(fixture);
-  assert.deepEqual(fixture.warnings, [], 'schema defaults must never be reported as misplaced config');
+  assert.deepEqual(fixture.warnings, [], 'schema defaults must never be mistaken for user configuration');
   await waitFor(() => fixture.promptRegistrations.length === 1, 'the session prompt context registration');
   assert.equal(fixture.promptRegistrations[0]?.name, 'dsh-jj-workspace');
 });
 
-test('real Cordis: a key placed on the wrong row produces exactly one warning', async () => {
+test('real Cordis: a key placed on the wrong row fails that row at construction', async () => {
   const fixture = createHost({ systemPrompt: true });
-  await bootRow(fixture, runtimeEntry, { guardMutatingGit: 'deny' });
-  await bootRow(fixture, toolsRow);
-  await waitFor(() => fixture.warnings.length === 1, 'the misplaced-config warning');
-  assert.equal(fixture.warnings.length, 1);
-  assert.match(
-    fixture.warnings[0] ?? '',
-    /`guardMutatingGit` belongs to the jj-guard row; this row \(jj-runtime\) ignores it/,
+  await assert.rejects(
+    () => bootRow(fixture, runtimeEntry, { guardMutatingGit: 'deny' }),
+    /`guardMutatingGit` belongs to the jj-guard row; the jj-runtime row does not read it/,
   );
 });
 
-test('real Cordis: an explicit default value is not reported (documented limitation)', async () => {
+test('real Cordis: an explicit default value on the wrong row is still rejected', async () => {
+  // The row schema fills defaults only for its own keys, so an explicitly written
+  // value that equals another key's default is visible and rejected.
   const fixture = createHost({ systemPrompt: false });
-  await bootRow(fixture, syntheticGuardRow, { commitStyle: 'auto', guardMutatingGit: 'warn' });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(fixture.warnings, [], 'explicit values equal to the schema default are indistinguishable');
+  await assert.rejects(
+    () => bootRow(fixture, syntheticGuardRow, { commitStyle: 'auto', guardMutatingGit: 'warn' }),
+    /`commitStyle` belongs to the jj-runtime row/,
+  );
 });
 
-test('real Cordis: an unknown config key is reported instead of silently dropped', async () => {
+test('real Cordis: an unknown config key fails the row instead of being dropped', async () => {
   const fixture = createHost({ systemPrompt: true });
-  await bootRow(fixture, runtimeEntry, { rebaseTargt: 'main' });
-  await waitFor(() => fixture.warnings.length === 1, 'the unknown-key warning');
-  assert.equal(fixture.warnings.length, 1);
-  assert.match(
-    fixture.warnings[0] ?? '',
-    /`rebaseTargt` is not a known dsh-jj configuration key; this row \(jj-runtime\) ignores it/,
+  await assert.rejects(
+    () => bootRow(fixture, runtimeEntry, { rebaseTargt: 'main' }),
+    /`rebaseTargt` is not a known dsh-jj configuration key/,
   );
 });
 

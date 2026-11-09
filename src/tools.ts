@@ -12,7 +12,7 @@
  *
  * @module dsh-jj/tools
  */
-export { Config } from './config.ts';
+export { Config } from './tool-entry.ts';
 export type { JjToolsHost, JjToolService } from './tool-shared.ts';
 export { jjRefusalText } from './tool-shared.ts';
 export { jjToolDefinitions } from './tool-definitions.ts';
