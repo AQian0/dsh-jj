@@ -9,7 +9,7 @@
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
 - 四个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
-  - `dsh-jj/tools`(`jj-tools`):22 个 `jj_*` 模型工具;
+  - `dsh-jj/tools`(`jj-tools`):23 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护;
   - `dsh-jj/changes`(`jj-changes`):用 jj 工作副本快照实现每轮「已编辑 N 个文件」变更卡片,并通过 bundle patch
     禁用 DSH 内置的 Git-only `workspace-changes` 行、在隔离 service scope 里复用它的记录器。
@@ -78,7 +78,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
 | `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
 | `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
-| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 22 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
+| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 23 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
 | `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
 | `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
 | `src/policies.ts`                                              | 纯模块:工作区所有权注册表、根 workspace 判定、cleanup 决策、stale 错误识别;工具/flow/guard 共用同一份规则                                                                               |

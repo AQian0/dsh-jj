@@ -243,7 +243,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
-test('all 22 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
+test('all 23 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-defs');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   fx.cwd = repo;
@@ -266,6 +266,7 @@ test('all 22 jj_* tools are defined with contract names, descriptions, and schem
     'jj_op_log',
     'jj_workspace_add',
     'jj_workspace_list',
+    'jj_workspace_enter',
     'jj_bookmark_list',
     'jj_bookmark_set',
     'jj_rebase',
@@ -314,6 +315,7 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
     jj_undo: {},
     jj_op_log: { limit: 3 },
     jj_workspace_list: {},
+    jj_workspace_enter: { workspace: 'default' },
     jj_bookmark_list: { allRemotes: false },
     jj_bookmark_set: { name: 'tool-bookmark', revset: '@' },
     jj_rebase: { revision: '@', destination: '@-', mode: 'source' },
@@ -461,7 +463,7 @@ test('registerJjTools registers and disposes every tool', async (t) => {
     },
   };
   const dispose = registerJjTools(host, { service: toolService(fx, operations), config: {} });
-  assert.equal(registered.length, 22);
+  assert.equal(registered.length, 23);
   dispose();
   assert.equal(registered.length, 0);
   dispose();
@@ -1184,7 +1186,7 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   const wsPath = join(fx.root, 'ws-clean');
   const created = (await definitions
     .get('jj_workspace_add')!
-    .execute({ path: wsPath, name: 'clean-me' }, fakeExec(agent))) as {
+    .execute({ path: wsPath, name: 'clean-me', enter: false }, fakeExec(agent))) as {
     readonly name: string;
   };
   assert.equal(created.name, 'clean-me');
@@ -1221,7 +1223,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   // Uncommitted work blocks cleanup so nothing is silently unregistered.
   fx.cwd = repo;
   const dirtyPath = join(fx.root, 'ws-dirty');
-  await definitions.get('jj_workspace_add')!.execute({ path: dirtyPath, name: 'dirty-ws' }, fakeExec(agent));
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: dirtyPath, name: 'dirty-ws', enter: false }, fakeExec(agent));
   fx.cwd = dirtyPath;
   await writeFixtureFile(fx, dirtyPath, 'dirty.txt', 'dirty');
   await assert.rejects(() => cleanup.execute({}, fakeExec(agent)), /uncommitted changes/);
@@ -1229,7 +1233,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   // Ownership is per session: another agent cannot clean this session's workspace.
   fx.cwd = repo;
   const otherPath = join(fx.root, 'ws-othered');
-  await definitions.get('jj_workspace_add')!.execute({ path: otherPath, name: 'other-ws' }, fakeExec(agent));
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: otherPath, name: 'other-ws', enter: false }, fakeExec(agent));
   fx.cwd = otherPath;
   await assert.rejects(() => cleanup.execute({}, fakeExec(otherAgent)), /not created through jj_workspace_add/);
 
@@ -1237,7 +1243,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   // once used is never forgotten by the stale ownership record.
   fx.cwd = repo;
   const reusedOld = join(fx.root, 'ws-reused-old');
-  await definitions.get('jj_workspace_add')!.execute({ path: reusedOld, name: 'reused' }, fakeExec(agent));
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: reusedOld, name: 'reused', enter: false }, fakeExec(agent));
   await mustRun(fx.run, ['jj', 'workspace', 'forget', 'reused'], repo);
   const reusedNew = join(fx.root, 'ws-reused-new');
   await mustRun(fx.run, ['jj', 'workspace', 'add', reusedNew, '--name', 'reused'], repo);
@@ -1253,7 +1261,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   fx.cwd = repo;
   await mustRun(fx.run, ['jj', 'workspace', 'add', join(fx.root, 'zzz-user-ws'), '--name', 'zzz-user'], repo);
   const unnamedPath = join(fx.root, 'ws-unnamed');
-  const unnamed = (await definitions.get('jj_workspace_add')!.execute({ path: unnamedPath }, fakeExec(agent))) as {
+  const unnamed = (await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: unnamedPath, enter: false }, fakeExec(agent))) as {
     readonly name: string;
     readonly path: string;
   };
@@ -1269,7 +1279,7 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   const unsettablePath = join(fx.root, 'ws-unsettable');
   await plainDefinitions
     .get('jj_workspace_add')!
-    .execute({ path: unsettablePath, name: 'unsettable' }, fakeExec(agent));
+    .execute({ path: unsettablePath, name: 'unsettable', enter: false }, fakeExec(agent));
   fx.cwd = unsettablePath;
   await assert.rejects(
     () => plainDefinitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent)),
@@ -1281,7 +1291,9 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   // instead of implying the shared history is clean.
   fx.cwd = repo;
   const retainedPath = join(fx.root, 'ws-retained');
-  await definitions.get('jj_workspace_add')!.execute({ path: retainedPath, name: 'retained' }, fakeExec(agent));
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: retainedPath, name: 'retained', enter: false }, fakeExec(agent));
   await mustRun(fx.run, ['jj', '--no-pager', 'describe', '-r', '@', '-m', 'empty marker'], retainedPath);
   const marker = (await operations.log(retainedPath, '@', 1))[0];
   assert.ok(marker !== undefined);
@@ -1321,7 +1333,9 @@ test('jj_workspace_cleanup: recovers a stale default workspace before forgetting
   fx.cwd = repo;
   const created = (await definitions
     .get('jj_workspace_add')!
-    .execute({ path: join(fx.root, 'ws-stale'), name: 'stale-ws' }, fakeExec(agent))) as { readonly path: string };
+    .execute({ path: join(fx.root, 'ws-stale'), name: 'stale-ws', enter: false }, fakeExec(agent))) as {
+    readonly path: string;
+  };
   const ws = created.path;
   const rootEmptyChange = (await operations.log(repo, '@', 1))[0];
   assert.ok(rootEmptyChange !== undefined);
@@ -1799,6 +1813,7 @@ test('jj_workspace_cleanup: a session-created workspace whose name contains spac
     readonly path: string;
   };
   assert.equal(created.name, 'My Session ws', 'the default name is the basename, unquoted');
+  assert.deepEqual(moved, [created.path], 'jj_workspace_add enters the new workspace by default');
   fx.cwd = created.path;
   const value = (await definitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent))) as Record<
     string,
@@ -1806,7 +1821,7 @@ test('jj_workspace_cleanup: a session-created workspace whose name contains spac
   >;
   assert.equal(value['forgotten'], true);
   assert.equal(value['workspaceName'], 'My Session ws');
-  assert.deepEqual(moved, [realpath(repo)]);
+  assert.deepEqual(moved, [created.path, realpath(repo)], 'cleanup moves the session back to the default workspace');
 });
 
 test('operation layer: jj_handoff does not move a bookmark that points at shared history', async (t) => {
@@ -2310,4 +2325,93 @@ test('jj_workspace_list detail full validates its output schema', async (t) => {
     assert.equal(typeof workspace.empty, 'boolean');
     assert.equal(typeof workspace.stale, 'string');
   }
+});
+
+test('jj_workspace_add moves the session into the new workspace by default', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-workspace-add-enters');
+  fx.cwd = repo;
+  const switches: string[] = [];
+  const context = toolContext(fx, toolService(fx, operations), resolveConfig({}), {
+    ensure: async () => repo,
+    set: async (_agent, path) => {
+      switches.push(path);
+      return path;
+    },
+  });
+  const definitions = definitionsByName(jjToolDefinitions(context));
+  const target = join(fx.root, 'ws-enter');
+  const agent = { id: 'add-enter-agent' };
+  const value = (await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: target, name: 'entered' }, fakeExec(agent))) as {
+    entered: boolean;
+    path: string;
+  };
+  assert.equal(value.entered, true, 'the session is moved into the workspace');
+  assert.deepEqual(switches, [value.path], 'exactly one working-directory switch happens');
+});
+
+test('jj_workspace_add can create without switching when enter is false', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-workspace-add-no-enter');
+  fx.cwd = repo;
+  const switches: string[] = [];
+  const context = toolContext(fx, toolService(fx, operations), resolveConfig({}), {
+    ensure: async () => repo,
+    set: async (_agent, path) => {
+      switches.push(path);
+      return path;
+    },
+  });
+  const definitions = definitionsByName(jjToolDefinitions(context));
+  const value = (await definitions
+    .get('jj_workspace_add')!
+    .execute(
+      { path: join(fx.root, 'ws-no-enter'), name: 'no-enter', enter: false },
+      fakeExec({ id: 'no-enter-agent' }),
+    )) as { entered: boolean };
+  assert.equal(value.entered, false);
+  assert.deepEqual(switches, [], 'the session stays where it was');
+});
+
+test('jj_workspace_enter switches into an existing workspace and validates its output', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-workspace-enter');
+  fx.cwd = repo;
+  const created = await operations.workspaceAdd(
+    repo,
+    join(fx.root, 'ws-target'),
+    'target-ws',
+    [],
+    undefined,
+    undefined,
+  );
+  const switches: string[] = [];
+  const context = toolContext(fx, toolService(fx, operations), resolveConfig({}), {
+    ensure: async () => repo,
+    set: async (_agent, path) => {
+      switches.push(path);
+      return path;
+    },
+  });
+  const definition = definitionsByName(jjToolDefinitions(context)).get('jj_workspace_enter')!;
+  const agent = { id: 'enter-agent' };
+  const value = (await definition.execute({ workspace: 'target-ws' }, fakeExec(agent))) as Record<string, unknown>;
+  assert.deepEqual(
+    validateJsonSchemaValue(definition.output.schema as JsonSchemaNode, value),
+    [],
+    'enter output satisfies its schema',
+  );
+  assert.equal(value.alreadyCurrent, false);
+  assert.equal(value.workspaceName, 'target-ws');
+  assert.deepEqual(switches, [created.path], 'the session moved to the workspace root');
+
+  // Entering the current workspace is a no-op that reports it.
+  const current = (await definition.execute({ workspace: 'default' }, fakeExec(agent))) as Record<string, unknown>;
+  assert.equal(current.alreadyCurrent, true);
+  assert.equal(switches.length, 1);
+
+  await assert.rejects(
+    () => definition.execute({ workspace: 'no-such-workspace' }, fakeExec()),
+    /found no workspace named or located at/,
+  );
 });

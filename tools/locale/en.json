@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Jujutsu (jj) tools",
-    "description": "jj-native model tools: status, log, diff, new, commit, describe, commit-style detection, squash, amend (fold a correction into an unpushed commit), abandon (drop unpublished revisions), undo/op log/op restore, fetch, workspace and stale recovery, bookmark, rebase, plus a one-call hand-off integration and cleanup of the workspace this session created."
+    "description": "jj-native model tools: status, log, diff, new, commit, describe, commit-style detection, squash, amend (fold a correction into an unpushed commit), abandon (drop unpublished revisions), undo/op log/op restore, fetch, workspace create/enter/list and stale recovery, bookmark, rebase, plus a one-call hand-off integration and cleanup of the workspace this session created."
   }
 }

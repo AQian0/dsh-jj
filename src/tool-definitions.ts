@@ -23,7 +23,7 @@ import { CHANGE_PROPERTIES, CHANGE_SCHEMA, changeView, textRender, workspaceFiel
 import type { VcsDescriptor } from './types.ts';
 import { cleanupWorkspace } from './flows/cleanup.ts';
 import { amendNextSteps, handoffNextSteps, requireWorkspace, type ToolContext, type ToolExec } from './tool-shared.ts';
-import { isRootWorkspace } from './policies.ts';
+import { canonicalWorkspacePath, isRootWorkspace } from './policies.ts';
 
 /**
  * Build every `jj_*` tool definition (contract §7.3).
@@ -582,7 +582,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_add',
       description:
-        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, and start a new change in it. This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Omit `parents` to start from the parents of the current change: after jj_commit that bases the new workspace on the commit you just made, which is the intended way to carry your committed work over. Do not pass `parents: ["@"]` for that — @ is the working-copy change (usually the fresh empty change), so it would become an empty commit in the new workspace\'s chain and reach the handed-off/pushed history; the tool drops a bare empty @ and refuses @ while the working copy still has uncommitted changes.',
+        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, start a new change in it, and move this session into it (like create_worktree in the official Git tooling). This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Omit `parents` to start from the parents of the current change: after jj_commit that bases the new workspace on the commit you just made, which is the intended way to carry your committed work over. Do not pass `parents: ["@"]` for that — @ is the working-copy change (usually the fresh empty change), so it would become an empty commit in the new workspace\'s chain and reach the handed-off/pushed history; the tool drops a bare empty @ and refuses @ while the working copy still has uncommitted changes.',
       parameters: {
         path: {
           type: 'string',
@@ -606,6 +606,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           description:
             "Also create a matching Git worktree for the new workspace. Defaults to the repository's own colocation setting.",
         },
+        enter: {
+          type: 'boolean',
+          description:
+            'Move this session into the new workspace (default true). Pass false to create the workspace without switching directories, for example when another session will use it.',
+        },
       },
       output: {
         schema: {
@@ -619,8 +624,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             note: {
               type: 'string',
               description:
-                'Set when the requested parents were adjusted (a bare empty @ was dropped) so no empty commit enters the new chain.',
+                'Set when the requested parents were adjusted (a bare empty @ was dropped) or when the session could not be moved into the new workspace.',
             },
+            entered: { type: 'boolean', required: true },
           },
         },
         render: (_args, value) => textRender(value),
@@ -637,12 +643,30 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           exec.signal,
         );
         ownership.remember(exec.agent, result.name, result.path);
+        const enter = args.enter !== false;
+        const workingDirectory = context.host.workingDirectory;
+        const canEnter = exec.agent !== undefined && typeof workingDirectory?.set === 'function';
+        let entered = false;
+        let enterNote = '';
+        if (enter && canEnter) {
+          await (workingDirectory as { set(agent: unknown, path: string, signal?: AbortSignal): Promise<string> }).set(
+            exec.agent,
+            result.path,
+            exec.signal,
+          );
+          entered = true;
+        } else if (enter) {
+          enterNote =
+            ' The session could not be moved into the new workspace (the host exposes no workingDirectory.set); switch with the working_directory tool before editing files.';
+        }
+        const note = [result.note, enterNote].filter((line) => line !== undefined && line.length > 0).join(' ');
         return {
           path: result.path,
           name: result.name,
           changeId: result.change.changeId,
           commitId: result.change.commitId,
-          ...(result.note !== undefined ? { note: result.note } : {}),
+          entered,
+          ...(note.length > 0 ? { note } : {}),
         };
       },
     }),
@@ -716,6 +740,83 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             isCurrent: workspace.name === currentWorkspace,
           })),
           currentWorkspace,
+        };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_workspace_enter',
+      description:
+        'Move this session into another existing Jujutsu (jj) workspace of the same repository. This is jj, not git: the target is a registered jj workspace (not a git worktree), and switching means the session working directory changes, so later tool calls and file edits happen in that working copy. It refuses workspaces of a different repository and a missing directory.',
+      parameters: {
+        workspace: {
+          type: 'string',
+          description: 'Workspace name from jj_workspace_list, or its absolute root path.',
+          required: true,
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            workspaceName: { type: 'string', required: true },
+            workspaceRoot: { type: 'string', required: true },
+            alreadyCurrent: { type: 'boolean', required: true },
+            change: CHANGE_SCHEMA,
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const { cwd, descriptor } = await openWorkspace(exec);
+        const requested = args.workspace.trim();
+        if (requested.length === 0) {
+          throw new Error('jj_workspace_enter needs a workspace name or absolute path; call jj_workspace_list first.');
+        }
+        const states = await operations.workspaceStates(cwd, exec.signal);
+        const requestedPath = canonicalWorkspacePath(requested);
+        const target =
+          states.find((state) => state.name === requested) ??
+          states.find((state) => canonicalWorkspacePath(state.root) === requestedPath);
+        if (target === undefined) {
+          throw new Error(
+            `jj_workspace_enter found no workspace named or located at ${JSON.stringify(requested)}; call jj_workspace_list to see this repository's workspaces.`,
+          );
+        }
+        if (target.current) {
+          return {
+            workspaceName: target.name,
+            workspaceRoot: target.root,
+            alreadyCurrent: true,
+            change: changeView(await operations.readAt(cwd, exec.signal)),
+          };
+        }
+        const targetDescriptor = await service.detect(target.root, exec.signal);
+        if (
+          (targetDescriptor.kind !== 'jj-colocated' && targetDescriptor.kind !== 'jj-native') ||
+          targetDescriptor.jjRepoPath !== descriptor.jjRepoPath
+        ) {
+          throw new Error(
+            `jj_workspace_enter refuses ${JSON.stringify(target.root)}: it is not a working copy of this repository (the directory may be missing or belong to another repository). Recreate it or stay in this workspace.`,
+          );
+        }
+        const workingDirectory = context.host.workingDirectory;
+        if (exec.agent === undefined || typeof workingDirectory?.set !== 'function') {
+          throw new Error(
+            'jj_workspace_enter cannot move this session (the host workingDirectory service exposes no set); use the working_directory tool instead.',
+          );
+        }
+        await (workingDirectory as { set(agent: unknown, path: string, signal?: AbortSignal): Promise<string> }).set(
+          exec.agent,
+          target.root,
+          exec.signal,
+        );
+        return {
+          workspaceName: target.name,
+          workspaceRoot: target.root,
+          alreadyCurrent: false,
+          change: changeView(await operations.readAt(target.root, exec.signal)),
         };
       },
     }),
