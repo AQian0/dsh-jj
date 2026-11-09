@@ -70,6 +70,8 @@ export interface JjLiveSession {
 export interface JjWorkspaceIdentity {
   /** jj workspace root: the directory containing `.jj`. */
   readonly workspaceRoot: string;
+  /** jj workspace name when known (`default` for the root workspace). */
+  readonly workspaceName?: string;
   /**
    * Resolved shared-repository path behind `.jj/repo` (a directory for the
    * default workspace, the pointer target for a linked workspace). Two different
@@ -188,8 +190,8 @@ export function detectParallelSessions(
 function sharedWorkingCopyText(): string {
   return [
     "Parallel sessions: another DSH session is running in this Jujutsu working copy right now. A working copy is not parallel-safe: every jj command snapshots the whole directory, so an unpathed commit can capture another session's files. Read-only inspection is safe; before writing files:",
-    '- Isolate with jj_workspace_add: an absolute path outside the repository and a unique name; switch there with the working_directory tool, then confirm with jj_status.',
-    '- Already edited this working copy? Commit only your own paths first (jj_commit with paths), then create the workspace WITHOUT `parents` (jj starts it on that commit). Never pass `parents: ["@"]`: @ is the empty working-copy change and would leave an empty commit in the new chain.',
+    '- Isolate with jj_workspace_add (absolute path outside the repository, unique name): it enters the new workspace by default; jj_workspace_enter switches to an existing one. Confirm with jj_status.',
+    '- Already edited this working copy? Commit only your own paths first (jj_commit with paths), then create the workspace WITHOUT `parents`. Never pass `parents: ["@"]`: @ is the empty working-copy change and would leave an empty commit in the chain.',
     "- Never use `git worktree` (jj cannot see it); never move, reuse or delete another session's workspace (shell `jj workspace forget <other>` and `jj workspace remove` are refused).",
     '- Edit the shared copy only if the user explicitly wants it there.',
   ].join('\n');
@@ -208,7 +210,7 @@ function siblingWorkspaceText(): string {
 function genericParallelText(): string {
   return [
     'Parallel sessions: several DSH sessions (or separate dsh processes) may run against this project at the same time. If another session shares this working copy, isolate in a dedicated jj workspace before writing files:',
-    '- jj_workspace_add with an absolute path outside the repository (unique name; never reuse another workspace), then switch there with the working_directory tool.',
+    '- jj_workspace_add with an absolute path outside the repository (unique name; never reuse another workspace); it enters the new workspace by default, and jj_workspace_enter switches to an existing one.',
     '- Do not edit, commit, or rewrite files that belong to another session; never use `git worktree` (jj cannot see that checkout).',
   ].join('\n');
 }

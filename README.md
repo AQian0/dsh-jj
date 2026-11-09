@@ -91,7 +91,7 @@ Use the jj equivalent instead:
   如果已经在这个共用工作副本里改过文件，先**只提交自己的路径**（`jj_commit` 传 `paths`），再**不带 `parents`** 调用 `jj_workspace_add`：jj 会以当前 change 的父提交为起点，也就把你刚提交的那一步带进新 workspace。不要传 `parents: ["@"]`——`@` 是工作副本提交（提交后通常是空的），把它当 parent 会把一个空提交塞进新 workspace 的提交链，最后出现在收尾和推送的历史里。工具层面也做了防护：与当前 `@` 重叠的 parent 会被拒绝或忽略（空 `@` 自动忽略并返回提示，非空 `@` 报错要求先提交）。
 - **同一仓库的不同 workspace**：工作副本互不影响，但 bookmark 和 operation log 是共享的。只改自己的提交，不要 rebase、undo 或移动别人 workspace 的 bookmark。
 
-`multiSessionGuidance` 控制这段指引：`auto`（默认，按检测结果注入）、`always`（始终注入，多个 `dsh` 进程并行时使用）、`off`（关闭）。
+`multiSessionGuidance` 控制这段指引：`auto`（默认，按检测结果注入；同进程会话直接可见，跨进程会话经仓库心跳识别）、`always`（始终注入，跨机器或心跳不可用时使用）、`off`（关闭）。
 
 ### 任务收尾
 
@@ -165,7 +165,7 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 | `guardCreateWorktree`             | `true`                            | 在**归属 jj** 的仓库里拒绝 `create_worktree`，引导用 `jj workspace add`（嵌套的独立 Git 仓库按最近仓库归属放行）                     |
 | `readOnlyGitNotice`               | `true`                            | colocated 仓库内只读 git 命令是否附「优先用 jj」提示                                                                                 |
 | `preferJjContext`                 | `true`                            | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引                                                      |
-| `multiSessionGuidance`            | `auto`                            | 多会话并行指引：`auto` / `always` / `off`                                                                                            |
+| `multiSessionGuidance`            | `auto`                            | 多会话并行指引：`auto`（进程内 + 仓库心跳）/ `always`（始终注入）/ `off`                                                             |
 | `rebaseTarget`                    | `trunk()`                         | 收尾集成的首选目标 revset，不能为空；解析不到真实提交时回退到本地 `main` / `master`                                                  |
 | `commitGuidance`                  | `true`                            | 是否注入提交描述风格与拆分提交指引（需 `preferJjContext` 开启）                                                                      |
 | `commitStyle`                     | `auto`                            | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom`                                            |
@@ -215,7 +215,7 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 - **仓库归属按最近者判断**：jj workspace 内嵌套的独立 Git 仓库（最近的 `.git` 比 `.jj` 更深）按普通 Git 仓库处理——`git` 命令与 `create_worktree` 都不会被 jj guard 拦截；只有祖先 jj 的目录才受 guard 约束。
 - **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`（多个名字逐个检查）/ 任何 `jj workspace remove`（它会把 workspace 连同目录从磁盘删除，stale workspace 也不例外；被忽略的文件不会被快照、无法恢复）。`-R/--repository` 写在 subcommand 前后都按同一规则处理（jj 全局选项两种位置都接受）。
 - **描述风格靠推断**：风格判定只看描述首行，历史太少或风格混杂时会请求你选择；Angular 与 Conventional Commits 语法相同，自动识别统一报 `conventional`，需要严格规则时可配置 `commitStyle: angular`。
-- **多会话检测限于本进程**：只能看到同一 DSH 进程内的顶层会话，多个 `dsh` CLI 进程之间互不可见；跨进程并行请配置 `multiSessionGuidance: always`。
+- **多会话检测跨进程但限同一仓库**：同一进程内的顶层会话直接可见；其它 `dsh` 进程通过仓库元数据目录 `<.jj/repo>/dsh-jj/sessions/*.json` 的心跳（每次组装提示词时刷新，15 分钟过期）识别，因此需要共享同一份仓库元数据与文件系统。心跳不可用时退回进程内检测，跨机器/无共享文件系统的并行仍需配置 `multiSessionGuidance: always`。
 - **子代理不受多会话指引覆盖**：子代理与父会话共享工作副本，父会话继续运行时两者可能同时写文件；需要严格隔离时，由父会话为子任务指定独立 workspace。
 - **临时 workspace 清理有前提**：`jj_workspace_cleanup` 只能注销本会话通过 `jj_workspace_add` 创建、且没有未提交改动或冲突的 workspace；其它 workspace 需要你手动执行 `jj workspace forget <name>` 并删除目录（或直接 `jj workspace remove <name>`），插件不会自动删除目录，shell 里的 `jj workspace remove` 也会被 guard 拒绝。 注销时如果默认 workspace 因兄弟 workspace 的收尾 rebase 变成 stale，会先自动恢复再注销；如果被注销 workspace 的空工作副本因为已有描述或有后代而没有被 jj 丢弃，结果里会提示它仍留在共享历史里、可能显示为空提交。
 - **空提交防护**：`jj_commit` 在 `@` 没有内容改动时直接拒绝（避免在单链里留下空提交；带 `paths` 但一个文件都不匹配时仍可能创建空提交，但会返回警告并提示用 `jj abandon` 清理）；`jj_new` 在 `@` 已经为空且没有显式 parents 时拒绝；`jj_workspace_add` 会拒绝或忽略映射到当前 `@` 的 parent。`jj_handoff` 对 rebase 后才变空的提交只报告不自动删除（不会替你 abandon 可能是别的 workspace 工作副本的 change），按 `nextSteps` 的说明用 `jj abandon <change id>` 清理本会话自己的空 change。

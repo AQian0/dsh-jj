@@ -149,7 +149,7 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   });
   assert.match(text, /Parallel sessions: another DSH session is running in this Jujutsu working copy/);
   assert.match(text, /jj_workspace_add/);
-  assert.match(text, /working_directory/);
+  assert.match(text, /jj_workspace_enter/, 'switching to an existing workspace has its own tool');
   assert.match(text, /outside the repository/i);
   assert.match(text, /git worktree/, 'the guard-equivalent git worktree pitfall is named');
   assert.match(text, /standard rebase hand-off/);

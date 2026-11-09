@@ -70,6 +70,7 @@ const PURE_MODULES = [
   'jj-rules',
   'jj-templates',
   'policies',
+  'session-heartbeat',
   'types',
   'commit-style',
   'multi-session',

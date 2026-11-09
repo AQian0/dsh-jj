@@ -95,7 +95,18 @@ export interface JjPromptMultiSessionOptions {
    * they are not concurrent work and never trigger the jj-workspace guidance. Leaving
    * it `undefined` keeps the fail-open behavior and counts the session as a peer.
    */
-  readonly liveRootSessions?: () => readonly JjLiveSession[];
+  readonly liveRootSessions?: (cwd: string, session: unknown) => readonly JjLiveSession[];
+  /**
+   * Called once per assembly with the resolved session and workspace.
+   *
+   * The runtime entry uses it to refresh this session's cross-process heartbeat; it must
+   * never throw (the caller contains it, and prompt assembly continues regardless).
+   */
+  readonly onAssemble?: (input: {
+    readonly agent: unknown;
+    readonly cwd: string;
+    readonly workspace: JjWorkspaceIdentity;
+  }) => void;
 }
 
 /**
@@ -241,10 +252,10 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
    * detection is unknown but `always` may still contribute its generic section
    * (fail-open).
    */
-  const multiSessionStateFor = (session: unknown, identity: JjWorkspaceIdentity): MultiSessionState => {
+  const multiSessionStateFor = (session: unknown, identity: JjWorkspaceIdentity, cwd: string): MultiSessionState => {
     const liveRootSessions = options.liveRootSessions;
     if (liveRootSessions === undefined) return { applicable: true };
-    const roots = liveRootSessions();
+    const roots = liveRootSessions(cwd, session);
     if (!roots.some((entry) => entry.session === session)) return { applicable: false };
     const peers = parallelPeerCwds(session, roots);
     return { applicable: true, detection: detectParallelSessions(identity, peers, probeWorkspace) };
@@ -261,10 +272,16 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
       const workspace = resolveWorkspace(cwd);
       if (workspace === undefined) return '';
 
+      try {
+        options.onAssemble?.({ agent: agent.session, cwd, workspace });
+      } catch {
+        // A failed heartbeat refresh must never break prompt assembly.
+      }
+
       // Multi-session guidance is optional and must never break an assembly.
       let multiSessionText = '';
       try {
-        const state = multiSessionStateFor(agent.session, workspace);
+        const state = multiSessionStateFor(agent.session, workspace, cwd);
         if (state.applicable) {
           const seenPeer =
             (state.detection?.sharedWorkspace.length ?? 0) > 0 || (state.detection?.siblingWorkspace.length ?? 0) > 0;

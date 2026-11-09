@@ -30,8 +30,18 @@ import {
   type ToolGuardHost,
 } from './guard.ts';
 import type { JjLiveSession } from './multi-session.ts';
+import { sniffVcsSync } from './detect.ts';
+import { readSessionHeartbeats, removeSessionHeartbeat, writeSessionHeartbeat } from './session-heartbeat.ts';
 import { installJjPromptContext } from './prompt-context.ts';
 import { JjService } from './service.ts';
+
+/** The subset of a cached `ctx.jj` descriptor the heartbeat needs. */
+interface JjPeekedDescriptorLike {
+  readonly kind: string;
+  readonly root: string;
+  readonly workspaceName?: string;
+  readonly jjRepoPath?: string;
+}
 
 /** Cordis plugin name (bare package name so a bundle row can resolve it). */
 export const name = 'jj';
@@ -188,33 +198,90 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
    * simply yield no detection; missing activity reporting stays fail-open in the prompt
    * context (a peer of unknown state is still treated as possibly parallel).
    */
-  const liveRootSessions = (): readonly JjLiveSession[] => {
+  /** Structural read of a session id (opaque to the host interfaces used here). */
+  const sessionIdOf = (session: unknown): string | undefined => {
+    const id = (session as { id?: unknown } | null | undefined)?.id;
+    return typeof id === 'string' && id.length > 0 ? id : undefined;
+  };
+  /** Synchronous identity read for the heartbeat: warm cache first, then the filesystem sniff. */
+  const workspaceIdentityOf = (
+    cwd: string,
+  ): { readonly workspaceRoot: string; readonly workspaceName: string; readonly jjRepoPath?: string } | undefined => {
+    const peeked = (() => {
+      try {
+        return (
+          readService<{ peek?: (cwd: string) => JjPeekedDescriptorLike | undefined }>('jj')?.peek?.(cwd) ?? undefined
+        );
+      } catch {
+        return undefined;
+      }
+    })();
+    if (peeked !== undefined) {
+      if (!peeked.kind.startsWith('jj-')) return undefined;
+      return {
+        workspaceRoot: peeked.root,
+        workspaceName: peeked.workspaceName ?? 'default',
+        ...(peeked.jjRepoPath !== undefined ? { jjRepoPath: peeked.jjRepoPath } : {}),
+      };
+    }
+    const sniffed = sniffVcsSync(cwd);
+    if (!sniffed.kind.startsWith('jj-')) return undefined;
+    return {
+      workspaceRoot: sniffed.jjRoot ?? sniffed.cwd,
+      workspaceName: 'default',
+      ...(sniffed.jjRepoPath !== undefined ? { jjRepoPath: sniffed.jjRepoPath } : {}),
+    };
+  };
+  /**
+   * Live top-level sessions, both in this process and in other `dsh` processes.
+   *
+   * In-process agents are authoritative for activity; sessions in other processes are
+   * known from the repository heartbeat files, which each session refreshes while its
+   * prompt is assembled. Heartbeat peers are synthesised as opaque session objects: they
+   * are never the current session, and their id is only used for display-free matching.
+   */
+  const liveRootSessions = (cwd: string, current: unknown): readonly JjLiveSession[] => {
+    const sessions: JjLiveSession[] = [];
     const agents = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents');
     let roots: readonly { session?: unknown }[] | undefined;
     try {
       roots = agents?.roots?.();
     } catch {
-      return [];
+      roots = [];
     }
-    if (!Array.isArray(roots) || roots.length === 0) return [];
     const workingDirectory = readService<{ get?: (session: unknown) => unknown }>('workingDirectory');
-    if (typeof workingDirectory?.get !== 'function') return [];
-    const sessions: JjLiveSession[] = [];
-    for (const entry of roots) {
-      const session = entry?.session;
-      if (session === undefined) continue;
-      let cwd: unknown;
-      try {
-        cwd = workingDirectory.get(session);
-      } catch {
-        continue;
+    if (Array.isArray(roots) && typeof workingDirectory?.get === 'function') {
+      for (const entry of roots) {
+        const session = entry?.session;
+        if (session === undefined) continue;
+        let peerCwd: unknown;
+        try {
+          peerCwd = workingDirectory.get(session);
+        } catch {
+          continue;
+        }
+        if (typeof peerCwd !== 'string' || peerCwd.length === 0) continue;
+        const active = sessionIsActive(session);
+        sessions.push({ session, cwd: peerCwd, ...(active !== undefined ? { active } : {}) });
       }
-      if (typeof cwd !== 'string' || cwd.length === 0) continue;
-      const active = sessionIsActive(session);
-      sessions.push({ session, cwd, ...(active !== undefined ? { active } : {}) });
+    }
+    const identity = workspaceIdentityOf(cwd);
+    if (identity?.jjRepoPath === undefined) return sessions;
+    const currentId = sessionIdOf(current);
+    for (const heartbeat of readSessionHeartbeats(identity.jjRepoPath, {
+      now: Date.now(),
+      ...(currentId !== undefined ? { excludeSessionId: currentId } : {}),
+    })) {
+      sessions.push({
+        session: { id: heartbeat.sessionId, heartbeat: true },
+        cwd: heartbeat.cwd,
+        ...(heartbeat.active !== undefined ? { active: heartbeat.active } : {}),
+      });
     }
     return sessions;
   };
+  /** Heartbeats written by this process, for disposal. */
+  const writtenHeartbeats = new Set<string>();
   /**
    * Install the session prompt context, reading `systemPrompt` through the host view.
    *
@@ -259,9 +326,43 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
         multiSessionGuidance: resolved.multiSessionGuidance,
         rebaseTarget: resolved.rebaseTarget,
         liveRootSessions,
+        // Refresh this session's cross-process heartbeat whenever its prompt is
+        // assembled: other DSH processes read it to detect parallel work in the same
+        // repository without a shared process.
+        onAssemble: ({ agent, cwd, workspace }) => {
+          const sessionId = sessionIdOf(agent);
+          if (sessionId === undefined || workspace.jjRepoPath === undefined) return;
+          const active = sessionIsActive(agent);
+          const written = writeSessionHeartbeat(workspace.jjRepoPath, {
+            sessionId,
+            cwd,
+            workspaceName: workspace.workspaceName ?? 'default',
+            workspaceRoot: workspace.workspaceRoot,
+            updatedAt: Date.now(),
+            ...(active !== undefined ? { active } : {}),
+          });
+          if (written) writtenHeartbeats.add(`${workspace.jjRepoPath}\u0000${sessionId}`);
+        },
       },
     );
   };
+  // Remove the heartbeats this process wrote when the runtime row unloads, so other
+  // processes stop seeing this session immediately instead of waiting for the TTL.
+  const registerEffect = (ctx as unknown as { effect?: (body: () => () => void, label?: string) => unknown }).effect;
+  if (typeof registerEffect === 'function') {
+    registerEffect.call(
+      ctx,
+      () => () => {
+        for (const entry of writtenHeartbeats) {
+          const separator = entry.indexOf('\u0000');
+          if (separator < 0) continue;
+          removeSessionHeartbeat(entry.slice(0, separator), entry.slice(separator + 1));
+        }
+        writtenHeartbeats.clear();
+      },
+      'dsh-jj: session heartbeats',
+    );
+  }
   // The service set of a profile is not ordered: the Cordis loader boots every bundle
   // row concurrently and a row only waits for the services it declares in `inject`.
   // Reading `systemPrompt` once during `apply` would silently skip the jj session
