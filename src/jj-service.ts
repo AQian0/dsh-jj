@@ -13,10 +13,10 @@
 import { resolve } from 'node:path';
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { assertServiceableConfig, configSchemaFor, resolveConfig, type JjPluginConfig } from './config.ts';
-import { detectVcs } from './detect.ts';
+import { detectVcs, sniffVcsSync } from './detect.ts';
 import { createRunGit, createRunJj } from './jj-command.ts';
 import { JjOperations } from './service.ts';
-import type { VcsDescriptor, VcsKind } from './types.ts';
+import type { JjRunResult, RunJjOptions, VcsDescriptor, VcsKind, VcsSniff } from './types.ts';
 
 /**
  * Merge the service-lifetime abort signal with a caller signal.
@@ -53,6 +53,15 @@ export class JjService extends Service {
   static Config = configSchemaFor('runtime');
 
   readonly operations: JjOperations;
+  /**
+   * The lifetime-bound jj runner every consumer row shares.
+   *
+   * The changes row used to build its own runner from `createRunJj`; that skipped the
+   * service's lifetime cancellation and made two rows own the same subprocess policy.
+   * Exposing the runner here keeps one seam for timeouts, truncation, environment
+   * scrubbing, disposal and error classification.
+   */
+  readonly run: (options: RunJjOptions) => Promise<JjRunResult>;
   private readonly lifetime = new AbortController();
   private readonly pending = new Set<Promise<unknown>>();
   private readonly cache = new Map<string, { descriptor: VcsDescriptor; probedAt: number }>();
@@ -63,14 +72,14 @@ export class JjService extends Service {
     super(ctx, 'jj');
     const resolved = resolveConfig(config);
     assertServiceableConfig(resolved);
+    const runJj = createRunJj(ctx, resolved);
+    this.run = (options) =>
+      this.track(runJj({ ...options, signal: mergeAbortSignals(this.lifetime.signal, options.signal) }));
     this.operations = new JjOperations({
       config,
       // Every operation runs through the lifetime signal so disposal cancels in-flight
       // jj calls instead of blocking `Promise.allSettled(pending)` until their timeout.
-      runJj: (options) =>
-        this.track(
-          createRunJj(ctx, resolved)({ ...options, signal: mergeAbortSignals(this.lifetime.signal, options.signal) }),
-        ),
+      runJj: this.run,
     });
     ctx.effect(() => async () => {
       this.lifetime.abort(new Error('dsh-jj service disposed'));
@@ -140,6 +149,20 @@ export class JjService extends Service {
     for (const [key] of oldestFirst.slice(0, this.cache.size - JjService.DETECT_CACHE_MAX_ENTRIES)) {
       this.cache.delete(key);
     }
+  }
+
+  /**
+   * Synchronous filesystem-level detection for callers that cannot spawn per turn.
+   *
+   * The changes row decides once per turn whether a Session sits in a jj workspace; a
+   * full CLI probe there would add processes to every turn, so it uses the same sniff
+   * this service's CLI probe starts from.
+   *
+   * @param cwd - directory to sniff.
+   * @returns the sniff result (never throws; unusable directories report `kind: 'none'`).
+   */
+  sniff(cwd: string): VcsSniff {
+    return sniffVcsSync(cwd);
   }
 
   /** Synchronous cache read for the guard; `undefined` on a miss (fail-open). */

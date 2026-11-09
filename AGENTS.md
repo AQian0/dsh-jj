@@ -113,6 +113,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 ## 架构与硬性规则
 
 1. **入口契约**:每个入口导出 `name` / `inject` / `apply` / `Config`;`build.test.ts` 会校验这些值与 `inject` 列表。
+   根入口(`src/index.ts`)**只**导出这四个契约值、`JjService`、`assembleBaseLayer` 与少量公共类型;其它组件的
+   实现一律走子路径(`./service`、`./jj-command`、`./tools`、`./guard`、`./changes`、`./detect`、
+   `./git-command`、`./commit-style`、`./multi-session`、`./prompt-context`)。`build.test.ts` 断言根导出集合
+   恰好是白名单,防止运行时入口重新变成所有组件的门面。
 2. **分层**:`index.ts` 拥有 `ctx.jj`;tools/guard 通过 `inject: ['tools', 'jj'(, 'workingDirectory')]` 消费,
    changes 通过 `inject: ['subprocess', 'fs', 'jj']` 消费(runtime 行提供 jj 命令名与进程限额,也保证 bundle 行
    顺序)。删改 `inject` 会破坏其他行加载。

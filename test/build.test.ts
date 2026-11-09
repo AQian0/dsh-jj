@@ -210,7 +210,19 @@ test('pure modules stay free of runtime @deepseek-ai imports', () => {
 });
 
 /** `exports` subpaths the published package must keep. */
-const REQUIRED_EXPORTS = ['.', './tools', './guard', './changes', './detect', './git-command'] as const;
+const REQUIRED_EXPORTS = [
+  '.',
+  './tools',
+  './guard',
+  './changes',
+  './detect',
+  './git-command',
+  './service',
+  './jj-command',
+  './commit-style',
+  './multi-session',
+  './prompt-context',
+] as const;
 
 /** `files` entries the published package must ship (`lib/` artifacts plus the runtime data). */
 const REQUIRED_FILES = [
@@ -427,28 +439,115 @@ test('the bare package name resolves each documented export', async () => {
   assert.deepEqual(rowKeys(tools), [...ROW_CONFIG_KEYS.tools].sort());
   assert.deepEqual(rowKeys(guard), [...ROW_CONFIG_KEYS.guard].sort());
   assert.deepEqual(rowKeys(changes), [...ROW_CONFIG_KEYS.changes].sort());
-  assert.equal(typeof root.detectVcs, 'function');
-  assert.equal(typeof root.classifyGitInvocation, 'function');
-  assert.equal(typeof root.gitEquivalence, 'function');
-  assert.equal(typeof root.installGitConfusionGuard, 'function');
-  assert.equal(typeof root.detectCommitStyle, 'function', 'commit-description policy is part of the public API');
-  assert.equal(typeof root.resolveCommitStylePolicy, 'function');
-  assert.equal(typeof root.jjPreferenceContextText, 'function');
-  assert.equal(typeof root.multiSessionPromptText, 'function', 'multi-session guidance is part of the public API');
-  assert.equal(typeof root.multiSessionFinishChecklistText, 'function');
-  assert.equal(typeof root.detectParallelSessions, 'function');
-  assert.equal(typeof root.parallelPeerCwds, 'function', 'the activity-aware peer selection is part of the public API');
-  assert.equal(
-    typeof root.buildJjWorkspaceForgetRefusal,
-    'function',
-    'the workspace-forget refusal is part of the public API',
+  assert.deepEqual(
+    Object.keys(root).sort(),
+    ['Config', 'JjService', 'apply', 'assembleBaseLayer', 'describeVcsKind', 'inject', 'name'].sort(),
+    'the runtime entry must not re-export other components; implementations live on their subpaths',
   );
-  assert.equal(
-    typeof root.buildJjWorkspaceRemoveRefusal,
-    'function',
-    'the workspace-remove refusal is part of the public API',
-  );
-  assert.equal(root.ROOT_COMMIT_ID, '0'.repeat(40), 'the empty root commit id is exported for hand-off logic');
+  assert.equal(typeof root.assembleBaseLayer, 'function', 'the embed helper is part of the entry surface');
+});
+
+test('each component publishes its implementation on its own subpath', async () => {
+  const service = await import('@aqian0/dsh-jj/service');
+  assert.equal(service.ROOT_COMMIT_ID, '0'.repeat(40), 'the empty root commit id is exported for hand-off logic');
+  assert.equal(typeof service.JjOperations, 'function');
+  for (const name of [
+    'TPL_STATUS',
+    'TPL_LOG',
+    'TPL_DESCRIPTION',
+    'TPL_OP_LOG',
+    'TPL_BOOKMARK_LIST',
+    'TPL_WORKSPACE_LIST_TAB',
+  ] as const) {
+    assert.equal(typeof service[name], 'string', `${name} is a template constant`);
+  }
+
+  const jjCommand = await import('@aqian0/dsh-jj/jj-command');
+  for (const name of [
+    'JjError',
+    'classifyJjFailure',
+    'createCommandRunGit',
+    'createCommandRunJj',
+    'createRunGit',
+    'createRunJj',
+    'jjErrorMessage',
+    'jjNonInteractiveEnv',
+  ] as const) {
+    assert.equal(typeof jjCommand[name], 'function', `${name} lives on ./jj-command`);
+  }
+
+  const detect = await import('@aqian0/dsh-jj/detect');
+  for (const name of ['detectVcs', 'sniffVcsSync', 'parseWorkspaceList'] as const) {
+    assert.equal(typeof detect[name], 'function', `${name} lives on ./detect`);
+  }
+  assert.equal(typeof detect.TPL_WORKSPACE_LIST, 'string');
+  assert.ok(detect.DEFAULT_PROBE_TIMEOUT_MS > 0);
+  assert.ok(detect.GIT_PROBE_ENV !== undefined && detect.JJ_PROBE_ENV !== undefined);
+
+  const gitCommand = await import('@aqian0/dsh-jj/git-command');
+  for (const name of ['classifyGitInvocation', 'hasMutatingGitInvocation'] as const) {
+    assert.equal(typeof gitCommand[name], 'function', `${name} lives on ./git-command`);
+  }
+  assert.equal(typeof gitCommand.gitEquivalence, 'function');
+  assert.equal(typeof gitCommand.GIT_SUBCOMMAND_RULES, 'object');
+  assert.equal(typeof gitCommand.JJ_EQUIVALENCE, 'object');
+
+  const commitStyle = await import('@aqian0/dsh-jj/commit-style');
+  for (const name of [
+    'detectCommitStyle',
+    'resolveCommitStylePolicy',
+    'classifyDescriptionStyle',
+    'commitStylePromptText',
+    'commitCorrectionHint',
+    'firstDescriptionLine',
+  ] as const) {
+    assert.equal(typeof commitStyle[name], 'function', `${name} lives on ./commit-style`);
+  }
+  assert.ok(Array.isArray(commitStyle.COMMIT_STYLE_IDS));
+  assert.ok(Array.isArray(commitStyle.COMMIT_STYLE_CHOICES));
+  assert.equal(typeof commitStyle.COMMIT_STYLE_PRESETS, 'object');
+  assert.ok(Array.isArray(commitStyle.CONCRETE_COMMIT_STYLE_IDS));
+  assert.ok(commitStyle.MIN_COMMIT_STYLE_SAMPLES > 0);
+  assert.equal(typeof commitStyle.SPLIT_COMMITS_GUIDANCE, 'string');
+  assert.equal(typeof commitStyle.CORRECTION_GUIDANCE, 'string');
+  assert.ok(commitStyle.COMMIT_STYLE_DOMINANCE !== undefined);
+
+  const multiSession = await import('@aqian0/dsh-jj/multi-session');
+  for (const name of [
+    'detectParallelSessions',
+    'multiSessionPromptText',
+    'multiSessionFinishChecklistText',
+    'parallelPeerCwds',
+  ] as const) {
+    assert.equal(typeof multiSession[name], 'function', `${name} lives on ./multi-session`);
+  }
+  assert.ok(Array.isArray(multiSession.MULTI_SESSION_GUIDANCE_MODES));
+  assert.equal(typeof multiSession.DEFAULT_REBASE_TARGET, 'string');
+
+  const promptContext = await import('@aqian0/dsh-jj/prompt-context');
+  for (const name of ['installJjPromptContext', 'jjPreferenceContextText'] as const) {
+    assert.equal(typeof promptContext[name], 'function', `${name} lives on ./prompt-context`);
+  }
+  assert.equal(typeof promptContext.JJ_CONTEXT_NAME, 'string');
+  assert.equal(typeof promptContext.JJ_CONTEXT_ORDER_FALLBACK, 'number');
+
+  const guard = await import('@aqian0/dsh-jj/guard');
+  for (const name of [
+    'buildGitRefusalMessage',
+    'buildJjWorkspaceForgetRefusal',
+    'buildJjWorkspaceRemoveRefusal',
+    'buildWorktreeToolRefusalMessage',
+    'evaluateGitCommand',
+    'gitConfusionWhy',
+    'installGitConfusionGuard',
+  ] as const) {
+    assert.equal(typeof guard[name], 'function', `${name} lives on ./guard`);
+  }
+
+  const tools = await import('@aqian0/dsh-jj/tools');
+  for (const name of ['jjToolDefinitions', 'registerJjTools', 'jjRefusalText'] as const) {
+    assert.equal(typeof tools[name], 'function', `${name} lives on ./tools`);
+  }
 });
 
 test('the built guard entry installs a working guard against a real jj workspace', async (t) => {

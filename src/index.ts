@@ -291,92 +291,25 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   }
 }
 
-export {
-  JjService,
-  JjOperations,
-  ROOT_COMMIT_ID,
-  TPL_STATUS,
-  TPL_LOG,
-  TPL_DESCRIPTION,
-  TPL_OP_LOG,
-  TPL_BOOKMARK_LIST,
-  TPL_WORKSPACE_LIST_TAB,
-} from './service.ts';
-export {
-  JjError,
-  classifyJjFailure,
-  createCommandRunGit,
-  createCommandRunJj,
-  createRunGit,
-  createRunJj,
-  jjErrorMessage,
-  jjNonInteractiveEnv,
-} from './jj-command.ts';
-export { jjRefusalText, jjToolDefinitions, registerJjTools } from './tools.ts';
-export { describeVcsKind } from './types.ts';
-export {
-  installJjPromptContext,
-  jjPreferenceContextText,
-  JJ_CONTEXT_NAME,
-  JJ_CONTEXT_ORDER_FALLBACK,
-} from './prompt-context.ts';
-export {
-  DEFAULT_REBASE_TARGET,
-  MULTI_SESSION_GUIDANCE_MODES,
-  detectParallelSessions,
-  multiSessionFinishChecklistText,
-  multiSessionPromptText,
-  parallelPeerCwds,
-} from './multi-session.ts';
-export {
-  COMMIT_STYLE_CHOICES,
-  COMMIT_STYLE_DOMINANCE,
-  COMMIT_STYLE_IDS,
-  COMMIT_STYLE_PRESETS,
-  CONCRETE_COMMIT_STYLE_IDS,
-  CORRECTION_GUIDANCE,
-  MIN_COMMIT_STYLE_SAMPLES,
-  SPLIT_COMMITS_GUIDANCE,
-  classifyDescriptionStyle,
-  commitCorrectionHint,
-  commitStylePromptText,
-  detectCommitStyle,
-  firstDescriptionLine,
-  resolveCommitStylePolicy,
-} from './commit-style.ts';
-export {
-  detectVcs,
-  sniffVcsSync,
-  parseWorkspaceList,
-  DEFAULT_PROBE_TIMEOUT_MS,
-  GIT_PROBE_ENV,
-  JJ_PROBE_ENV,
-  TPL_WORKSPACE_LIST,
-} from './detect.ts';
-export {
-  classifyGitInvocation,
-  gitEquivalence,
-  hasMutatingGitInvocation,
-  GIT_SUBCOMMAND_RULES,
-  JJ_EQUIVALENCE,
-} from './git-command.ts';
-export {
-  buildGitRefusalMessage,
-  buildJjWorkspaceForgetRefusal,
-  buildJjWorkspaceRemoveRefusal,
-  buildWorktreeToolRefusalMessage,
-  evaluateGitCommand,
-  gitConfusionWhy,
-  installGitConfusionGuard,
-} from './guard.ts';
-export { MAX_TIMER_DELAY_MS, assertServiceableConfig, resolveConfig } from './config.ts';
+// ---------------------------------------------------------------------------
+// Public entry surface
+//
+// The root entry exports the bundle contract (name/inject/apply/Config) plus the
+// service and the embed helper. Everything else lives on its own subpath
+// (./service, ./jj-command, ./tools, ./guard, ./changes, ./detect, ./git-command,
+// ./commit-style, ./multi-session, ./prompt-context): a component's implementation
+// must not leak through the runtime row's module, because that is what turns one
+// component into a façade over all the others.
+// ---------------------------------------------------------------------------
 
+export { JjService } from './service.ts';
+export { describeVcsKind } from './types.ts';
+
+export type { ResolvedJjConfig } from './config.ts';
 export type {
-  DetectionConfidence,
-  DetectDeps,
-  DetectInput,
+  JjChange,
+  JjOperation,
   JjRunResult,
-  JjWorkspaceInfo,
   RunCommand,
   RunCommandOptions,
   RunJj,
@@ -389,71 +322,5 @@ export type {
   VcsNoticeCode,
   VcsSniff,
 } from './types.ts';
-export type { DetectVcsOptions, JjWorkspaceEntry, SniffOptions } from './detect.ts';
-export type {
-  GitCommandClassification,
-  GitInvocation,
-  GitSafety,
-  GitSafetySubtype,
-  ParsedSegment,
-} from './git-command.ts';
-export type {
-  EvaluateGitCommandOptions,
-  GitCommandEvaluation,
-  GitConfusionGuardHandle,
-  GitConfusionGuardWarning,
-  GitGuardFinding,
-  GuardDescriptorLike,
-  GuardExecutionLike,
-  GuardOptions,
-  GuardServiceLike,
-  ToolGuardHost,
-} from './guard.ts';
-export type { ResolvedJjConfig } from './config.ts';
-export type {
-  CommitStyleChoice,
-  CommitStyleConfidence,
-  CommitStyleCounts,
-  CommitStyleDetection,
-  CommitStyleDetectionKind,
-  CommitStyleFamily,
-  CommitStyleId,
-  CommitStylePolicy,
-  CommitStylePreset,
-  CommitStylePromptOptions,
-  CommitStyleSource,
-  ConcreteCommitStyleId,
-  ResolveCommitStyleOptions,
-} from './commit-style.ts';
-export type {
-  JjPeekedDescriptor,
-  JjPromptCommitOptions,
-  JjPromptContextOptions,
-  JjPromptMultiSessionOptions,
-} from './prompt-context.ts';
-export type {
-  JjLiveSession,
-  JjWorkspaceIdentity,
-  JjWorkspaceProbe,
-  MultiSessionGuidanceMode,
-  MultiSessionPromptOptions,
-  ParallelSessionDetection,
-} from './multi-session.ts';
-export type { JjChange, JjOperation } from './types.ts';
-export type { JjErrorCode } from './jj-command.ts';
-export type {
-  JjBookmarkEntry,
-  JjCommitResult,
-  JjFetchResult,
-  JjHandoffBookmark,
-  JjHandoffConflict,
-  JjHandoffOptions,
-  JjHandoffResult,
-  JjHandoffTarget,
-  JjHandoffTargetSource,
-  JjRebaseMode,
-  JjStatusResult,
-  JjUndoResult,
-  JjWorkspaceAddResult,
-} from './service.ts';
-export type { JjToolService, JjToolsHost } from './tools.ts';
+export type { DetectionConfidence } from './types.ts';
+export type { GitConfusionGuardHandle, GuardOptions } from './guard.ts';

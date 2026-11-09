@@ -18,6 +18,8 @@ import { Context } from '@deepseek-ai/cordis';
 // Type-only: loads the `workspaceChanges` Context augmentation and the service types.
 import type {} from '@deepseek-ai/dsh-workspace-changes/types';
 import { resolveConfig } from '../src/config.ts';
+import { createRunJj } from '../src/jj-command.ts';
+import { sniffVcsSync } from '../src/detect.ts';
 import type { ChangesConfig } from '../src/changes.ts';
 import {
   initGit,
@@ -239,6 +241,22 @@ function emit(ctx: Context, name: string, ...args: unknown[]): void {
 }
 
 /**
+ * Provide the `ctx.jj` runtime face the changes row consumes.
+ *
+ * The row uses the runtime row's shared runner and sync sniff instead of building its
+ * own, so the harness has to look like the real service: one `operations.config` plus
+ * the runner and sniff the runtime exposes.
+ */
+function provideJjRuntime(ctx: Context): void {
+  const config = resolveConfig({});
+  provide(ctx, 'jj', {
+    operations: { config },
+    run: (options: Parameters<ReturnType<typeof createRunJj>>[0]) => createRunJj(ctx, config)(options),
+    sniff: (cwd: string) => sniffVcsSync(cwd),
+  });
+}
+
+/**
  * Mount the `jj-changes` entry on a real Cordis context and create one fake Session.
  *
  * @param cwd - Session working directory.
@@ -258,7 +276,7 @@ async function mountHost(
   const spawns: string[] = [];
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: jjConfig }, { ...hooks, spawns }));
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
-  provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
+  provideJjRuntime(ctx);
   await entry.apply(ctx, config);
   const service = ctx.get('workspaceChanges', false) as WorkspaceChangesLike | undefined;
   const events: Array<{ type: string; seq: number; data: unknown; turn?: number }> = [];
@@ -621,7 +639,7 @@ test('workspaceChanges: off keeps an inject: [workspaceChanges] row active', asy
   const ctx = new Context();
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
-  provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
+  provideJjRuntime(ctx);
   await entry.apply(ctx, { workspaceChanges: 'off' });
 
   // The Host's deliverables row declares `inject: ['workspaceChanges']`; Cordis
@@ -692,7 +710,7 @@ test('workspaceChanges: off leaves an existing provider in place', async (t) => 
   });
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
-  provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
+  provideJjRuntime(ctx);
   const existing = { summary: () => undefined, diff: async () => undefined };
   provide(ctx, 'workspaceChanges', existing);
   await entry.apply(ctx, { workspaceChanges: 'off' });
@@ -712,7 +730,7 @@ test('workspaceChanges: builtin provides the unmodified built-in service', async
   const ctx = new Context();
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
-  provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
+  provideJjRuntime(ctx);
   await entry.apply(ctx, { workspaceChanges: 'builtin' });
   assert.notEqual(ctx.get('workspaceChanges', false), undefined, 'mode builtin provides the built-in service');
 });
@@ -724,7 +742,7 @@ test('an existing provider is left alone instead of failing the profile', async 
   const ctx = new Context();
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
   provide(ctx, 'fs', { processPath: (target: unknown) => String(target) });
-  provide(ctx, 'jj', { operations: { config: resolveConfig({}) } });
+  provideJjRuntime(ctx);
   const existing = { summary: () => undefined, diff: async () => undefined };
   provide(ctx, 'workspaceChanges', existing);
   await entry.apply(ctx, {});

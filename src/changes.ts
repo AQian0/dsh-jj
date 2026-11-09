@@ -47,12 +47,11 @@ import {
   type ResolvedJjConfig,
   type WorkspaceChangesMode,
 } from './config.ts';
-import { createRunJj } from './jj-command.ts';
 import { createChangesService, createEmptyChangesService } from './changes-service.ts';
 import { createJjChangesReader } from './changes-jj.ts';
 import { TurnChangesRecorder, type ChangesSessionLike } from './changes-recorder.ts';
 import { sniffVcsSync } from './detect.ts';
-import type { VcsSniff } from './types.ts';
+import type { JjRunResult, RunJjOptions, VcsSniff } from './types.ts';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 
@@ -256,7 +255,11 @@ export async function apply(ctx: Context, config: ChangesConfig = {}): Promise<v
     );
     return;
   }
-  const runtime = (ctx as unknown as { jj?: { operations?: { config?: ResolvedJjConfig } } }).jj;
+  const runtime = (
+    ctx as unknown as {
+      jj?: { operations?: { config?: ResolvedJjConfig }; run?: (options: RunJjOptions) => Promise<JjRunResult> };
+    }
+  ).jj;
   const runtimeConfig = runtime?.operations?.config ?? resolveConfig({});
   const upstreamConfig = upstream.Config({
     timeoutMs: runtimeConfig.timeoutMs,
@@ -283,7 +286,17 @@ export async function apply(ctx: Context, config: ChangesConfig = {}): Promise<v
       );
       return;
     }
-    const runJj = createRunJj(ctx, runtimeConfig);
+    // One runner seam: the jj runtime row owns the subprocess policy (timeouts, output
+    // caps, scrubbed environment, disposal, error classification). Building a second
+    // runner here would skip the service's lifetime cancellation.
+    const runJj = runtime?.run;
+    if (typeof runJj !== 'function') {
+      // Keep the Host service alive with the built-in recorder instead of leaving
+      // `workspaceChanges` absent, which would stall the deliverables row and its routes.
+      warn('dsh-jj changes: the jj runtime exposes no shared runner; jj recording is disabled');
+      ctx.provide('workspaceChanges', builtin as unknown as WorkspaceChanges);
+      return;
+    }
     const reader = createJjChangesReader(runJj, {
       timeoutMs: runtimeConfig.timeoutMs,
       graceMs: runtimeConfig.graceMs,

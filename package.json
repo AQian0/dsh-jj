@@ -50,6 +50,26 @@
       "types": "./lib/types/detect.d.ts",
       "default": "./lib/detect.js"
     },
+    "./service": {
+      "types": "./lib/types/service.d.ts",
+      "default": "./lib/service.js"
+    },
+    "./jj-command": {
+      "types": "./lib/types/jj-command.d.ts",
+      "default": "./lib/jj-command.js"
+    },
+    "./commit-style": {
+      "types": "./lib/types/commit-style.d.ts",
+      "default": "./lib/commit-style.js"
+    },
+    "./multi-session": {
+      "types": "./lib/types/multi-session.d.ts",
+      "default": "./lib/multi-session.js"
+    },
+    "./prompt-context": {
+      "types": "./lib/types/prompt-context.d.ts",
+      "default": "./lib/prompt-context.js"
+    },
     "./git-command": {
       "types": "./lib/types/git-command.d.ts",
       "default": "./lib/git-command.js"
