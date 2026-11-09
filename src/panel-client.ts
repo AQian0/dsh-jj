@@ -578,6 +578,11 @@ function apply(ctx: ClientContext): void {
     typeof ctx.locale?.bind === 'function'
       ? ctx.locale.bind(JJ_LOCALE_NS)
       : (key: string) => DICTIONARIES.en?.[key] ?? key;
+  if (ctx.sidebarRightTabs === undefined) {
+    // Never fail silently again: a missing injected service is a wiring bug, not a
+    // missing product feature, so say so where a developer will see it.
+    console.error('[dsh-jj] sidebarRightTabs is not injected; the Jujutsu tab cannot register.');
+  }
   try {
     ctx.sidebarRightTabs?.register?.({
       id: JJ_TAB_ID,
@@ -631,8 +636,15 @@ function apply(ctx: ClientContext): void {
   }
 }
 
-/** Cordis client services this bundle waits for before `apply` runs. */
-const inject = ['slots', 'locale', 'sidebarRight'];
+/**
+ * Cordis client services this bundle waits for before `apply` runs.
+ *
+ * `sidebarRightTabs` is required, not just `sidebarRight`: the tab-type registry is a
+ * separate service, and without it in this list the client runtime does not expose it to
+ * `apply` — the registration was silently skipped and the tab never appeared (the
+ * optional chaining hid the missing service).
+ */
+const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs'];
 
 // The host evaluates this file as a classic script: register the lazy factory once.
 interface LoaderGlobal {

@@ -668,7 +668,11 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
     throw new Error(`unexpected host module request: ${id}`);
   });
   assert.equal(typeof clientModule.apply, 'function', 'the client module exposes apply');
-  assert.deepEqual([...(clientModule.inject as readonly string[])], ['slots', 'locale', 'sidebarRight']);
+  assert.deepEqual(
+    [...(clientModule.inject as readonly string[])],
+    ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs'],
+    'the tab registry is a separate service and must be injected explicitly',
+  );
 
   // The tab registration goes through the public sidebar-right API and tolerates a host
   // that only provides some of the services.
