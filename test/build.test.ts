@@ -100,6 +100,31 @@ function readPackageManifest(): PackageManifest {
   return JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as PackageManifest;
 }
 
+/**
+ * Read a tsconfig-style JSON file that carries `//` comments.
+ *
+ * Only whole-line comments are stripped: every comment in this repository's
+ * tsconfigs starts its own line and none appears inside a string value.
+ */
+function readJsonWithComments(relativePath: string): unknown {
+  const text = readFileSync(join(packageDir, relativePath), 'utf8').replace(/^\s*\/\/.*$/gm, '');
+  return JSON.parse(text) as unknown;
+}
+
+/** Every hand-written TypeScript test source under `test/`, recursively. */
+function testSourceFiles(): string[] {
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.ts')) files.push(full);
+    }
+  };
+  walk(join(packageDir, 'test'));
+  return files.sort();
+}
+
 /** Strip the leading `./` from a `package.json` path target. */
 function packageTargetPath(target: string): string {
   return target.replace(/^\.\//, '');
@@ -176,9 +201,24 @@ function filesPatternCovers(pattern: string, target: string): boolean {
 /** Targets npm always includes regardless of `files` (package identity documents). */
 const IMPLICIT_TARBALL_FILES = new Set(['package.json']);
 
-test('tsc -p tsconfig.json builds lib/ and lib/types/ for every source module', async () => {
-  const result = await execFileAsync(tscCommand(), ['-p', 'tsconfig.json'], { cwd: packageDir, timeout: 180_000 });
-  assert.equal(String(result.stderr).trim(), '', `tsc stderr: ${String(result.stderr)}`);
+/**
+ * Build `lib/` exactly like `pnpm run build`.
+ *
+ * Two projects, not one: `tsconfig.json` emits the ESM modules, and
+ * `tsconfig.client.json` emits the classic-script client bundle that the main
+ * project excludes. Building only the first leaves `lib/panel-client.js` (and its
+ * declaration) missing, which every downstream assertion needs — and that gap is
+ * invisible on a machine whose `lib/` came from a real `pnpm run build`.
+ */
+async function buildLib(): Promise<void> {
+  for (const project of ['tsconfig.json', 'tsconfig.client.json']) {
+    const result = await execFileAsync(tscCommand(), ['-p', project], { cwd: packageDir, timeout: 180_000 });
+    assert.equal(String(result.stderr).trim(), '', `tsc -p ${project} stderr: ${String(result.stderr)}`);
+  }
+}
+
+test('the documented build emits lib/ and lib/types/ for every source module', async () => {
+  await buildLib();
   const modules = sourceModuleNames();
   for (const required of ['index', 'tools', 'guard', 'jj-command']) {
     assert.ok(modules.includes(required), `src/${required}.ts is missing from ${modules.join(', ')}`);
@@ -449,6 +489,37 @@ test('the bare package name resolves each documented export', async () => {
     'the runtime entry must not re-export other components; implementations live on their subpaths',
   );
   assert.equal(typeof root.assembleBaseLayer, 'function', 'the embed helper is part of the entry surface');
+});
+
+test('the test project maps every self-referenced subpath to source', () => {
+  // `pnpm test` type-checks before this file builds lib/, so a bare
+  // `@aqian0/dsh-jj/<subpath>` import in the suite only resolves pre-build through
+  // the tsconfig `paths` map. A subpath missing there still passes on a machine
+  // that happens to have a stale `lib/types/*.d.ts` and fails on a clean checkout
+  // (CI), so the map is asserted against the imports the suite actually writes.
+  const config = readJsonWithComments('tsconfig.test.json') as {
+    compilerOptions?: { paths?: Record<string, readonly string[]> };
+  };
+  const paths = config.compilerOptions?.paths ?? {};
+
+  const specifiers = new Set<string>();
+  for (const file of testSourceFiles()) {
+    for (const match of readFileSync(file, 'utf8').matchAll(/@aqian0\/dsh-jj(?:\/[a-z][a-z-]*)?/g)) {
+      specifiers.add(match[0]);
+    }
+  }
+  assert.ok(specifiers.size >= 8, 'the suite should self-reference the published subpaths');
+  for (const specifier of specifiers) {
+    assert.ok(
+      specifier in paths,
+      `tsconfig.test.json paths is missing ${specifier}: the type-check would only pass after lib/ is built`,
+    );
+  }
+  for (const [specifier, targets] of Object.entries(paths)) {
+    assert.equal(targets.length, 1, `${specifier} must map to exactly one source file`);
+    const [target] = targets;
+    assert.ok(target !== undefined && existsSync(join(packageDir, target)), `${specifier} maps to missing ${target}`);
+  }
 });
 
 test('each component publishes its implementation on its own subpath', async () => {

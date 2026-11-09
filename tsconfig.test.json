@@ -24,13 +24,24 @@
     "rewriteRelativeImportExtensions": true,
     "noEmit": true,
     "skipLibCheck": true,
-    // The package self-reference in build.test.ts resolves to source here, so
-    // `pnpm run typecheck` works on a fresh clone before lib/ is built.
+    // The package self-reference in the tests resolves to source here, so
+    // `pnpm run typecheck` works on a fresh clone before lib/ is built. Every
+    // component subpath the tests import must be listed: without a mapping tsc
+    // follows `package.json` exports to `lib/types/*.d.ts`, which only exists
+    // after `pnpm run build` (locally a stale lib/ hides the gap, CI does not).
+    // test/build.test.ts asserts the map covers the imports and stays in sync.
     "paths": {
       "@aqian0/dsh-jj": ["./src/index.ts"],
       "@aqian0/dsh-jj/tools": ["./src/tools.ts"],
       "@aqian0/dsh-jj/guard": ["./src/guard.ts"],
-      "@aqian0/dsh-jj/changes": ["./src/changes.ts"]
+      "@aqian0/dsh-jj/changes": ["./src/changes.ts"],
+      "@aqian0/dsh-jj/service": ["./src/service.ts"],
+      "@aqian0/dsh-jj/jj-command": ["./src/jj-command.ts"],
+      "@aqian0/dsh-jj/detect": ["./src/detect.ts"],
+      "@aqian0/dsh-jj/git-command": ["./src/git-command.ts"],
+      "@aqian0/dsh-jj/commit-style": ["./src/commit-style.ts"],
+      "@aqian0/dsh-jj/multi-session": ["./src/multi-session.ts"],
+      "@aqian0/dsh-jj/prompt-context": ["./src/prompt-context.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "vite.config.ts"]

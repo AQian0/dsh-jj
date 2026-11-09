@@ -373,9 +373,15 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
   无法从 `node_modules` 加载的 `src/**/*.ts`)、四个入口各自的 locale 与 `<entry>/icon` 导出、四个 entry 的
   `name`/`inject`/`Config` 形状、bundle patch 里四行入口各自只出现一次且「禁用内置 `workspace-changes`」只有
   一处、没有 `disabled: false` 重新启用行、纯模块的 DSH 运行时 import(静态/副作用/dynamic `import()`/`require`
-  全部拒绝)、手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示),以及 pnpm + Vite+ 工具链接线(`packageManager`、
-  `devDependencies`、`vp` 脚本、`pnpm-lock.yaml` / `pnpm-workspace.yaml` / `vite.config.ts` 存在,`vite` 别名
-  版本与 `vite-plus` 一致)。新增源模块或改打包/工具链配置时先让这些断言通过。
+  全部拒绝)、手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示)、`tsconfig.test.json` 的 `paths` 覆盖测试里出现的
+  每一个 `@aqian0/dsh-jj/*` 自引用(且每个映射指向存在的 `src/*.ts`),以及 pnpm + Vite+ 工具链接线
+  (`packageManager`、`devDependencies`、`vp` 脚本、`pnpm-lock.yaml` / `pnpm-workspace.yaml` / `vite.config.ts`
+  存在,`vite` 别名版本与 `vite-plus` 一致)。新增源模块或改打包/工具链配置时先让这些断言通过。
+
+  自引用映射是必须的:`pnpm test` 先跑 `tsc -p tsconfig.test.json` 再构建 `lib/`,`paths` 缺项时 tsc 会沿
+  `package.json` 的 `exports` 去找 `lib/types/*.d.ts`——本地残留的旧 `lib/` 会掩盖问题,干净 checkout(CI)直接
+  TS2307。所以**新增公开子路径时**,`package.json` 的 `exports`、`src/<name>.ts` 与 `tsconfig.test.json` 的
+  `paths` 三处要一起改;`./client` 是经典 script(无 ESM 导出)不进 `paths`。
 
 ## 常见任务
 
