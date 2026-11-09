@@ -32,6 +32,7 @@ import {
 import type { JjLiveSession } from './multi-session.ts';
 import { sniffVcsSync } from './detect.ts';
 import { readSessionHeartbeats, removeSessionHeartbeat, writeSessionHeartbeat } from './session-heartbeat.ts';
+import { registerJjPanelRoutes, type JjPanelRouteHost } from './panel-host.ts';
 import { installJjPromptContext } from './prompt-context.ts';
 import { JjService } from './service.ts';
 
@@ -141,7 +142,7 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // what makes `inject: ['tools','jj']` loadable for the other two rows.
   const resolved = resolveConfig(config);
   assertServiceableConfig(resolved);
-  new JjService(ctx, config);
+  const jjService = new JjService(ctx, config);
   // Session-start preference (policy 2026-10-22): the model is told, in its own prompt,
   // that this workspace is a jj one and that jj is preferred. Registered globally with a
   // provider reading `AssembleContext.agent` — the pattern DSH's own
@@ -362,6 +363,22 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
       },
       'dsh-jj: session heartbeats',
     );
+  }
+  // Web panel (read-only): the routes exist only when the Host has a connection service
+  // and `uiPanel` is not `off`. Headless profiles simply have no `connection`, and a
+  // panel failure must never affect the session.
+  if (resolved.uiPanel === 'auto') {
+    const connection = readService<JjPanelRouteHost>('connection');
+    if (connection?.fetch !== undefined && typeof connection.fetch.register === 'function') {
+      try {
+        const disposePanel = registerJjPanelRoutes(connection, { service: jjService, enabled: true });
+        if (typeof registerEffect === 'function') {
+          registerEffect.call(ctx, () => disposePanel, 'dsh-jj: panel routes');
+        }
+      } catch {
+        // A missing/broken route registry degrades the panel, never the runtime row.
+      }
+    }
   }
   // The service set of a profile is not ordered: the Cordis loader boots every bundle
   // row concurrently and a row only waits for the services it declares in `inject`.

@@ -166,6 +166,7 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 | `readOnlyGitNotice`               | `true`                            | colocated 仓库内只读 git 命令是否附「优先用 jj」提示                                                                                 |
 | `preferJjContext`                 | `true`                            | 会话开始时是否注入「优先用 jj」的模型上下文；关闭会同时关闭提交描述与多会话指引                                                      |
 | `multiSessionGuidance`            | `auto`                            | 多会话并行指引：`auto`（进程内 + 仓库心跳）/ `always`（始终注入）/ `off`                                                             |
+| `uiPanel`                         | `auto`                            | Web 面板：`auto`（Host 有 connection 时提供只读 `/api/jj.*` 路由）/ `off`（关闭）                                                    |
 | `rebaseTarget`                    | `trunk()`                         | 收尾集成的首选目标 revset，不能为空；解析不到真实提交时回退到本地 `main` / `master`                                                  |
 | `commitGuidance`                  | `true`                            | 是否注入提交描述风格与拆分提交指引（需 `preferJjContext` 开启）                                                                      |
 | `commitStyle`                     | `auto`                            | 描述风格：`auto`（继承历史）/ `conventional` / `angular` / `gitmoji` / `plain` / `custom`                                            |

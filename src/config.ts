@@ -70,6 +70,9 @@ export const Config = z.object({
   preferAmendCorrections: z.boolean().default(true),
   // How many recent descriptions jj_commit_style samples (also bounds its process output).
   commitStyleSampleLimit: z.natural().default(30),
+  // Web panel: 'auto' shows the Jujutsu tab and serves its read-only routes when the
+  // Host has a connection service; 'off' keeps the routes disabled (headless use).
+  uiPanel: z.union(['auto', 'off']).default('auto'),
   // ── tools row ──────────────────────────────────────────────────────────────
   defaultLogLimit: z.natural().default(30),
   maxLogLimit: z.natural().default(200),
@@ -128,6 +131,7 @@ export const ROW_CONFIG_KEYS: Readonly<Record<ConfigOwner, readonly (keyof Resol
     'preferSplitCommits',
     'preferAmendCorrections',
     'commitStyleSampleLimit',
+    'uiPanel',
   ] as const),
   tools: Object.freeze(['defaultLogLimit', 'maxLogLimit', 'defaultCwd'] as const),
   guard: Object.freeze([

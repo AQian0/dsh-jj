@@ -189,6 +189,7 @@ test('CONFIG_OWNERSHIP maps every config key to exactly one bundle row', () => {
       'preferSplitCommits',
       'preferAmendCorrections',
       'commitStyleSampleLimit',
+      'uiPanel',
     ],
     tools: ['defaultLogLimit', 'maxLogLimit', 'defaultCwd'],
     guard: [
