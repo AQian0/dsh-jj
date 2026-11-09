@@ -325,6 +325,20 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       客户端 bundle 激活失败会拖垮整个页面。改面板时同步 `test/build.test.ts`(bundle 形态与 loader id、
       body 冒烟渲染)、`test/panel-host.test.ts` 与 README「可视化面板」。
 
+18. **工具结果契约(`nextActions`)**:
+    - 每个工具的 output schema 都带共享的 `NEXT_ACTIONS_SCHEMA`(`tool-schemas.ts`):可选数组,元素是
+      `{ tool, args?, reason }`;**最多 3 条**,`tool` 必须是真实注册的 `jj_*` 工具,`args` 只放
+      `string | number | boolean`(schema 派生的 JSON 类型不允许 `unknown`),`reason` 一句话说明为什么。
+    - 用 `nextActions` 表达「下一步」,不要新增散文字段(`nextStep`/`nextSteps` 是待删除的过渡字段,见规则 19)。
+      动作要具体、可执行:冲突→`jj_status {details:true}`、未提交→`jj_commit`、收尾→`jj_handoff`、
+      自己的临时 workspace→`jj_workspace_cleanup`、丢弃后→`jj_log`。
+    - `jj_status` 默认走便宜的 `operations.status(cwd, signal, {details:false})`(不跑 `jj status`、模板不含
+      `self.diff()`);只有 `details: true` 才返回 `changedPaths`/`diffStat`/`statusText`。`jj_op_log` 的条数
+      上限来自 `defaultLogLimit`/`maxLogLimit` 而不是写死 20/100;`jj_bookmark_list` 默认隐藏 colocated 的
+      `@git` 镜像(`includeGitMirror: true` 才显示),与规则 15 的发布边界判定同一原则。
+    - 测试:`test/service-tools.test.ts` 覆盖「nextActions 指向已注册工具、≤3、reason 非空」「status 便宜路径
+      不 spawn `jj status` 且不含 self.diff()」「op_log 限额」「bookmark @git 过滤」。
+
 ## 代码约定
 
 - 任何改动都必须让 `pnpm test` 全绿(`vp check --deny-warnings` → `tsc` 类型检查 → `node --test`);改行为先补测试。

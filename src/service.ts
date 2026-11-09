@@ -441,7 +441,18 @@ export class JjOperations {
   }
 
   /** `jj log -r @ --no-graph -T <TPL_STATUS>` plus `jj status`. */
-  async status(cwd: string, signal?: AbortSignal): Promise<JjStatusResult> {
+  async status(
+    cwd: string,
+    signal?: AbortSignal,
+    options: { readonly details?: boolean } = {},
+  ): Promise<JjStatusResult> {
+    // `details: false` is the cheap path agents use for orientation: the change record
+    // comes from the same template as `readAt` (no `self.diff()`), and `jj status` (which
+    // duplicates the description and costs a full snapshot diff) is skipped entirely.
+    if (options.details === false) {
+      const change = await this.readAt(cwd, signal);
+      return { change, changedPaths: [], diffStat: '', raw: '', truncated: false };
+    }
     const argv = ['log', '-r', '@', '--no-graph', '-T', TPL_STATUS];
     const changeResult = await this.run(cwd, argv, signal);
     const change = readChangeRecord(changeResult.stdout, argv);

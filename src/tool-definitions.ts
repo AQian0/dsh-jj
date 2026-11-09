@@ -19,7 +19,15 @@ import {
   resolveCommitStylePolicy,
 } from './commit-style.ts';
 import { isRewritableChange } from './jj-templates.ts';
-import { CHANGE_PROPERTIES, CHANGE_SCHEMA, changeView, textRender, workspaceFields } from './tool-schemas.ts';
+import {
+  CHANGE_PROPERTIES,
+  CHANGE_SCHEMA,
+  changeView,
+  NEXT_ACTIONS_SCHEMA,
+  textRender,
+  workspaceFields,
+  type JjNextAction,
+} from './tool-schemas.ts';
 import type { VcsDescriptor } from './types.ts';
 import { cleanupWorkspace } from './flows/cleanup.ts';
 import { amendNextSteps, handoffNextSteps, requireWorkspace, type ToolContext, type ToolExec } from './tool-shared.ts';
@@ -40,6 +48,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
    * The tools only report what they created and ask before unregistering.
    */
   const ownership = service.workspaceOwnership;
+  /**
+   * Keep every result's `nextActions` short and JSON-clean: at most three entries, in the
+   * order an agent should try them. Prose belongs in `reason`, not in the tool result.
+   */
+  const nextActions = (...actions: readonly JjNextAction[]): JjNextAction[] => actions.slice(0, 3);
   // Commit-description policy is owned by the runtime entry (`ctx.jj`) so the
   // session prompt and jj_commit_style cannot disagree; the tools row only carries
   // tool-specific tuning (limits, default cwd, …).
@@ -60,13 +73,20 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_status',
       description:
-        'Report Jujutsu (jj) working-copy state. This is jj, not git: there is no staging area, and the working copy is already a commit (@) that jj snapshots automatically. Returns the current change id, commit id, description, bookmarks, changed paths, and diff stat.',
-      parameters: {},
+        'Report Jujutsu (jj) working-copy state. This is jj, not git: there is no staging area, and the working copy is already a commit (@) that jj snapshots automatically. By default this is a cheap orientation read (change id, commit id, description, bookmarks, rewrite window); pass details: true only when you need the changed paths and diff stat, because that costs a full working-copy diff.',
+      parameters: {
+        details: {
+          type: 'boolean',
+          description:
+            'Include changedPaths and the `jj status` summary (diff stat). Defaults to false: the cheap read answers "where am I" without a full working-copy diff.',
+        },
+      },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             kind: { type: 'string', enum: ['jj-colocated', 'jj-native'], required: true },
             workspaceRoot: { type: 'string', required: true },
             workspaceName: { type: 'string', required: true },
@@ -78,16 +98,17 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             bookmarks: { type: 'array', items: { type: 'string' }, required: true },
             remoteBookmarks: { type: 'array', items: { type: 'string' }, required: true },
             rewritable: { type: 'boolean', required: true },
-            changedPaths: { type: 'array', items: { type: 'string' }, required: true },
-            diffStat: { type: 'string', required: true },
-            statusText: { type: 'string', required: true },
+            changedPaths: { type: 'array', items: { type: 'string' } },
+            diffStat: { type: 'string' },
+            statusText: { type: 'string' },
           },
         },
         render: (_args, value) => textRender(value),
       },
-      async execute(_args, exec) {
+      async execute(args, exec) {
         const { cwd, descriptor } = await openWorkspace(exec);
-        const status = await operations.status(cwd, exec.signal);
+        const details = args.details === true;
+        const status = await operations.status(cwd, exec.signal, { details });
         return {
           ...workspaceFields(descriptor),
           changeId: status.change.changeId,
@@ -98,9 +119,13 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           bookmarks: [...status.change.bookmarks],
           remoteBookmarks: [...status.change.remoteBookmarks],
           rewritable: isRewritableChange(status.change),
-          changedPaths: [...status.changedPaths],
-          diffStat: status.diffStat,
-          statusText: status.truncated ? `[truncated]\n${status.raw}` : status.raw,
+          ...(details
+            ? {
+                changedPaths: [...status.changedPaths],
+                diffStat: status.diffStat,
+                statusText: status.truncated ? `[truncated]\n${status.raw}` : status.raw,
+              }
+            : {}),
         };
       },
     }),
@@ -121,6 +146,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             revset: { type: 'string', required: true },
             truncated: { type: 'boolean', required: true },
             changes: { type: 'array', items: CHANGE_SCHEMA, required: true },
@@ -164,6 +190,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             revset: { type: 'string', required: true },
             format: { type: 'string', enum: ['stat', 'patch'], required: true },
             paths: { type: 'array', items: { type: 'string' }, required: true },
@@ -236,6 +263,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             committed: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
             workingCopy: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
             committedPaths: { type: 'array', items: { type: 'string' }, required: true },
@@ -263,6 +291,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           nextStep: commitCorrectionHint({
             changeId: result.committed.changeId,
             rewritable: isRewritableChange(result.committed),
+          }),
+          nextActions: nextActions({
+            tool: 'jj_handoff',
+            reason: 'When this stack is finished, integrate it onto the rebase target with one call.',
           }),
         };
       },
@@ -298,6 +330,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             style: { type: 'string', enum: [...COMMIT_STYLE_IDS], required: true },
             source: {
               type: 'string',
@@ -455,6 +488,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             amended: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
             workingCopy: { type: 'object', additionalProperties: false, properties: CHANGE_PROPERTIES, required: true },
             sourceAbandoned: {
@@ -492,6 +526,22 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           rewritten: result.rewritten.map((change) => ({ ...change })),
           warnings: [...result.warnings],
           nextStep: amendNextSteps(result),
+          nextActions: nextActions(
+            ...(result.rewritten.some((change) => change.conflict)
+              ? [
+                  {
+                    tool: 'jj_status',
+                    args: { details: true },
+                    reason: 'The rewrite produced conflicts: inspect them before continuing.',
+                  },
+                ]
+              : []),
+            {
+              tool: 'jj_log',
+              args: { revset: '@ | @-' },
+              reason: 'Confirm the folded change and its rebased descendants look right.',
+            },
+          ),
         };
       },
     }),
@@ -512,6 +562,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             mode: { type: 'string', enum: ['undo', 'restore'], required: true },
             operationId: { type: 'string', required: true },
             message: { type: 'string', required: true },
@@ -531,13 +582,17 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       description:
         'Show the Jujutsu (jj) operation log — the recorded history of repository mutations, including automatic working-copy snapshots. This is jj, not git: the operation log is not a git reflog and captures every jj mutation, so use it to find an operation id for jj_undo.',
       parameters: {
-        limit: { type: 'integer', description: 'Maximum operations to return; 1…100, default 20.' },
+        limit: {
+          type: 'integer',
+          description: `Maximum operations to return; 1…${config.maxLogLimit}, default ${config.defaultLogLimit}.`,
+        },
       },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             operations: {
               type: 'array',
               required: true,
@@ -562,7 +617,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
       async execute(args, exec) {
         const { cwd } = await openWorkspace(exec);
-        const limit = Math.max(1, Math.min(args.limit ?? 20, 100));
+        const limit = Math.max(1, Math.min(args.limit ?? config.defaultLogLimit, config.maxLogLimit));
         const all = await operations.opLog(cwd, limit, exec.signal);
         return {
           operations: all.map((operation) => ({
@@ -617,6 +672,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             path: { type: 'string', required: true },
             name: { type: 'string', required: true },
             changeId: { type: 'string', required: true },
@@ -667,6 +723,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           commitId: result.change.commitId,
           entered,
           ...(note.length > 0 ? { note } : {}),
+          nextActions: nextActions({
+            tool: 'jj_status',
+            reason: entered
+              ? 'Confirm the new workspace is the current working copy before editing files.'
+              : 'Switch into the new workspace, then confirm it before editing files.',
+          }),
         };
       },
     }),
@@ -688,6 +750,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             workspaces: {
               type: 'array',
               required: true,
@@ -760,6 +823,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             workspaceName: { type: 'string', required: true },
             workspaceRoot: { type: 'string', required: true },
             alreadyCurrent: { type: 'boolean', required: true },
@@ -827,12 +891,18 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         "List Jujutsu (jj) bookmarks. This is jj, not git: bookmarks are jj's optional named pointers, not git branches — they are not required to create or keep changes, so most changes may have no bookmark at all.",
       parameters: {
         allRemotes: { type: 'boolean', description: 'Also include remote-tracking entries (name@remote).' },
+        includeGitMirror: {
+          type: 'boolean',
+          description:
+            'Also list `@git` entries. In a colocated repository every local bookmark has an `@git` mirror that jj keeps in sync; it is hidden unless you explicitly ask for it.',
+        },
       },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             bookmarks: {
               type: 'array',
               required: true,
@@ -859,8 +929,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       async execute(args, exec) {
         const { cwd } = await openWorkspace(exec);
         const bookmarks = await operations.bookmarkList(cwd, args.allRemotes ?? false, exec.signal);
+        const includeGitMirror = args.includeGitMirror === true;
+        const visible = bookmarks.filter((bookmark) => includeGitMirror || bookmark.remote !== 'git');
         return {
-          bookmarks: bookmarks.map((bookmark) => ({
+          bookmarks: visible.map((bookmark) => ({
             name: bookmark.name,
             target: bookmark.target,
             remote: bookmark.remote,
@@ -887,6 +959,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             name: { type: 'string', required: true },
             target: { type: 'string', required: true },
             moved: { type: 'boolean', required: true },
@@ -926,6 +999,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             revision: { type: 'string', required: true },
             destination: { type: 'string', required: true },
             mode: { type: 'string', enum: ['revisions', 'source', 'branch'], required: true },
@@ -973,6 +1047,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             kind: { type: 'string', enum: ['jj-colocated', 'jj-native'], required: true },
             workspaceRoot: { type: 'string', required: true },
             workspaceName: { type: 'string', required: true },
@@ -1070,6 +1145,43 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           ...(result.bookmark !== undefined ? { bookmark: result.bookmark } : {}),
           ...(result.bookmarkSkipped !== undefined ? { bookmarkSkipped: result.bookmarkSkipped } : {}),
           nextSteps: handoffNextSteps(result, descriptor, cleanupOwned),
+          nextActions: nextActions(
+            ...(result.needsCommit
+              ? [
+                  {
+                    tool: 'jj_commit',
+                    reason: 'The working copy still has uncommitted changes: commit them, then hand off again.',
+                  },
+                ]
+              : []),
+            ...(result.conflicts.length > 0
+              ? [
+                  {
+                    tool: 'jj_status',
+                    args: { details: true },
+                    reason: 'The rebase left conflicts: inspect and resolve them before finishing.',
+                  },
+                ]
+              : []),
+            ...(cleanupOwned
+              ? [
+                  {
+                    tool: 'jj_workspace_cleanup',
+                    reason:
+                      'The stack is integrated: unregister this temporary workspace and return to the default one.',
+                  },
+                ]
+              : []),
+            ...(!result.needsCommit && result.conflicts.length === 0 && !cleanupOwned
+              ? [
+                  {
+                    tool: 'jj_log',
+                    args: { revset: '@ | @-' },
+                    reason: 'Confirm the rebased stack on its destination.',
+                  },
+                ]
+              : []),
+          ),
         };
       },
     }),
@@ -1084,6 +1196,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             forgotten: { type: 'boolean', required: true },
             workspaceName: { type: 'string', required: true },
             workspaceRoot: { type: 'string', required: true },
@@ -1128,6 +1241,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             abandoned: { type: 'array', items: CHANGE_SCHEMA, required: true },
             message: { type: 'string', required: true },
           },
@@ -1140,6 +1254,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         return {
           abandoned: result.abandoned.map((change) => changeView(change)),
           message: result.message,
+          nextActions: nextActions({
+            tool: 'jj_log',
+            args: { revset: '@ | @-' },
+            reason: 'Confirm the dropped revisions are gone and the descendants landed on their new parents.',
+          }),
         };
       },
     }),
@@ -1154,6 +1273,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             status: { type: 'string', enum: ['fetched', 'no-remote', 'skipped', 'failed'], required: true },
             message: { type: 'string', required: true },
           },
@@ -1163,7 +1283,15 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       async execute(_args, exec) {
         const { cwd } = await openWorkspace(exec);
         const result = await operations.fetch(cwd, exec.signal);
-        return { status: result.status, message: result.message };
+        return {
+          status: result.status,
+          message: result.message,
+          nextActions: nextActions({
+            tool: 'jj_handoff',
+            args: { fetch: false },
+            reason: 'Fetched state is in the log: integrate this stack onto the updated target.',
+          }),
+        };
       },
     }),
 
@@ -1177,6 +1305,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             message: { type: 'string', required: true },
             change: CHANGE_SCHEMA,
           },
@@ -1207,6 +1336,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           type: 'object',
           additionalProperties: false,
           properties: {
+            nextActions: NEXT_ACTIONS_SCHEMA,
             operationId: { type: 'string', required: true },
             message: { type: 'string', required: true },
           },

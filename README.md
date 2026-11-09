@@ -107,28 +107,30 @@ Use the jj equivalent instead:
 
 `jj_handoff` 还会检查整合后的栈里是否残留空提交（并行的重复改动 rebase 后会变空，或历史遗留的其它 workspace 空 `@`），并在 `nextSteps` 里列出 change id 和处理建议：本会话自己的、rebase 后才变空的已描述 change 可以用 `jj abandon <change id>` 丢弃；没有描述的空 change 通常是别的 workspace 的工作副本，不要 abandon，报告给你。`jj_workspace_cleanup` 注销 workspace 后，如果其空工作副本因为已有描述或还有后代而没有被 jj 自动丢弃，也会在结果里提示（不会自动改写或 abandon）；如果默认 workspace 因兄弟 workspace 的 rebase 变成 stale，清理时会先自动恢复再注销。
 
+每个工具结果的 JSON 里都有一个可选的 **`nextActions`** 字段：最多 3 条 `{ tool, args?, reason }`，只列真实存在的 `jj_*` 工具。它取代了用散文写「下一步该做什么」，客户端或模型可以直接照着调用；`jj_commit` / `jj_amend` / `jj_handoff` / `jj_workspace_add` / `jj_workspace_cleanup` / `jj_abandon` / `jj_fetch` 都会在合适的时候给出。
+
 ### 工具一览
 
-| 工具                                      | 作用                                                                           |
-| ----------------------------------------- | ------------------------------------------------------------------------------ |
-| `jj_status`                               | 查看当前 change 的状态                                                         |
-| `jj_log`                                  | 按 revset 查看提交历史                                                         |
-| `jj_diff`                                 | 查看指定 revset 的 diff                                                        |
-| `jj_new`                                  | 新建 change 并设为 `@`；`@` 已空且未给 parents 时拒绝（避免空提交）            |
-| `jj_commit`                               | 描述当前 change 并新建 change；空工作副本会拒绝；传 `paths` 可只提交部分文件   |
-| `jj_describe`                             | 修改当前 change 的描述（相当于 `git commit --amend`）                          |
-| `jj_commit_style`                         | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项                         |
-| `jj_squash`                               | 把改动合并进另一个提交；传 `paths` 可只合并部分文件                            |
-| `jj_amend`                                | 把修正折叠进之前的提交（未推送时），并报告被 rebase 的后代                     |
-| `jj_abandon`                              | 丢弃指定 revision（拒绝 `@` 与已发布提交），后代自动 rebase 到其父提交         |
-| `jj_undo` / `jj_op_log` / `jj_op_restore` | 撤销最后一次操作 / 查看 operation 历史 / 恢复到指定 operation                  |
-| `jj_fetch`                                | `jj git fetch`；没有远端时返回 `no-remote`，不视为错误                         |
-| `jj_workspace_add` / `jj_workspace_list`  | 新建 / 列出 jj workspace；与当前 `@` 重叠的 parent 会被拒绝或忽略              |
-| `jj_bookmark_list` / `jj_bookmark_set`    | 列出（`conflicted` 标出并发操作留下的冲突 bookmark）/ 设置 bookmark            |
-| `jj_rebase`                               | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动                   |
-| `jj_handoff`                              | 收尾集成：fetch、选择目标、整栈 rebase、过期恢复、冲突与栈内空提交上报一次完成 |
-| `jj_workspace_cleanup`                    | 注销本会话创建的临时 workspace                                                 |
-| `jj_workspace_update_stale`               | 恢复 stale 工作副本（`jj workspace update-stale`），不改写任何提交             |
+| 工具                                      | 作用                                                                                                         |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `jj_status`                               | 查看当前 change 的状态；默认不跑 `jj status`（`details: true` 才带改动路径与 diff 统计）                     |
+| `jj_log`                                  | 按 revset 查看提交历史                                                                                       |
+| `jj_diff`                                 | 查看指定 revset 的 diff                                                                                      |
+| `jj_new`                                  | 新建 change 并设为 `@`；`@` 已空且未给 parents 时拒绝（避免空提交）                                          |
+| `jj_commit`                               | 描述当前 change 并新建 change；空工作副本会拒绝；传 `paths` 可只提交部分文件                                 |
+| `jj_describe`                             | 修改当前 change 的描述（相当于 `git commit --amend`）                                                        |
+| `jj_commit_style`                         | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项                                                       |
+| `jj_squash`                               | 把改动合并进另一个提交；传 `paths` 可只合并部分文件                                                          |
+| `jj_amend`                                | 把修正折叠进之前的提交（未推送时），并报告被 rebase 的后代                                                   |
+| `jj_abandon`                              | 丢弃指定 revision（拒绝 `@` 与已发布提交），后代自动 rebase 到其父提交                                       |
+| `jj_undo` / `jj_op_log` / `jj_op_restore` | 撤销最后一次操作 / 查看 operation 历史（条数受 `defaultLogLimit`/`maxLogLimit` 约束）/ 恢复到指定 operation  |
+| `jj_fetch`                                | `jj git fetch`；没有远端时返回 `no-remote`，不视为错误                                                       |
+| `jj_workspace_add` / `jj_workspace_list`  | 新建 / 列出 jj workspace；与当前 `@` 重叠的 parent 会被拒绝或忽略                                            |
+| `jj_bookmark_list` / `jj_bookmark_set`    | 列出（隐藏 colocated 的 `@git` 镜像，`includeGitMirror: true` 可显示；`conflicted` 标出冲突）/ 设置 bookmark |
+| `jj_rebase`                               | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动                                                 |
+| `jj_handoff`                              | 收尾集成：fetch、选择目标、整栈 rebase、过期恢复、冲突与栈内空提交上报一次完成                               |
+| `jj_workspace_cleanup`                    | 注销本会话创建的临时 workspace                                                                               |
+| `jj_workspace_update_stale`               | 恢复 stale 工作副本（`jj workspace update-stale`），不改写任何提交                                           |
 
 非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj，不会回退到 git。
 

@@ -11,6 +11,38 @@
 import { isRewritableChange } from './jj-templates.ts';
 import type { VcsDescriptor } from './types.ts';
 
+/** One machine-readable follow-up a tool result recommends. */
+export interface JjNextAction {
+  /** `jj_*` tool name to call next. */
+  readonly tool: string;
+  /** Arguments to pass with it; omit when the defaults are already correct. */
+  readonly args?: Readonly<Record<string, string | number | boolean>>;
+  /** Why this is the next step, in one short sentence. */
+  readonly reason: string;
+}
+
+/**
+ * Shared `nextActions` output property.
+ *
+ * Tool results stay prose-free: instead of a paragraph of instructions they carry at most
+ * a few concrete follow-up calls, so a client (or the model) can continue the flow without
+ * re-reading documentation. Caps are enforced by the producers (`≤ 3`); the schema only
+ * fixes the shape.
+ */
+export const NEXT_ACTIONS_SCHEMA = {
+  type: 'array',
+  description: 'Concrete follow-up tool calls this result recommends, at most three, most relevant first.',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      tool: { type: 'string', required: true },
+      args: { type: 'object', additionalProperties: true },
+      reason: { type: 'string', required: true },
+    },
+  },
+} as const;
+
 export function textRender(value: unknown): { type: 'text'; text: string }[] {
   return [{ type: 'text', text: JSON.stringify(value) }];
 }

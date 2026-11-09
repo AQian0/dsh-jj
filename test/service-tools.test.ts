@@ -444,6 +444,135 @@ test('refusal paths: git-only, no repository, and broken jj metadata are all dia
   assert.ok(status.changeId.length > 0);
 });
 
+test('results carry bounded, schema-valid nextActions', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-next-actions');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  await writeFixtureFile(fx, repo, 'seed.txt', 'seed');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const definitions = jjToolDefinitions({
+    ...toolContext(fx, toolService(fx, operations)),
+    cwdFor: async () => repo,
+  });
+  const byName = definitionsByName(definitions);
+  const known = new Set(definitions.map((definition) => definition.name));
+
+  const committed = (await byName.get('jj_commit')!.execute({ message: 'feat: seed' }, fakeExec())) as {
+    nextActions?: { tool: string; args?: Record<string, unknown>; reason: string }[];
+  };
+  assert.ok(Array.isArray(committed.nextActions) && committed.nextActions.length > 0);
+  for (const action of committed.nextActions ?? []) {
+    assert.ok(known.has(action.tool), `nextActions must name a tool that exists: ${action.tool}`);
+    assert.ok(action.reason.length > 0, 'every next action explains why');
+  }
+
+  // A refusal still throws (no partial result carrying instructions).
+  await assert.rejects(
+    () => byName.get('jj_commit')!.execute({ message: 'feat: empty' }, fakeExec()),
+    /empty working-copy change|no content changes/i,
+  );
+
+  const abandoned = (await byName.get('jj_abandon')!.execute({ revset: '@-' }, fakeExec())) as {
+    nextActions?: { tool: string }[];
+  };
+  assert.equal(abandoned.nextActions?.[0]?.tool, 'jj_log');
+
+  // No tool ever returns more than three actions.
+  const fetch = (await byName.get('jj_fetch')!.execute({}, fakeExec())) as { nextActions?: unknown[] };
+  assert.ok((fetch.nextActions?.length ?? 0) <= 3);
+});
+
+test('jj_status is a cheap read by default and only diffs with details: true', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-status-details');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  await writeFixtureFile(fx, repo, 'seed.txt', 'seed');
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const definitions = definitionsByName(
+    jjToolDefinitions({ ...toolContext(fx, toolService(fx, operations)), cwdFor: async () => repo }),
+  );
+  const status = definitions.get('jj_status')!;
+
+  calls.length = 0;
+  const cheap = (await status.execute({}, fakeExec())) as Record<string, unknown>;
+  assert.ok(typeof cheap['changeId'] === 'string');
+  assert.equal(cheap['changedPaths'], undefined, 'the default read omits changed paths');
+  assert.equal(cheap['diffStat'], undefined);
+  assert.equal(cheap['statusText'], undefined);
+  assert.ok(!calls.some((argv) => argv[1] === 'status'), 'the cheap path never runs jj status');
+  assert.ok(
+    !calls.some((argv) => argv.some((argument) => argument.includes('self.diff()'))),
+    'the cheap path uses the template without self.diff()',
+  );
+
+  calls.length = 0;
+  const detailed = (await status.execute({ details: true }, fakeExec())) as Record<string, unknown>;
+  assert.ok(Array.isArray(detailed['changedPaths']));
+  assert.ok(typeof detailed['diffStat'] === 'string' && (detailed['diffStat'] as string).length > 0);
+  assert.ok(typeof detailed['statusText'] === 'string');
+});
+
+test('jj_op_log honors the configured limit window', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-op-limit');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  await writeFixtureFile(fx, repo, 'seed.txt', 'seed');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const base = toolContext(fx, toolService(fx, operations));
+  const definitions = definitionsByName(
+    jjToolDefinitions({
+      ...base,
+      config: resolveConfig({ defaultLogLimit: 3, maxLogLimit: 5 }),
+      cwdFor: async () => repo,
+    }),
+  );
+  const opLog = definitions.get('jj_op_log')!;
+
+  const defaulted = (await opLog.execute({}, fakeExec())) as { operations: { id: string }[] };
+  assert.ok(defaulted.operations.length <= 3, 'the default limit comes from defaultLogLimit');
+
+  const capped = (await opLog.execute({ limit: 50 }, fakeExec())) as { operations: { id: string }[] };
+  assert.ok(capped.operations.length <= 5, 'an explicit limit is capped by maxLogLimit');
+});
+
+test('jj_bookmark_list hides the colocated @git mirror unless asked', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-bookmark-mirror');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  fx.cwd = repo;
+  await writeFixtureFile(fx, repo, 'seed.txt', 'seed');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  await operations.bookmarkSet(repo, 'feature', '@', false, undefined);
+  const definitions = definitionsByName(
+    jjToolDefinitions({ ...toolContext(fx, toolService(fx, operations)), cwdFor: async () => repo }),
+  );
+  const list = definitions.get('jj_bookmark_list')!;
+
+  const local = (await list.execute({ allRemotes: true }, fakeExec())) as {
+    bookmarks: { name: string; remote: string | null }[];
+  };
+  assert.ok(
+    local.bookmarks.every((bookmark) => bookmark.remote !== 'git'),
+    'the @git mirror is hidden by default',
+  );
+  assert.ok(local.bookmarks.some((bookmark) => bookmark.name === 'feature'));
+
+  const withMirror = (await list.execute({ allRemotes: true, includeGitMirror: true }, fakeExec())) as {
+    bookmarks: { name: string; remote: string | null }[];
+  };
+  assert.ok(
+    withMirror.bookmarks.some((bookmark) => bookmark.remote === 'git'),
+    'includeGitMirror exposes the mirror entries',
+  );
+});
+
 test('registerJjTools registers and disposes every tool', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-register');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
