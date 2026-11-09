@@ -676,7 +676,10 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   const slots: { name: string; key: string; component: unknown }[] = [];
   const locales: string[] = [];
   (clientModule.apply as (ctx: unknown) => void)({
-    locale: { register: (namespace: string) => locales.push(namespace) },
+    locale: {
+      register: (namespace: string) => locales.push(namespace),
+      bind: () => (key: string) => key,
+    },
     sidebarRightTabs: { register: (definition: Record<string, unknown>) => tabs.push(definition) },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
@@ -689,6 +692,19 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
     tabs.map((tab) => tab['kind']),
     ['jj'],
   );
+  // The sidebar calls these lazily: `title` must be a function and `guide` an ARRAY of
+  // entries (each with its own id and lazy title/description). A string/object here
+  // throws inside the registry and silently removes the tab from the UI.
+  const tabDefinition = tabs[0] as Record<string, unknown>;
+  assert.equal(typeof tabDefinition['title'], 'function', 'the tab type title is a function');
+  assert.equal((tabDefinition['title'] as () => string)(), 'title');
+  const guide = tabDefinition['guide'] as { id: string; title: () => string; description?: () => string }[];
+  assert.ok(Array.isArray(guide) && guide.length === 1, 'the guide is an array of entries');
+  assert.equal(guide[0]?.id, 'jj');
+  assert.equal(typeof guide[0]?.title, 'function');
+  assert.equal(guide[0]?.title(), 'title');
+  assert.equal(typeof guide[0]?.description, 'function');
+  assert.equal(guide[0]?.description?.(), 'guideDescription');
   assert.deepEqual(
     slots.map((slot) => ({ name: slot.name, key: slot.key })),
     [

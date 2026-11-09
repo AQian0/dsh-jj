@@ -43,6 +43,8 @@ interface ClientContext {
   };
   readonly locale?: {
     register?(namespace: string, dictionaries: Record<string, Record<string, string>>): unknown;
+    /** Bind a namespace to a `t(key)` function (the host exposes this on `ctx.locale`). */
+    bind?(namespace: string): (key: string) => string;
   };
   effect?(body: () => unknown, label?: string): unknown;
 }
@@ -569,12 +571,26 @@ function apply(ctx: ClientContext): void {
   } catch {
     // Localization is cosmetic: a failure here must not stop the tab registration.
   }
+  // `title` and every guide `title`/`description` are functions the sidebar calls
+  // lazily (the guide entry type is an ARRAY); a string here throws at registration and
+  // silently removes the tab, which is exactly how the tab "disappeared" once.
+  const t =
+    typeof ctx.locale?.bind === 'function'
+      ? ctx.locale.bind(JJ_LOCALE_NS)
+      : (key: string) => DICTIONARIES.en?.[key] ?? key;
   try {
     ctx.sidebarRightTabs?.register?.({
       id: JJ_TAB_ID,
       kind: 'jj',
-      title: 'Jujutsu',
-      guide: { title: 'Jujutsu', description: 'Working copy, stack, workspaces and bookmarks.' },
+      title: () => t('title'),
+      guide: [
+        {
+          id: 'jj',
+          title: () => t('title'),
+          description: () => t('guideDescription'),
+          order: 50,
+        },
+      ],
     });
   } catch {
     // Without the sidebar-right plugin there is no place to mount the tab.
