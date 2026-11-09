@@ -27,6 +27,7 @@ import {
   asRecord,
   bound,
   changeFromRecord,
+  isRewritableChange,
   parseChangeLines,
   parseJsonLine,
   TemplateParseError,
@@ -126,6 +127,14 @@ export interface JjStatusResult {
   readonly diffStat: string;
   readonly raw: string;
   readonly truncated: boolean;
+}
+
+/** Result of `abandon()`. */
+export interface JjAbandonResult {
+  /** The revisions that were dropped, as they looked before the command. */
+  readonly abandoned: readonly JjChangeRecord[];
+  /** jj's own output line (bounded). */
+  readonly message: string;
 }
 
 /** Result of `undo()`. */
@@ -597,7 +606,7 @@ export class JjOperations {
     }
     if (paths.length > 0 && committed.empty) {
       warnings.push(
-        'No changes matched the given paths, so the committed change is empty; the working copy still holds the changes. Check that the paths are repository-relative. The empty commit stays in the change chain: remove it with `jj abandon <change id>` (or undo the commit with jj_undo) if it was not intended.',
+        'No changes matched the given paths, so the committed change is empty; the working copy still holds the changes. Check that the paths are repository-relative. The empty commit stays in the change chain: remove it with jj_abandon (or undo the commit with jj_undo) if it was not intended.',
       );
     }
     return { committed, workingCopy, warnings };
@@ -688,6 +697,24 @@ export class JjOperations {
       );
     }
     assertPaths(paths);
+    // Same publication boundary as jj_amend. `jj squash --into` rewrites the target and
+    // rebases every descendant up to the working copy, so a published change anywhere in
+    // that range would need a forced push; refuse before touching anything instead of
+    // letting jj's immutable check be the only fence (it misses pushed tracked bookmarks).
+    const published = await this.readChangesAt(
+      cwd,
+      `((${from}) | (${into}))::@ & (immutable() | remote_bookmarks())`,
+      TPL_LOG,
+      signal,
+      1,
+    );
+    const publishedChange = published[0];
+    if (publishedChange !== undefined) {
+      const label = bound(publishedChange.description.trim(), 120) || '(no description)';
+      throw badInput(
+        `jj_squash refuses to rewrite ${publishedChange.changeId} (${label}): the rewritten range contains a published change (trunk, tag or remote bookmark). Rewriting it would need a forced push, which dsh-jj never does — commit the change as a new revision instead, or use jj_amend for an unpushed correction.`,
+      );
+    }
     const argv = ['squash', '--from', from, '--into', into];
     if (message !== undefined) argv.push('-m', message);
     if (useDestinationMessage) argv.push('--use-destination-message');
@@ -884,6 +911,56 @@ export class JjOperations {
     }
 
     return { amended, workingCopy, sourceAbandoned, rewritten, warnings };
+  }
+
+  /**
+   * `jj abandon <revset>` — drop revisions, rebasing their descendants onto the parents.
+   *
+   * Safety invariants, checked before anything runs:
+   * - a revset must be given (jj defaults to `@`, which would silently discard the
+   *   working copy);
+   * - the revset must resolve to at least one revision;
+   * - it must not include the working-copy change (the shell guard hard-denies
+   *   abandoning `@`; the tool must not be the way around that rule);
+   * - it must not include a published change (immutable, trunk/tag, or a remote
+   *   bookmark): dropping published history would need a forced push.
+   *
+   * @param cwd - workspace directory.
+   * @param revset - revisions to abandon (resolved first).
+   * @param signal - cancellation signal.
+   * @returns the abandoned change records and jj's own output line.
+   */
+  async abandon(cwd: string, revset: string, signal?: AbortSignal): Promise<JjAbandonResult> {
+    const target = revset.trim();
+    if (target.length === 0) {
+      throw badInput(
+        'jj_abandon needs an explicit revset: passing nothing would abandon the working copy (@). Name the change id from jj_log.',
+      );
+    }
+    const changes = await this.readChangesAt(cwd, target, TPL_LOG, signal, this.config.maxLogLimit);
+    if (changes.length === 0) {
+      throw badInput(
+        `jj_abandon found no revision matching ${JSON.stringify(target)}; list the changes with jj_log and pass a change id.`,
+      );
+    }
+    const workingCopy = changes.find((change) => change.currentWorkingCopy);
+    if (workingCopy !== undefined) {
+      throw badInput(
+        'jj_abandon refuses to abandon the working-copy change @: it would discard the files you are working on. Commit or describe it first, or name the specific change to drop.',
+      );
+    }
+    const published = changes.find((change) => !isRewritableChange(change));
+    if (published !== undefined) {
+      const label = bound(published.description.trim(), 120) || '(no description)';
+      throw badInput(
+        `jj_abandon refuses to abandon ${published.changeId} (${label}): it is published (trunk, tag or remote bookmark), so dropping it would need a forced push. dsh-jj never rewrites published history.`,
+      );
+    }
+    const result = await this.run(cwd, ['abandon', target], signal);
+    return {
+      abandoned: changes,
+      message: bound(result.stdout.trim() || result.stderr.trim(), 1024).text,
+    };
   }
 
   /** `jj undo` or `jj op restore <operationId>`; records the head operation first. */
@@ -1897,8 +1974,18 @@ export class JjOperations {
     }
   }
 
-  /** Read one revision as a {@link JjChangeRecord} (default `@`, lightweight template). */
-  private async readAt(cwd: string, signal?: AbortSignal, revset = '@'): Promise<JjChangeRecord> {
+  /**
+   * Read one revision as a {@link JjChangeRecord} (default `@`, lightweight template).
+   *
+   * Public because flows and tools need the working-copy record without paying for the
+   * full `status` output; it is a single `jj log -r <revset>` call.
+   *
+   * @param cwd - workspace directory.
+   * @param signal - cancellation signal.
+   * @param revset - revision to read (default `@`).
+   * @returns the change record.
+   */
+  async readAt(cwd: string, signal?: AbortSignal, revset = '@'): Promise<JjChangeRecord> {
     const argv = logArgv(revset, TPL_CHANGE);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecord(result.stdout, argv);

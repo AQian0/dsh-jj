@@ -158,7 +158,7 @@ function handoffEmptyChangesNote(result: JjHandoffResult): string {
   const count = empty.length;
   return [
     `The integrated stack carries ${count} empty change${count === 1 ? '' : 's'}: ${listed}. They would become empty commits in Git history.`,
-    "A described change that became empty because the destination already contains its content may be dropped with `jj abandon <change id>` when it is this session's own unpushed change;",
+    "A described change that became empty because the destination already contains its content may be dropped with jj_abandon when it is this session's own unpushed change;",
     'an empty change without a description is usually another workspace\'s empty working-copy change: never abandon it, report it to the user so the next workspace is created without `parents: ["@"]`.',
   ].join(' ');
 }

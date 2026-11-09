@@ -1051,5 +1051,114 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         };
       },
     }),
+
+    defineTool({
+      name: 'jj_abandon',
+      description:
+        'Abandon (drop) Jujutsu (jj) revisions, rebasing their descendants onto the parents. This is jj, not git: there is no staging area and no garbage commit — an abandoned change leaves the graph, and the change ids of its descendants stay stable. The tool refuses a revset that includes the working copy (@) or a published change, so it cannot silently discard work or rewrite pushed history.',
+      parameters: {
+        revset: {
+          type: 'string',
+          description:
+            'jj revset naming the revisions to drop (change ids from jj_log). Required: jj would otherwise default to @.',
+          required: true,
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            abandoned: { type: 'array', items: CHANGE_SCHEMA, required: true },
+            message: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const { cwd } = await openWorkspace(exec);
+        const result = await operations.abandon(cwd, args.revset, exec.signal);
+        return {
+          abandoned: result.abandoned.map((change) => changeView(change)),
+          message: result.message,
+        };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_fetch',
+      description:
+        'Fetch new commits and bookmarks from the Git remote into this Jujutsu (jj) repository (`jj git fetch`). This is jj, not git: fetching updates jj remote bookmarks, it never touches the working copy, and it never pushes. A repository without a remote is a normal result (status "no-remote"), not an error.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', enum: ['fetched', 'no-remote', 'skipped', 'failed'], required: true },
+            message: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(_args, exec) {
+        const { cwd } = await openWorkspace(exec);
+        const result = await operations.fetch(cwd, exec.signal);
+        return { status: result.status, message: result.message };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_workspace_update_stale',
+      description:
+        'Recover a stale Jujutsu (jj) working copy (`jj workspace update-stale`). A workspace becomes stale when another workspace rebased the change it had checked out; every read fails until it is recovered. This is jj, not git: the command only reloads this workspace onto the rewritten change, it does not move or rewrite any commit.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            message: { type: 'string', required: true },
+            change: CHANGE_SCHEMA,
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(_args, exec) {
+        const { cwd } = await openWorkspace(exec);
+        const message = await operations.updateStale(cwd, exec.signal);
+        const change = await operations.readAt(cwd, exec.signal);
+        return { message, change: changeView(change) };
+      },
+    }),
+
+    defineTool({
+      name: 'jj_op_restore',
+      description:
+        'Restore the whole repository to an earlier Jujutsu (jj) operation (`jj op restore <id>`). This is jj, not git: the operation log records every mutation, and restoring replays the repository view as of that operation, rewriting this workspace working copy to match. Prefer jj_undo for "undo the last operation"; use this when you know the exact operation id from jj_op_log.',
+      parameters: {
+        operationId: {
+          type: 'string',
+          description: 'Operation id (or unique hexadecimal prefix) from jj_op_log.',
+          required: true,
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            operationId: { type: 'string', required: true },
+            message: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => textRender(value),
+      },
+      async execute(args, exec) {
+        const { cwd } = await openWorkspace(exec);
+        const result = await operations.undo(cwd, args.operationId, exec.signal);
+        return { operationId: result.operationId, message: result.message };
+      },
+    }),
   ];
 }

@@ -9,7 +9,7 @@
 - `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
 - 四个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
   - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
-  - `dsh-jj/tools`(`jj-tools`):18 个 `jj_*` 模型工具;
+  - `dsh-jj/tools`(`jj-tools`):22 个 `jj_*` 模型工具;
   - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护;
   - `dsh-jj/changes`(`jj-changes`):用 jj 工作副本快照实现每轮「已编辑 N 个文件」变更卡片,并通过 bundle patch
     禁用 DSH 内置的 Git-only `workspace-changes` 行、在隔离 service scope 里复用它的记录器。
@@ -72,15 +72,16 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | 路径                                                           | 内容                                                                                                                                                                                    |
 | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/index.ts`                                                 | 运行时入口:`JjService` 注册 + 全局 prompt context;`assembleBaseLayer` 供测试                                                                                                            |
-| `src/service.ts`                                               | `JjOperations`(18 个 operation + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                               |
+| `src/service.ts`                                               | `JjOperations`(一次一个 jj 子命令 + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                            |
 | `src/jj-templates.ts`                                          | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess)                                                                                                                  |
 | `src/jj-service.ts`                                            | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                              |
 | `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
 | `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
 | `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
-| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 18 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
+| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 22 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
 | `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
 | `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
+| `src/capabilities.ts`                                          | 纯模块:jj 子命令 → 处置（tool / shell / blocked）的能力矩阵；`test/capabilities.test.ts` 断言覆盖 guard 表与已注册工具                                                                  |
 | `src/git-command.ts`                                           | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                          |
 | `src/git-tokenize.ts`                                          | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                   |
 | `src/git-equivalence.ts`                                       | git 安全分类与等价命令表类型/规则(纯数据)                                                                                                                                               |
@@ -182,7 +183,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       `jj_commit`,不要代为描述。
     - rebase 后要检查 `stack` 里残留的空 change(`empty && !currentWorkingCopy`):`handoffNextSteps` 的 `nextSteps`
       必须列出它们的 change id 与处理建议,但不自动 abandon(可能是别的 workspace 的空工作副本);本会话自己的、
-      rebase 后才变空的已描述 change 才提示用 `jj abandon <change id>` 丢弃。
+      rebase 后才变空的已描述 change 才提示用 `jj_abandon` 丢弃。
     - **stale 恢复必须包住整个流程**:stale 时连目标/栈的 `jj log` 读取都会失败,所以 `handoff()` 用
       「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
       rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
@@ -283,10 +284,10 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       `jj_commit` / `jj_new`。两处都必须在**执行前**防护,不能事后补警告或自动 undo(撤销是破坏性改写)。
     - `JjOperations.commit()` 先用 `readAt(cwd)` 读取 `@`:空且非 conflict 时抛 `JJ_BAD_INPUT`(冲突的空合并
       change 保持原路径,它需要先解决冲突);`paths` 一个都没匹配上时 jj 仍会创建空提交,只能在成功结果里返回
-      警告并提示 `jj abandon`(现有测试锁定 warning-only 形状)。`newChange()` 在无 parents 且 `@` 已空时同样
+      警告并提示用 `jj_abandon` 清理(现有测试锁定 warning-only 形状)。`newChange()` 在无 parents 且 `@` 已空时同样
       拒绝;显式 parents 的 `jj_new` 保持可用(用于在别的 revision 上开栈)。
-    - `jj_handoff` 对 rebase 后才变空的 change 只报告不自动删除(见规则 13);已存在的空提交由用户/模型用
-      `jj abandon <change id>` 清理,插件不提供 abandon 工具,也不自动改写他人提交。
+    - `jj_handoff` 对 rebase 后才变空的 change 只报告不自动删除(见规则 13);清理由模型调用 `jj_abandon`
+      (显式 revset、拒绝 `@` 与已发布提交),插件绝不自动 abandon,也不改写他人提交。
     - 修改这些守卫/文案时同步 `test/service-tools.test.ts`(commit/new 空提交拒绝、workspaceAdd parent
       丢弃/拒绝、handoff 空 change 上报、cleanup stale 恢复与保留提示)、`test/multi-session.test.ts`(隔离与
       收尾文案、prompt token 预算)与 README「多会话协作」「任务收尾」「已知限制」。

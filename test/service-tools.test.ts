@@ -241,7 +241,7 @@ test('operation layer: bad input is rejected before spawning anything', async (t
   assert.equal(calls.length, 0, 'no jj process was spawned for invalid input');
 });
 
-test('all 18 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
+test('all 22 jj_* tools are defined with contract names, descriptions, and schemas', async (t) => {
   const fx = makeFixture(t, 'dsh-jj-tools-defs');
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   fx.cwd = repo;
@@ -269,6 +269,10 @@ test('all 18 jj_* tools are defined with contract names, descriptions, and schem
     'jj_rebase',
     'jj_handoff',
     'jj_workspace_cleanup',
+    'jj_abandon',
+    'jj_fetch',
+    'jj_workspace_update_stale',
+    'jj_op_restore',
   ];
   assert.deepEqual([...byName.keys()], expected);
   for (const definition of definitions) {
@@ -311,6 +315,8 @@ test('tool schemas validate their own arguments and outputs (real DSH validators
     jj_bookmark_list: { allRemotes: false },
     jj_bookmark_set: { name: 'tool-bookmark', revset: '@' },
     jj_rebase: { revision: '@', destination: '@-', mode: 'source' },
+    jj_fetch: {},
+    jj_workspace_update_stale: {},
   };
 
   for (const definition of definitions) {
@@ -453,7 +459,7 @@ test('registerJjTools registers and disposes every tool', async (t) => {
     },
   };
   const dispose = registerJjTools(host, { service: toolService(fx, operations), config: {} });
-  assert.equal(registered.length, 18);
+  assert.equal(registered.length, 22);
   dispose();
   assert.equal(registered.length, 0);
   dispose();
@@ -1142,7 +1148,7 @@ test('jj_handoff: a rebase that empties a session change reports it instead of c
   assert.deepEqual(validateJsonSchemaValue(handoff.output.schema, value), [], `output: ${JSON.stringify(value)}`);
   const nextSteps = String(value['nextSteps']);
   assert.match(nextSteps, /empty change/, 'the empty change is named in next steps');
-  assert.match(nextSteps, /jj abandon/, 'the described empty change can be dropped');
+  assert.match(nextSteps, /jj_abandon/, 'the described empty change can be dropped with the tool');
   assert.match(nextSteps, /never abandon/i, 'a foreign empty working-copy change must not be abandoned');
 });
 
@@ -2142,4 +2148,121 @@ test('jj_amend tool folds the correction, reports descendants, and validates its
     () => definitions.get('jj_amend')!.execute({ into: two }, fakeExec()),
     (error: unknown) => error instanceof JjError && /published change/.test(error.message),
   );
+});
+
+test('operation layer: squash refuses a published rewrite range before any rewrite', async (t) => {
+  const { fx, repo, operations, one } = await makeAmendFixture(t, 'dsh-jj-squash-published');
+  await addBareRemote(fx, repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'main', '-r', one], repo);
+  await mustRun(fx.run, ['jj', 'git', 'push', '--bookmark', 'main'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'fetch'], repo);
+  await writeFixtureFile(fx, repo, 'one.txt', 'one squashed');
+
+  await assert.rejects(
+    () => operations.squash(repo, '@', one, 'squash into published', false, []),
+    (error: unknown) =>
+      error instanceof JjError && error.code === 'JJ_BAD_INPUT' && /published change/.test(error.message),
+  );
+  const target = await mustRun(fx.run, ['jj', 'file', 'show', '-r', one, 'one.txt'], repo);
+  assert.match(target.stdout, /^one$/m, 'the published target was not rewritten');
+});
+
+test('operation layer: abandon drops a change and rebases its descendants', async (t) => {
+  const { fx, repo, operations, one, two, three } = await makeAmendFixture(t, 'dsh-jj-abandon-basic');
+  const result = await operations.abandon(repo, two);
+  assert.equal(result.abandoned.length, 1);
+  assert.equal(result.abandoned[0]?.changeId, two);
+  assert.match(result.message, /Abandoned/);
+
+  const remaining = await mustRun(fx.run, ['jj', 'log', '-r', '::@', '--no-graph', '-T', 'change_id ++ "\n"'], repo);
+  const ids = remaining.stdout.split('\n').map((line) => line.trim());
+  assert.ok(!ids.includes(two), 'the abandoned change left the graph');
+  assert.ok(ids.includes(one) && ids.includes(three), 'ancestors and descendants keep their change ids');
+
+  const parents = await mustRun(
+    fx.run,
+    ['jj', 'log', '-r', `${three}-`, '--no-graph', '-T', 'change_id ++ "\n"'],
+    repo,
+  );
+  assert.equal(parents.stdout.trim(), one, 'the descendant was rebased onto the abandoned change parent');
+});
+
+test('operation layer: abandon refuses @ and published changes', async (t) => {
+  const { fx, repo, operations, one } = await makeAmendFixture(t, 'dsh-jj-abandon-refusals');
+  await assert.rejects(
+    () => operations.abandon(repo, '@'),
+    (error: unknown) => error instanceof JjError && /refuses to abandon the working-copy change/.test(error.message),
+  );
+  await assert.rejects(
+    () => operations.abandon(repo, '   '),
+    (error: unknown) => error instanceof JjError && /needs an explicit revset/.test(error.message),
+  );
+  await assert.rejects(
+    () => operations.abandon(repo, 'description(nonexistent-subject)'),
+    (error: unknown) => error instanceof JjError && /found no revision/.test(error.message),
+  );
+
+  await addBareRemote(fx, repo);
+  await mustRun(fx.run, ['jj', 'bookmark', 'create', 'main', '-r', one], repo);
+  await mustRun(fx.run, ['jj', 'git', 'push', '--bookmark', 'main'], repo);
+  await mustRun(fx.run, ['jj', 'git', 'fetch'], repo);
+  await assert.rejects(
+    () => operations.abandon(repo, one),
+    (error: unknown) => error instanceof JjError && /is published/.test(error.message),
+  );
+  const stillThere = await mustRun(fx.run, ['jj', 'log', '-r', one, '--no-graph', '-T', 'change_id'], repo);
+  assert.equal(stillThere.stdout.trim(), one, 'the published change was not abandoned');
+});
+
+test('jj_abandon tool validates its own output schema and renders text', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, operations, two } = await makeAmendFixture(t, 'dsh-jj-abandon-tool');
+  fx.cwd = repo;
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  const definition = definitions.get('jj_abandon')!;
+  const value = (await definition.execute({ revset: two }, fakeExec())) as Record<string, unknown>;
+  const violations = validateJsonSchemaValue(definition.output.schema as JsonSchemaNode, value);
+  assert.deepEqual(violations, [], 'abandon output satisfies its schema');
+  const rendered = definition.output.render({ revset: two }, value as never);
+  const first = rendered[0];
+  assert.ok(first !== undefined && first.type === 'text' && first.text.length > 0);
+});
+
+test('jj_op_restore restores to the head operation and reports it', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-op-restore');
+  const head = await operations.headOperationId(repo);
+  fx.cwd = repo;
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  const definition = definitions.get('jj_op_restore')!;
+  const value = (await definition.execute({ operationId: head }, fakeExec())) as Record<string, unknown>;
+  assert.deepEqual(
+    validateJsonSchemaValue(definition.output.schema as JsonSchemaNode, value),
+    [],
+    'restore output satisfies its schema',
+  );
+  assert.equal(value.operationId, head);
+  assert.match(String(value.message), /head operation before this call/);
+});
+
+test('jj_fetch reports a local-only repository as no-remote instead of failing', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-fetch-tool');
+  fx.cwd = repo;
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  const value = (await definitions.get('jj_fetch')!.execute({}, fakeExec())) as Record<string, unknown>;
+  assert.equal(value.status, 'no-remote');
+  assert.match(String(value.message), /no git remote/i);
+});
+
+test('jj_workspace_update_stale is a no-op on a fresh workspace and returns @', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-update-stale');
+  fx.cwd = repo;
+  const definitions = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations))));
+  const value = (await definitions.get('jj_workspace_update_stale')!.execute({}, fakeExec())) as Record<
+    string,
+    unknown
+  > & { change: Record<string, unknown> };
+  assert.equal(typeof value.message, 'string');
+  assert.equal(typeof value.change.changeId, 'string');
+  assert.equal(value.change.currentWorkingCopy, true);
 });
