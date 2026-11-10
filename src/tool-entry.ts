@@ -16,7 +16,59 @@ import {
   type JjPluginConfig,
 } from './config.ts';
 import { jjToolDefinitions } from './tool-definitions.ts';
-import type { JjToolService, JjToolsHost, ToolExec } from './tool-shared.ts';
+import type { JjLiveToolSession, JjToolService, JjToolsHost, ToolExec } from './tool-shared.ts';
+
+/**
+ * Build the live-session provider the workspace tools use for liveness decisions.
+ *
+ * Reads `ctx.agents` and `workingDirectory` tolerantly (the same pattern as the runtime
+ * entry): a profile without those services yields an empty list instead of breaking the
+ * tools. The provider never throws; failures degrade to "cannot enumerate", and the
+ * cross-process heartbeat files remain the other liveness source.
+ *
+ * @param ctx - live Cordis context of the tools row.
+ * @returns a provider of live top-level sessions.
+ */
+function liveSessionsProvider(ctx: Context): () => readonly JjLiveToolSession[] {
+  const get = (ctx as unknown as { get?: (name: string, strict?: boolean) => unknown }).get;
+  if (typeof get !== 'function') return () => [];
+  const readService = <T>(name: string): T | undefined => {
+    try {
+      return get.call(ctx, name) as T | undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return () => {
+    const sessions: JjLiveToolSession[] = [];
+    let roots: readonly { session?: unknown }[] | undefined;
+    try {
+      roots = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents')?.roots?.();
+    } catch {
+      roots = undefined;
+    }
+    if (!Array.isArray(roots)) return sessions;
+    const workingDirectory = readService<{ get?: (session: unknown) => unknown }>('workingDirectory');
+    for (const entry of roots) {
+      const session = entry?.session;
+      if (session === undefined) continue;
+      let cwd: unknown;
+      try {
+        cwd = workingDirectory?.get?.(session);
+      } catch {
+        continue;
+      }
+      if (typeof cwd !== 'string' || cwd.length === 0) continue;
+      const id = (session as { id?: unknown }).id;
+      sessions.push({
+        session,
+        ...(typeof id === 'string' && id.length > 0 ? { sessionId: id } : {}),
+        cwd,
+      });
+    }
+    return sessions;
+  };
+}
 
 /**
  * Register every `jj_*` tool.
@@ -111,7 +163,16 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // this row silently ignores.
   assertScopedConfig(config, 'tools');
   const service = (ctx as unknown as { jj: JjToolService }).jj;
-  const disposer = registerJjTools(ctx as unknown as JjToolsHost, { service, config });
+  // Build an explicit host view: the tools need `workingDirectory.get` and the live
+  // session list for workspace-ownership decisions, and both are Cordis services the
+  // registered tool context must see as plain callbacks.
+  const view = ctx as unknown as JjToolsHost;
+  const host: JjToolsHost = {
+    tools: view.tools,
+    ...(view.workingDirectory !== undefined ? { workingDirectory: view.workingDirectory } : {}),
+    liveSessions: liveSessionsProvider(ctx),
+  };
+  const disposer = registerJjTools(host, { service, config });
   const effect = (ctx as unknown as { effect?: (body: () => () => void, label?: string) => unknown }).effect;
   if (typeof effect === 'function') effect.call(ctx, () => () => disposer(), 'dsh-jj: jj tools');
 }

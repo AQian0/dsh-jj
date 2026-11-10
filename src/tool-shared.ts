@@ -22,14 +22,34 @@ export interface JjToolService {
   detect(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor>;
 }
 
+/** One live top-level session, as the host enumerates it for workspace-liveness checks. */
+export interface JjLiveToolSession {
+  /** DSH session id, when the host exposes one. */
+  readonly sessionId?: string;
+  /** The session object, so the calling agent's own session compares by reference. */
+  readonly session?: unknown;
+  /** Effective working directory of that session. */
+  readonly cwd: string;
+}
+
 /** Structural view of the host context used by the tools entry. */
 export interface JjToolsHost {
   readonly tools: { register(definition: ToolDefinition): () => void };
   readonly workingDirectory?: {
     ensure(agent: unknown, signal?: AbortSignal): Promise<string>;
+    /** Read one session's effective directory (`workingDirectory.get`); optional on older hosts. */
+    get?(session: unknown): unknown;
     /** Move one session to another directory (`workingDirectory.set`); optional on older hosts. */
     set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string>;
   };
+  /**
+   * Live top-level sessions of this host, or `undefined` when it cannot enumerate them.
+   *
+   * Workspace cleanup and the hand-off refuse to unregister/rewrite a workspace another
+   * live session is using; the tools fall back to the cross-process heartbeat files when
+   * this provider is absent. Must never throw (callers contain failures anyway).
+   */
+  readonly liveSessions?: () => readonly JjLiveToolSession[];
 }
 
 /** Refusal text for a directory that is not a usable jj workspace (contract §7.4). */

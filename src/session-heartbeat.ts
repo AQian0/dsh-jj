@@ -116,14 +116,22 @@ function decodeHeartbeat(value: unknown): SessionHeartbeat | undefined {
  * them would silently disable detection.
  *
  * @param jjRepoPath - shared repository path behind `.jj/repo`.
- * @param options - current time, lifetime, and the id to exclude (the current session).
+ * @param options - current time, lifetime, the id to exclude (the current session), and
+ *   whether expired files may be deleted (callers that only inspect the repository pass
+ *   `purgeExpired: false` so a read never mutates the metadata directory).
  * @returns the fresh peer heartbeats.
  */
 export function readSessionHeartbeats(
   jjRepoPath: string,
-  options: { readonly now: number; readonly ttlMs?: number; readonly excludeSessionId?: string },
+  options: {
+    readonly now: number;
+    readonly ttlMs?: number;
+    readonly excludeSessionId?: string;
+    readonly purgeExpired?: boolean;
+  },
 ): SessionHeartbeat[] {
   const ttl = options.ttlMs ?? SESSION_HEARTBEAT_TTL_MS;
+  const purgeExpired = options.purgeExpired !== false;
   let entries: string[];
   try {
     entries = readdirSync(join(jjRepoPath, SESSION_HEARTBEAT_DIR));
@@ -144,11 +152,13 @@ export function readSessionHeartbeats(
     const age = options.now - heartbeat.updatedAt;
     if (age > ttl) {
       // Expired: the session crashed or closed without removing its file. Best-effort
-      // cleanup keeps the directory from growing forever.
-      try {
-        rmSync(join(jjRepoPath, SESSION_HEARTBEAT_DIR, entry), { force: true });
-      } catch {
-        // Read-only metadata: leave it for the next reader.
+      // cleanup keeps the directory from growing forever; read-only callers skip it.
+      if (purgeExpired) {
+        try {
+          rmSync(join(jjRepoPath, SESSION_HEARTBEAT_DIR, entry), { force: true });
+        } catch {
+          // Read-only metadata: leave it for the next reader.
+        }
       }
       continue;
     }

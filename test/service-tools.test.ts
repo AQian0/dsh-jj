@@ -7,7 +7,7 @@
  * assert that **no** jj path ever falls back to git.
  */
 import { test } from 'node:test';
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { resolveConfig } from '../src/config.ts';
@@ -15,7 +15,9 @@ import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj, JjError } from '../src/jj-command.ts';
 import { JjOperations, TPL_CHANGE, TPL_STATUS, changeFromRecord, isRewritableChange } from '../src/service.ts';
 import { WorkspaceOwnership } from '../src/policies.ts';
+import { removeSessionHeartbeat, writeSessionHeartbeat } from '../src/session-heartbeat.ts';
 import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
+import type { JjLiveToolSession } from '../src/tool-shared.ts';
 import {
   assertToolchain,
   initGit,
@@ -72,6 +74,7 @@ function toolContext(
     ensure(agent: unknown, signal?: AbortSignal): Promise<string>;
     set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string>;
   },
+  liveSessions?: () => readonly JjLiveToolSession[],
 ) {
   return {
     service,
@@ -79,6 +82,7 @@ function toolContext(
     host: {
       tools: { register: () => () => {} },
       ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+      ...(liveSessions !== undefined ? { liveSessions } : {}),
     },
     // Every tool-calling test assigns `fx.cwd` first; the refusal test overrides this.
     cwdFor: async () => fx.cwd as string,
@@ -1552,8 +1556,8 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   );
 
   // A described empty working-copy change survives `jj workspace forget` (jj only
-  // abandons empty, undescribed changes without descendants), so cleanup reports it
-  // instead of implying the shared history is clean.
+  // abandons empty, undescribed changes without descendants). The plugin prunes it when
+  // that is provably content-free, so it cannot become a permanent empty commit.
   fx.cwd = repo;
   const retainedPath = join(fx.root, 'ws-retained');
   await definitions
@@ -1565,12 +1569,38 @@ test('jj_workspace_cleanup tool: unregisters only a session-created workspace an
   fx.cwd = retainedPath;
   const retainedValue = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
   assert.equal(retainedValue['forgotten'], true);
-  assert.match(String(retainedValue['message']), /not abandoned by jj/);
-  assert.match(String(retainedValue['message']), /empty marker/);
+  assert.equal(retainedValue['prunedEmptyChangeId'], marker.changeId);
+  assert.match(String(retainedValue['message']), /was abandoned after the forget/);
   assert.equal(
     await operations.changeExists(repo, marker.changeId),
+    false,
+    'the empty, unpublished change without descendants is pruned',
+  );
+
+  // With another workspace based on it, abandoning would rewrite that workspace: the
+  // change is kept and reported instead.
+  fx.cwd = repo;
+  const sharedPath = join(fx.root, 'ws-shared-empty');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: sharedPath, name: 'shared-empty', enter: false }, fakeExec(agent));
+  await mustRun(fx.run, ['jj', '--no-pager', 'describe', '-r', '@', '-m', 'shared empty marker'], sharedPath);
+  const sharedMarker = (await operations.log(sharedPath, '@', 1))[0];
+  assert.ok(sharedMarker !== undefined);
+  await mustRun(
+    fx.run,
+    ['jj', 'workspace', 'add', join(fx.root, 'ws-keeper'), '--name', 'keeper', '-r', sharedMarker.changeId],
+    repo,
+  );
+  fx.cwd = sharedPath;
+  const keptValue = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
+  assert.equal(keptValue['forgotten'], true);
+  assert.equal(keptValue['prunedEmptyChangeId'], undefined);
+  assert.match(String(keptValue['message']), /not abandoned by jj/);
+  assert.equal(
+    await operations.changeExists(repo, sharedMarker.changeId),
     true,
-    'the described empty working-copy change is still visible in the shared history',
+    'a change another workspace is based on is never abandoned',
   );
 });
 
@@ -1635,6 +1665,170 @@ test('jj_workspace_cleanup: recovers a stale default workspace before forgetting
     calls.some((argv) => argv.includes('workspace') && argv.includes('update-stale')),
     'the stale default workspace is recovered before forgetting it is used again',
   );
+});
+
+test('jj_workspace_cleanup: reclaims a recorded workspace left by an interrupted session', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const fx = makeFixture(t, 'dsh-jj-orphan-cleanup');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const meta = join(realpath(repo), '.jj', 'repo');
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const definitions = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}))),
+  );
+  const cleanup = definitions.get('jj_workspace_cleanup')!;
+  const owner = { id: 'interrupted-session' };
+  const rescuer = { id: 'rescuer-session' };
+  fx.cwd = repo;
+
+  // The interrupted session left a recorded workspace behind. Another session sees it
+  // as orphaned and reclaims it without entering it.
+  const wsPath = join(fx.root, 'ws-orphan');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: wsPath, name: 'orphan-ws', enter: false }, fakeExec(owner));
+  const emptyChange = (await operations.status(wsPath)).change;
+  const listed = (await definitions.get('jj_workspace_list')!.execute({ detail: 'full' }, fakeExec(rescuer))) as {
+    workspaces: Record<string, unknown>[];
+  };
+  const entry = listed.workspaces.find((workspace) => workspace['name'] === 'orphan-ws');
+  assert.equal(entry?.['owned'], false);
+  assert.equal(entry?.['ownerSessionId'], 'interrupted-session');
+  assert.equal(entry?.['ownerAlive'], false);
+  assert.equal(entry?.['orphaned'], true);
+
+  const value = (await cleanup.execute({ workspace: 'orphan-ws' }, fakeExec(rescuer))) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(cleanup.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  assert.equal(value['forgotten'], true);
+  assert.equal(value['mode'], 'orphan');
+  assert.equal(value['ownerSessionId'], 'interrupted-session');
+  assert.equal(value['currentWorkspace'], 'default');
+  assert.equal(
+    await operations.changeExists(repo, emptyChange.changeId),
+    false,
+    'the empty working-copy change is abandoned by jj on forget',
+  );
+  assert.equal(existsSync(wsPath), true, 'the directory is preserved');
+  assert.ok(
+    !(await operations.workspaceList(repo)).some((workspace) => workspace.name === 'orphan-ws'),
+    'the workspace is unregistered',
+  );
+
+  // A live recorded owner blocks the reclaim: the interrupted session may still resume.
+  const livePath = join(fx.root, 'ws-live');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: livePath, name: 'live-ws', enter: false }, fakeExec(owner));
+  const liveDefinitions = definitionsByName(
+    jjToolDefinitions(
+      toolContext(fx, toolService(fx, operations), resolveConfig({}), undefined, () => [
+        { sessionId: 'interrupted-session', cwd: livePath },
+      ]),
+    ),
+  );
+  await assert.rejects(
+    () => liveDefinitions.get('jj_workspace_cleanup')!.execute({ workspace: 'live-ws' }, fakeExec(rescuer)),
+    /still live/,
+  );
+
+  // A different live session occupying the workspace also blocks it.
+  const busyPath = join(fx.root, 'ws-busy');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: busyPath, name: 'busy-ws', enter: false }, fakeExec(owner));
+  writeSessionHeartbeat(meta, {
+    sessionId: 'third-session',
+    cwd: busyPath,
+    workspaceName: 'busy-ws',
+    workspaceRoot: realpath(busyPath),
+    updatedAt: Date.now(),
+  });
+  await assert.rejects(() => cleanup.execute({ workspace: 'busy-ws' }, fakeExec(rescuer)), /currently working in/);
+  removeSessionHeartbeat(meta, 'third-session');
+
+  // Uncommitted work in the foreign workspace blocks it: cleanup never loses content.
+  const dirtyPath = join(fx.root, 'ws-dirty-orphan');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: dirtyPath, name: 'dirty-orphan', enter: false }, fakeExec(owner));
+  await writeFixtureFile(fx, dirtyPath, 'dirty.txt', 'dirty');
+  await assert.rejects(() => cleanup.execute({ workspace: 'dirty-orphan' }, fakeExec(rescuer)), /uncommitted changes/);
+
+  // A workspace the plugin did not create is never unregistered.
+  const userPath = join(fx.root, 'ws-user');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', userPath, '--name', 'user-ws'], repo);
+  await assert.rejects(
+    () => cleanup.execute({ workspace: 'user-ws' }, fakeExec(rescuer)),
+    /no jj_workspace_add record/,
+  );
+
+  // A recorded workspace whose directory disappeared can still be unregistered.
+  const gonePath = join(fx.root, 'ws-gone');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: gonePath, name: 'gone-ws', enter: false }, fakeExec(owner));
+  rmSync(gonePath, { recursive: true, force: true });
+  const goneValue = (await cleanup.execute({ workspace: 'gone-ws' }, fakeExec(rescuer))) as Record<string, unknown>;
+  assert.equal(goneValue['forgotten'], true);
+  assert.match(String(goneValue['message']), /directory is gone/);
+
+  // A record whose workspace was already forgotten is pruned instead of failing.
+  const stalePath = join(fx.root, 'ws-stale-record');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: stalePath, name: 'stale-record', enter: false }, fakeExec(owner));
+  await operations.workspaceForget(repo, 'stale-record', undefined);
+  const staleValue = (await cleanup.execute({ workspace: 'stale-record' }, fakeExec(rescuer))) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(staleValue['forgotten'], false);
+  assert.equal(staleValue['alreadyForgotten'], true);
+  assert.match(String(staleValue['message']), /not registered with jj anymore/);
+});
+
+test('jj_workspace_cleanup: a restarted host keeps the recorded workspace ownership', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-resume-cleanup');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const first = definitionsByName(jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}))));
+  fx.cwd = repo;
+  const wsPath = join(fx.root, 'ws-resumed');
+  await first
+    .get('jj_workspace_add')!
+    .execute({ path: wsPath, name: 'resumed', enter: false }, fakeExec({ id: 'resumed-session' }));
+
+  // A restarted host: brand-new registry instance and a brand-new agent object, but the
+  // same DSH session id. Ownership must come back from the durable record.
+  const moved: string[] = [];
+  const workingDirectory = {
+    ensure: async () => fx.cwd as string,
+    set: async (_agent: unknown, path: string) => {
+      moved.push(path);
+      return path;
+    },
+  };
+  const operationsAfterRestart = new JjOperations({ runJj, config: {} });
+  const restarted = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operationsAfterRestart), resolveConfig({}), workingDirectory)),
+  );
+  fx.cwd = wsPath;
+  const value = (await restarted
+    .get('jj_workspace_cleanup')!
+    .execute({}, fakeExec({ id: 'resumed-session' }))) as Record<string, unknown>;
+  assert.equal(value['forgotten'], true);
+  assert.deepEqual(moved, [realpath(repo)], 'the resumed session moves back to the default workspace');
+  assert.ok(!(await operationsAfterRestart.workspaceList(repo)).some((workspace) => workspace.name === 'resumed'));
 });
 
 test('operation layer: jj_handoff rejects a stack that is not the whole stack, and root destinations', async (t) => {

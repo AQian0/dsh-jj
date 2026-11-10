@@ -10,6 +10,7 @@
  * @module dsh-jj/tool-definitions
  */
 import { existsSync, readdirSync } from 'node:fs';
+import { sep } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
   COMMIT_STYLE_CHOICES,
@@ -29,9 +30,10 @@ import {
   type JjNextAction,
 } from './tool-schemas.ts';
 import type { VcsDescriptor } from './types.ts';
-import { cleanupWorkspace } from './flows/cleanup.ts';
-import { requireWorkspace, type ToolContext, type ToolExec } from './tool-shared.ts';
-import { canonicalWorkspacePath, isRootWorkspace } from './policies.ts';
+import { cleanupForeignWorkspace, cleanupWorkspace } from './flows/cleanup.ts';
+import { readSessionHeartbeats } from './session-heartbeat.ts';
+import { requireWorkspace, type JjLiveToolSession, type ToolContext, type ToolExec } from './tool-shared.ts';
+import { agentSessionId, canonicalWorkspacePath, isRootWorkspace, type OwnedWorkspace } from './policies.ts';
 
 /**
  * Build every `jj_*` tool definition (contract §7.3).
@@ -50,6 +52,65 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
    * ask before unregistering.
    */
   const ownership = service.workspaceOwnership;
+  /** Live top-level sessions as the host enumerates them (empty when it cannot). */
+  const liveSessions = (): readonly JjLiveToolSession[] => {
+    try {
+      return context.host.liveSessions?.() ?? [];
+    } catch {
+      return [];
+    }
+  };
+  /** Whether `path` is a workspace root or inside it (both canonicalized). */
+  const pathInside = (root: string, path: string): boolean => {
+    const canonicalRoot = canonicalWorkspacePath(root);
+    const canonical = canonicalWorkspacePath(path);
+    return canonical === canonicalRoot || canonical.startsWith(`${canonicalRoot}${sep}`);
+  };
+  /**
+   * Session ids that are live in this repository: host top-level sessions plus fresh
+   * cross-process heartbeats. Always includes the calling session.
+   */
+  const liveSessionIds = (descriptor: VcsDescriptor, agent: unknown): ReadonlySet<string> => {
+    const ids = new Set<string>();
+    const currentId = agentSessionId(agent);
+    if (currentId !== undefined) ids.add(currentId);
+    for (const entry of liveSessions()) {
+      if (entry.sessionId !== undefined) ids.add(entry.sessionId);
+    }
+    if (descriptor.jjRepoPath === undefined) return ids;
+    for (const heartbeat of readSessionHeartbeats(descriptor.jjRepoPath, { now: Date.now(), purgeExpired: false })) {
+      ids.add(heartbeat.sessionId);
+    }
+    return ids;
+  };
+  /**
+   * Whether a workspace is occupied by a live session other than the calling one.
+   *
+   * Checks the host's in-process roots and the cross-process heartbeat files; the
+   * cleanup and hand-off flows refuse to forget/rewrite a workspace in active use.
+   */
+  const workspaceIsLive = (descriptor: VcsDescriptor, agent: unknown, root: string): boolean => {
+    const currentId = agentSessionId(agent);
+    const agentSession = (agent as { session?: unknown } | null | undefined)?.session;
+    for (const entry of liveSessions()) {
+      if (entry.session !== undefined && entry.session === agentSession) continue;
+      if (entry.sessionId !== undefined && entry.sessionId === currentId) continue;
+      if (pathInside(root, entry.cwd)) return true;
+    }
+    if (descriptor.jjRepoPath === undefined) return false;
+    for (const heartbeat of readSessionHeartbeats(descriptor.jjRepoPath, { now: Date.now(), purgeExpired: false })) {
+      if (heartbeat.sessionId === currentId) continue;
+      if (pathInside(root, heartbeat.workspaceRoot) || pathInside(root, heartbeat.cwd)) return true;
+    }
+    return false;
+  };
+  /** Durable/in-memory ownership record for a workspace name and optional root. */
+  const findRecord = (descriptor: VcsDescriptor, name: string, root?: string): OwnedWorkspace | undefined => {
+    const records = ownership.records(descriptor.jjRepoPath, name);
+    if (root === undefined) return records[0];
+    const canonicalRoot = canonicalWorkspacePath(root);
+    return records.find((entry) => canonicalWorkspacePath(entry.root) === canonicalRoot);
+  };
   /**
    * Keep every result's `nextActions` short and JSON-clean: at most three entries, in the
    * order an agent should try them. Prose belongs in `reason`, not in the tool result.
@@ -746,7 +807,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_list',
       description:
-        'List the Jujutsu (jj) workspaces of this repository. This is jj, not git: each workspace is a separate jj working copy with its own current change (@), registered with jj — not a git worktree. Pass `detail: "full"` to also get each workspace\'s @ change id, description, empty/conflict state and whether it is the current one; the listing never snapshots any working copy.',
+        'List the Jujutsu (jj) workspaces of this repository. This is jj, not git: each workspace is a separate jj working copy with its own current change (@), registered with jj — not a git worktree. Pass `detail: "full"` to also get each workspace\'s @ change id, description, empty/conflict state, whether it is the current one, and (for workspaces created through jj_workspace_add) the recorded owner session, its liveness and whether the workspace is orphaned by an interrupted session; the listing never snapshots any working copy.',
       parameters: {
         detail: {
           type: 'string',
@@ -777,6 +838,18 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
                   empty: { type: 'boolean' },
                   conflict: { type: 'boolean' },
                   stale: { type: 'string', enum: ['yes', 'no', 'unknown'] },
+                  owned: { type: 'boolean', description: 'Created by this session through jj_workspace_add.' },
+                  ownerSessionId: { type: 'string', description: 'DSH session recorded as the creator.' },
+                  ownerAlive: {
+                    type: 'boolean',
+                    description: 'Whether that session is still live (host sessions or fresh heartbeat).',
+                  },
+                  inUse: { type: 'boolean', description: 'A live session is currently working in this workspace.' },
+                  orphaned: {
+                    type: 'boolean',
+                    description:
+                      'Recorded workspace whose owning session is gone and which no live session occupies; jj_workspace_cleanup with `workspace` may unregister it.',
+                  },
                 },
               },
             },
@@ -790,18 +863,42 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const currentWorkspace = descriptor.workspaceName ?? 'default';
         if (args.detail === 'full') {
           const states = await operations.workspaceStates(cwd, exec.signal);
+          const records = ownership.records(descriptor.jjRepoPath);
+          const currentId = agentSessionId(exec.agent);
+          const liveIds = liveSessionIds(descriptor, exec.agent);
           return {
-            workspaces: states.map((state) => ({
-              name: state.name,
-              root: state.root,
-              isCurrent: state.current,
-              changeId: state.changeId,
-              commitId: state.commitId,
-              description: state.description,
-              empty: state.empty,
-              conflict: state.conflict,
-              stale: state.stale,
-            })),
+            workspaces: states.map((state) => {
+              const record = records.find(
+                (entry) =>
+                  entry.name === state.name &&
+                  canonicalWorkspacePath(entry.root) === canonicalWorkspacePath(state.root),
+              );
+              // Liveness answers two separate questions: is the recorded creator still
+              // around, and is anybody (possibly a different session) using the workspace?
+              const ownerAlive =
+                record === undefined ? undefined : record.sessionId !== undefined && liveIds.has(record.sessionId);
+              const inUse = workspaceIsLive(descriptor, exec.agent, state.root);
+              return {
+                name: state.name,
+                root: state.root,
+                isCurrent: state.current,
+                changeId: state.changeId,
+                commitId: state.commitId,
+                description: state.description,
+                empty: state.empty,
+                conflict: state.conflict,
+                stale: state.stale,
+                ...(record !== undefined
+                  ? {
+                      owned: currentId !== undefined && record.sessionId === currentId,
+                      ...(record.sessionId !== undefined ? { ownerSessionId: record.sessionId } : {}),
+                      ownerAlive: ownerAlive === true,
+                      inUse,
+                      orphaned: ownerAlive === false && !inUse,
+                    }
+                  : {}),
+              };
+            }),
             currentWorkspace,
           };
         }
@@ -1372,8 +1469,14 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_cleanup',
       description:
-        "Unregister this session's own temporary Jujutsu (jj) workspace after a verified hand-off. This is jj, not git: it unregisters a jj workspace (not a git worktree), moves the session back to the default workspace (working_directory set), and runs jj workspace forget only for a workspace this exact session created through jj_workspace_add; any other workspace is refused and must be cleaned by the user. The directory keeps its files on disk. Use it instead of leaving a registered workspace behind or asking the user to forget it.",
-      parameters: {},
+        'Unregister a temporary Jujutsu (jj) workspace this plugin created through jj_workspace_add. This is jj, not git: it unregisters a jj workspace (not a git worktree) and keeps its files on disk. Called without `workspace` it unregisters the workspace this session runs in (after a verified hand-off) and moves the session back to the default workspace. Called with `workspace` (a name or absolute root, typically one jj_workspace_list reports as orphaned) it unregisters a workspace whose recorded owning session is no longer live and which no live session occupies; its working copy must be clean and the recorded owner must be gone, otherwise it is refused. The directory is never deleted and the shell `jj workspace forget` stays blocked.',
+      parameters: {
+        workspace: {
+          type: 'string',
+          description:
+            'Optional workspace name or absolute root to unregister instead of the current one. Only a workspace recorded by jj_workspace_add whose owning session is gone (and which no live session occupies) is accepted; the session does not move.',
+        },
+      },
       output: {
         schema: {
           type: 'object',
@@ -1387,22 +1490,68 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             currentWorkspaceRoot: { type: 'string', required: true },
             message: { type: 'string', required: true },
             directoryNote: { type: 'string', required: true },
+            mode: { type: 'string', enum: ['current', 'orphan'] },
+            ownerSessionId: { type: 'string' },
+            ownerAlive: { type: 'boolean' },
+            inUse: { type: 'boolean' },
+            prunedEmptyChangeId: {
+              type: 'string',
+              description: 'Empty, unpublished working-copy change abandoned after the forget.',
+            },
+            alreadyForgotten: { type: 'boolean' },
+            defaultWorkingCopy: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                changeId: { type: 'string', required: true },
+                adopted: { type: 'boolean', required: true },
+                ontoChangeId: { type: 'string' },
+                reason: { type: 'string' },
+              },
+            },
           },
         },
         render: (_args, value) => textRender(value),
       },
-      async execute(_args, exec) {
+      async execute(args, exec) {
         const { cwd, descriptor } = await openWorkspace(exec);
-        // The decision, the stale recovery and the ordering of "move the session, then
+        // The decisions, the stale recovery and the ordering of "move the session, then
         // forget" live in the flow (src/flows/cleanup.ts); the tool only supplies facts.
-        return await cleanupWorkspace({
+        const currentName = descriptor.workspaceName ?? 'default';
+        const requested = args.workspace?.trim();
+        const requestedIsCurrent =
+          requested === undefined ||
+          requested.length === 0 ||
+          requested === currentName ||
+          canonicalWorkspacePath(requested) === canonicalWorkspacePath(descriptor.root);
+        const liveIds = liveSessionIds(descriptor, exec.agent);
+        const facts = {
+          findRecord: (name: string, root?: string) => findRecord(descriptor, name, root),
+          ownerAlive: (record: OwnedWorkspace) => record.sessionId !== undefined && liveIds.has(record.sessionId),
+          isWorkspaceLive: (root: string) => workspaceIsLive(descriptor, exec.agent, root),
+          forgetRecord: (name: string) => ownership.forget(descriptor.jjRepoPath, name),
+        } as const;
+        if (requestedIsCurrent) {
+          return await cleanupWorkspace({
+            operations,
+            owns: (name, root) => ownership.owns(descriptor.jjRepoPath, exec.agent, name, root),
+            host: context.host,
+            agent: exec.agent,
+            cwd,
+            descriptor,
+            signal: exec.signal,
+            ...facts,
+          });
+        }
+        return await cleanupForeignWorkspace({
           operations,
-          owns: (name, root) => ownership.owns(descriptor.jjRepoPath, exec.agent, name, root),
           host: context.host,
           agent: exec.agent,
           cwd,
           descriptor,
+          target: requested,
           signal: exec.signal,
+          ...facts,
         });
       },
     }),

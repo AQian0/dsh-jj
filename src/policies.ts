@@ -349,3 +349,64 @@ export function decideWorkspaceCleanup(facts: WorkspaceCleanupFacts): WorkspaceC
   if (!facts.canSwitchWorkingDirectory) return 'no-working-directory';
   return undefined;
 }
+
+/** Inputs of {@link decideOrphanWorkspaceCleanup}. */
+export interface OrphanWorkspaceCleanupFacts {
+  readonly workspaceName: string;
+  /** The target is the workspace this tool call runs in (handled by the normal flow). */
+  readonly isCurrentWorkspace: boolean;
+  /** A durable `jj_workspace_add` record exists for this name+root. */
+  readonly recorded: boolean;
+  /** The workspace is still registered with jj. */
+  readonly registered: boolean;
+  /** The recorded owning session is still live (host session list or fresh heartbeat). */
+  readonly ownerAlive: boolean;
+  /** A live session other than the caller occupies the workspace. */
+  readonly inUse: boolean;
+  /** The workspace directory still exists on disk. */
+  readonly directoryExists: boolean;
+  /** `undefined` when the working copy could not be read (the directory may be missing). */
+  readonly workingCopy?: { readonly empty: boolean; readonly conflict: boolean };
+}
+
+/** Why an interrupted session's workspace may not be unregistered, or `undefined` when it may. */
+export type OrphanWorkspaceCleanupRefusal =
+  | 'current-workspace'
+  | 'default-workspace'
+  | 'not-recorded'
+  | 'not-registered'
+  | 'owner-live'
+  | 'in-use'
+  | 'unreadable-working-copy'
+  | 'dirty-working-copy'
+  | 'conflicted-working-copy';
+
+/**
+ * Decide whether one session may unregister another recorded workspace.
+ *
+ * This is the safety fence for workspaces left behind by an interrupted/restarted
+ * session: only a workspace the plugin recorded, whose owning session is gone and no
+ * other live session occupies, and whose working copy is clean (or whose directory is
+ * already gone) may be forgotten. The caller still never deletes the directory.
+ *
+ * @param facts - ownership, liveness and working-copy facts supplied by the tool.
+ * @returns the refusal reason, or `undefined` when the cleanup may run.
+ */
+export function decideOrphanWorkspaceCleanup(
+  facts: OrphanWorkspaceCleanupFacts,
+): OrphanWorkspaceCleanupRefusal | undefined {
+  if (facts.isCurrentWorkspace) return 'current-workspace';
+  if (facts.workspaceName === 'default') return 'default-workspace';
+  if (!facts.recorded) return 'not-recorded';
+  if (facts.ownerAlive) return 'owner-live';
+  if (facts.inUse) return 'in-use';
+  if (!facts.registered) return 'not-registered';
+  if (facts.workingCopy === undefined) {
+    // A deleted directory cannot be snapshotted anymore; unregistering it is safe
+    // (the registration is the only thing left) and reports the limitation.
+    return facts.directoryExists ? 'unreadable-working-copy' : undefined;
+  }
+  if (!facts.workingCopy.empty) return 'dirty-working-copy';
+  if (facts.workingCopy.conflict) return 'conflicted-working-copy';
+  return undefined;
+}

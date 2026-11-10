@@ -14,6 +14,7 @@ import {
   WorkspaceOwnership,
   agentSessionId,
   canonicalWorkspacePath,
+  decideOrphanWorkspaceCleanup,
   decideWorkspaceCleanup,
   isRootWorkspace,
   isStaleWorkingCopyFailure,
@@ -144,4 +145,36 @@ test('isStaleWorkingCopyFailure reads JjError-shaped and plain errors', () => {
   );
   assert.equal(isStaleWorkingCopyFailure(new Error('boom')), false);
   assert.equal(isStaleWorkingCopyFailure(undefined), false);
+});
+
+test('decideOrphanWorkspaceCleanup covers every refusal reason', () => {
+  const ok = {
+    workspaceName: 'ws',
+    isCurrentWorkspace: false,
+    recorded: true,
+    registered: true,
+    ownerAlive: false,
+    inUse: false,
+    directoryExists: true,
+    workingCopy: { empty: true, conflict: false },
+  } as const;
+  assert.equal(decideOrphanWorkspaceCleanup(ok), undefined);
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, isCurrentWorkspace: true }), 'current-workspace');
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, workspaceName: 'default' }), 'default-workspace');
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, recorded: false }), 'not-recorded');
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, ownerAlive: true }), 'owner-live');
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, inUse: true }), 'in-use');
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, registered: false }), 'not-registered');
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, workingCopy: undefined }), 'unreadable-working-copy');
+  assert.equal(
+    decideOrphanWorkspaceCleanup({ ...ok, workingCopy: { empty: false, conflict: false } }),
+    'dirty-working-copy',
+  );
+  assert.equal(
+    decideOrphanWorkspaceCleanup({ ...ok, workingCopy: { empty: true, conflict: true } }),
+    'conflicted-working-copy',
+  );
+  // A workspace whose directory disappeared cannot be read any more, but unregistering
+  // the leftover registration is safe.
+  assert.equal(decideOrphanWorkspaceCleanup({ ...ok, directoryExists: false, workingCopy: undefined }), undefined);
 });

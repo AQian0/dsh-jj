@@ -108,3 +108,19 @@ test('reads and writes fail open when the metadata directory is unusable', (t) =
   assert.deepEqual(readSessionHeartbeats(repo, { now: 1 }), []);
   assert.doesNotThrow(() => removeSessionHeartbeat(repo, 'missing'));
 });
+
+test('expired heartbeats are not purged by read-only inspection', (t) => {
+  const repo = repoDir(t);
+  const now = 1_700_000_000_000;
+  writeSessionHeartbeat(repo, {
+    sessionId: 'old',
+    cwd: '/repo',
+    workspaceName: 'default',
+    workspaceRoot: '/repo',
+    updatedAt: now - 60_000,
+  });
+  assert.deepEqual(readSessionHeartbeats(repo, { now, ttlMs: 30_000, purgeExpired: false }), []);
+  assert.deepEqual(readdirSync(join(repo, SESSION_HEARTBEAT_DIR)), ['old.json'], 'the file is left for later readers');
+  assert.deepEqual(readSessionHeartbeats(repo, { now, ttlMs: 30_000 }), []);
+  assert.deepEqual(readdirSync(join(repo, SESSION_HEARTBEAT_DIR)), [], 'a normal read still prunes expired files');
+});
