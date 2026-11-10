@@ -440,6 +440,7 @@ export function buildJjWorkspaceForgetRefusal(
     '',
     'Safer alternatives:',
     `  - If this session created "${target}" with jj_workspace_add: hand the work off first (jj_handoff), then call the jj_workspace_cleanup tool; it moves the session back to the default workspace and unregisters only session-owned workspaces.`,
+    `  - If the workspace was recorded by this plugin but its owning session ended (interrupted/restarted), jj_workspace_list detail:"full" reports it as orphaned and jj_workspace_cleanup { workspace: "${target}" } may unregister it once its working copy is clean; the directory stays on disk.`,
     `  - Otherwise leave the cleanup to the user: \`jj workspace list\` shows names and paths; report them (for example "from the default workspace run jj workspace forget ${target}, then delete the directory") and do not run jj workspace forget yourself.`,
   ].join('\n');
 }

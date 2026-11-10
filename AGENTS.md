@@ -77,13 +77,14 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/jj-service.ts`                                            | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                              |
 | `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                     |
 | `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                             |
-| `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型                                                                                                                     |
-| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 24 个 `defineTool`(含 session workspace 所有权)                                                                                                                  |
-| `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`                                                                                                                             |
+| `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型;`JjToolsHost` 的 `liveSessions` / `workingDirectory.get` 可选钩子                                                   |
+| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 24 个 `defineTool`(含 session workspace 所有权、cleanup/handoff 的 liveness 策略与统一 stale 重试包装)                                                           |
+| `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`;用 `ctx.get('agents')` + `workingDirectory.get` 构造 liveSessions                                                           |
 | `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                              |
-| `src/policies.ts`                                              | 纯模块:工作区所有权注册表、根 workspace 判定、cleanup 决策、stale 错误识别;工具/flow/guard 共用同一份规则                                                                               |
-| `src/session-heartbeat.ts`                                     | 纯模块:跨进程会话心跳（`<jjRepoPath>/dsh-jj/sessions/*.json`），多会话检测在 `auto` 模式下的第二个来源                                                                                  |
-| `src/flows/cleanup.ts`                                         | 具名流程:离开并注销本会话创建的 workspace（所有权、stale 恢复、切换目录与 forget 的顺序都在这一个地方）                                                                                 |
+| `src/policies.ts`                                              | 纯模块:持久化工作区所有权注册表(按 session id)、根 workspace 判定、当前/孤儿 cleanup 决策、stale 错误识别;工具/flow/guard 共用同一份规则                                                |
+| `src/session-heartbeat.ts`                                     | 纯模块:跨进程会话心跳（`<jjRepoPath>/dsh-jj/sessions/*.json`），多会话检测与 workspace 存活判断的第二个来源;只读查询可关闭过期文件清理                                                  |
+| `src/workspace-registry.ts`                                    | 纯模块:`jj_workspace_add` 的 workspace 记录(name/root/sessionId/baseChangeId)持久化到 `<jjRepoPath>/dsh-jj/workspaces/`,tmp+rename、fail-open                                           |
+| `src/flows/cleanup.ts`                                         | 具名流程:当前 workspace 的注销(切换目录、forget、default 空 @ 线性化)与外来的孤儿 workspace 注销(不移动会话、不删目录),含 stale 恢复与有限空 @ prune                                    |
 | `src/panel-host.ts`                                            | 只读面板 Host 半侧:`/api/jj.overview` + `/api/jj.refresh` 聚合快照、5s 缓存、失败降级;绝不写仓库                                                                                        |
 | `src/panel-client.ts`                                          | 只读面板浏览器半侧:经典 script + `__ModuleLoader__.load` 包裹,注册右侧栏 tab 与 locale;唯一客户端入口                                                                                   |
 | `src/capabilities.ts`                                          | 纯模块:jj 子命令 → 处置（tool / shell / blocked）的能力矩阵；`test/capabilities.test.ts` 断言覆盖 guard 表与已注册工具                                                                  |
@@ -100,7 +101,11 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 | `src/prompt-context.ts`                                        | 会话开始时注入「优先用 jj」、提交描述/拆分提交/修正折叠与多会话/收尾 rebase 的模型可见上下文                                                                                            |
 | `src/multi-session.ts`                                         | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess)                                                            |
 | `test/**/*.test.ts`                                            | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                |
-| `test/multi-session.test.ts`                                   | 多会话检测模式与指引文案的单元测试                                                                                                                                                      |
+| `test/multi-session.test.ts`                                   | 多会话检测模式、指引文案与 prompt token 预算的单元测试                                                                                                                                  |
+| `test/policies.test.ts`                                        | 所有权(含跨重启持久化)、cleanup/孤儿决策表、stale 识别                                                                                                                                  |
+| `test/session-heartbeat.test.ts`                               | 心跳文件布局、过期、只读不清理与 fail-open                                                                                                                                              |
+| `test/workspace-registry.test.ts`                              | workspace 记录的往返、文件名清洗、损坏跳过与目录不可用时的 fail-open                                                                                                                    |
+| `test/service-tools.test.ts`                                   | `jj_*` 工具与操作层端到端(真实 jj 仓库):handoff/cleanup、跨 workspace 防护与恢复、孤儿注销、default 线性化、stale 重试等                                                                |
 | `test/service.test.ts`                                         | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                            |
 | `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 输出 + 真实夹具 + 拒绝快照警告解析)                                                                                                              |
 | `test/changes-jj.test.ts`                                      | `changes-jj` 读取器测试(真实 jj-native/colocated 夹具 + fake runner 失败形态)                                                                                                           |
@@ -129,7 +134,7 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    顺序)。删改 `inject` 会破坏其他行加载。
 3. **纯模块**:`detect.ts`、`git-command.ts`(barrel)、`git-tokenize.ts`、`git-equivalence.ts`、
    `git-rules.ts`、`jj-rules.ts`、`types.ts`、`commit-style.ts`、`multi-session.ts`、`jj-templates.ts`、`policies.ts`、
-   `session-heartbeat.ts`、`changes-types.ts`、`changes-paths.ts`、`changes-diff.ts`、`changes-jj.ts`、`changes-recorder.ts`、
+   `session-heartbeat.ts`、`workspace-registry.ts`、`changes-types.ts`、`changes-paths.ts`、`changes-diff.ts`、`changes-jj.ts`、`changes-recorder.ts`、
    `changes-service.ts` 不得在运行时 import 任何 `@deepseek-ai/*`(由 `build.test.ts` 强制;类型导入可以)。
    DSH 运行时 import 仅限:`config.ts`(schemastery)、`jj-service.ts`(cordis)、`tool-definitions.ts`
    (dsh-tools)、`jj-command.ts`(dsh-subprocess)、`changes.ts`(schemastery + 动态 `import()` 内置
@@ -184,6 +189,12 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     隔离建议固定为「先只提交自己的路径、再**不带 `parents`** 调用 `jj_workspace_add`」:不带 parents 时 jj 以
     当前 `@` 的父提交为起点,正好带上刚提交的那一步;传 `parents: ["@"]` 会把空的工作副本提交变成新 workspace
     提交链里的空提交、最终进入收尾/推送历史。不要在指引或工具描述里重新推荐 `parents ["@"]`。
+    **持久所有权与跨 workspace 收尾**:workspace 记录由 `workspace-registry.ts` 持久化到
+    `<jjRepoPath>/dsh-jj/workspaces/`(tmp+rename、fail-open),`WorkspaceOwnership` 按 session id 懒加载
+    (无 session id 退回进程内);`jj_workspace_list detail:"full"` 暴露 owner/orphaned,
+    `jj_workspace_cleanup { workspace }` 注销「有记录、owner 不活跃、无人占用、干净」的孤儿。`jj_handoff` 在
+    source rebase 前用 `working_copies() & (<first>::)` 检测外来工作副本:活跃/有内容/冲突 fail-closed,无主且空的
+    才继续并在 rebase 后 `update-stale`(结果 `foreignWorkingCopies`);`dryRun` 只报告。
 13. **收尾自动化(`jj_handoff` / `jj_workspace_cleanup`)**:
     - `service.ts` 的 `handoff()` 是收尾的唯一入口:fetch(无远端不算错)→ 目标解析(显式 `destination` →
       配置 `rebaseTarget` → `trunk()` → 本地 `main` → `master`,跳过 root commit;显式目标解析到 root 是
@@ -217,20 +228,32 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       `json(self).target` 是 `[add, remove, add…]` 合并形式,缺席的一侧是 `null`)一律 `bookmarkSkipped`,不替人选边,
       `bookmarkList` 的 `target` 取第一个存在的 add 侧,绝不能把 `null` 变成字面 revset `"null"`;bookmark 名在 rebase 前校验,
       rebase 后的 bookmark 失败收敛为 `bookmarkSkipped`(保留已成功的 rebase 结果)。
+    - **跨 workspace 的 rebase 边界**:`handoffFlow` 在 fail-closed 校验后、`dryRun`/`rebase` 前用
+      `working_copies() & (<first>::)` 检测会被一并移动的外来工作副本并写入必填的 `foreignWorkingCopies`。工具层
+      注入 `reviewForeignWorkingCopies`:活跃占用或有内容/冲突 → 拒绝并列出 workspace;本会话自己的记录 → 允许;
+      无主且空 → 允许并作为 `recoverWorkspaceRoots`。service 默认策略只按内容/冲突拒绝、空副本继续;rebase 后
+      对 recover roots 逐个 `updateStale`(fail-open 写回 `recovered`/`recoveryError`);`dryRun` 只报告。
     - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(记在
-      `ctx.jj` 的 `WorkspaceOwnership` 注册表:按 `exec.agent` 记录**名字+规范路径**,不随工具定义生灭)、
-      当前 workspace 不是 `default`、working copy 无未提交改动/冲突的 workspace 才能注销;注销前必须先
-      `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。判定与编排在 `policies.ts` 的
-      `decideWorkspaceCleanup` 与 `flows/cleanup.ts`:读取工作副本遇到 stale 会先 `update-stale` 再重试,
-      不再因为一次快照失败就放弃清理。
+      `ctx.jj` 的 `WorkspaceOwnership` 注册表,记录在 `<jjRepoPath>/dsh-jj/workspaces/`,按 DSH session id
+      持久化;见规则 12)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的 workspace 才能注销;
+      注销前必须先 `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。判定与编排在
+      `policies.ts` 的 `decideWorkspaceCleanup` 与 `flows/cleanup.ts`:读取工作副本遇到 stale 会先
+      `update-stale` 再重试,不再因为一次快照失败就放弃清理。
+      **回 default 与孤儿注销**:决策通过后、切换目录前,若 default 的 `@` 为空/无冲突/未发布/无后代、当前 `@-`
+      是唯一无冲突的真实栈顶、default 无活跃会话,则把它 rebase 到栈顶(`defaultWorkingCopy`),避免空兄弟分叉,
+      失败只记 `reason`。`jj_workspace_cleanup { workspace }` 从当前 workspace 注销一条"有记录、owner 不活跃、
+      无人占用、干净(或目录已消失)"的外来 workspace;决策在 `decideOrphanWorkspaceCleanup`,不移动 cwd、不删目录;
+      活信息来自 `JjToolsHost.liveSessions` 与心跳,fail-open 按无主处理;记录已不在注册表时删陈旧记录并返回
+      `alreadyForgotten`。
       这是对旧「清理只能交给用户」规则的**唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝
       (`buildJjWorkspaceForgetRefusal`;jj 接受多个名字,`targetWorkspaces` 里任一不是当前 workspace 即拒绝)。
       `jj workspace remove` 会把 workspace(stale 的也一样)连目录一起删除、被忽略文件无法恢复,
       `jj-rules.ts` 把它归为 `destructive`,任何目标、任何 `guardJjRepositoryWide` 模式都由
       `buildJjWorkspaceRemoveRefusal` hard-deny。注销后还要用 `changeExists()` 检查被遗忘 workspace 的空工作副本
-      是否仍可见(jj 只在「空 + 无描述 + 无后代」时才丢弃它),保留时在结果 `message` 里说明它仍在共享历史、可能
-      显示为空提交;`workspaceForget` 对 stale 的默认 workspace(兄弟 workspace 的 handoff 改写了它检出的 change)
-      必须 `update-stale` 后重试一次,清理不得因此失败。
+      是否仍可见(jj 只在「空 + 无描述 + 无后代」时才丢弃它);若仍可见且同时满足空、无冲突、无任何后代、未发布,
+      才可自动 `abandon` 并返回 `prunedEmptyChangeId`(见规则 16),否则在结果 `message` 里说明它仍在共享历史、
+      可能显示为空提交;`workspaceForget` 对 stale 的默认 workspace(兄弟 workspace 的 handoff 改写了它检出的
+      change)必须 `update-stale` 后重试一次,清理不得因此失败。
     - `JjOperations.workspaceAdd` 必须显式传 `--name`(缺省名用 `basename`)并按名字/规范路径解析返回的
       workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
       `workspace list` 模板对 `name`/`root` 都用 `json(...)`(名字可含空格/制表符);比较名字时用解码后的裸名。
@@ -309,10 +332,13 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       警告并提示用 `jj_abandon` 清理(现有测试锁定 warning-only 形状)。`newChange()` 在无 parents 且 `@` 已空时同样
       拒绝;显式 parents 的 `jj_new` 保持可用(用于在别的 revision 上开栈)。
     - `jj_handoff` 对 rebase 后才变空的 change 只报告不自动删除(见规则 13);清理由模型调用 `jj_abandon`
-      (显式 revset、拒绝 `@` 与已发布提交),插件绝不自动 abandon,也不改写他人提交。
+      (显式 revset、拒绝 `@` 与已发布提交)。
+    - **唯一的自动 abandon 例外**在 cleanup 注销之后:被遗忘 workspace 的工作副本 change 仍可见、且空、无冲突、
+      无任何后代(revset `(<id>):: ~ (<id>)` 为空)、未发布时才 `abandon`(结果 `prunedEmptyChangeId`);否则只
+      报告。绝不碰其它提交,不要扩大成普适的自动清理。
     - 修改这些守卫/文案时同步 `test/service-tools.test.ts`(commit/new 空提交拒绝、workspaceAdd parent
-      丢弃/拒绝、handoff 空 change 上报、cleanup stale 恢复与保留提示)、`test/multi-session.test.ts`(隔离与
-      收尾文案、prompt token 预算)与 README「多会话协作」「任务收尾」「已知限制」。
+      丢弃/拒绝、handoff 空 change 上报、cleanup 保留/prune、cleanup stale 恢复)、`test/multi-session.test.ts`
+      (隔离与收尾文案、prompt token 预算)与 README「多会话协作」「任务收尾」「已知限制」。
 
 17. **可视化面板(`panel-host` / `panel-client`)**:
     - Host 半侧只读:`buildJjOverview` 聚合 `detect`/`workspaceStates`/`readAt`/`bookmarkList`/`opLog`,
@@ -421,11 +447,14 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
 
 1. `multi-session.ts`:检测(`ctx.agents.roots()` 顶层会话 + `turnBoundary` 活动状态 + workingDirectory,纯模块、fail-open)与模型可见文案
    (共用工作副本先隔离到仓库外的独立 workspace、同仓库不同 workspace 不要改写别人的提交、收尾清单);
-   收尾清单现在要求模型**调用一次 `jj_handoff`**,而不是手工串 `jj git fetch` / 选目标 / `jj_rebase` / 复核;
+   收尾清单现在要求模型**调用一次 `jj_handoff`**,而不是手工串 `jj git fetch` / 选目标 / `jj_rebase` / 复核,
+   并说明它会拒绝改写活跃/有内容的其它 workspace、会自动恢复被顺带移动的空工作副本;
    目标解析、source 模式整栈 rebase、stale 恢复、冲突上报都在 `service.ts` 的 `handoff()` 里实现
    (jj 的默认 `revisions`/`-r` 只移动指定提交,不会带走后代,所以整栈必须 `-s`);
    **shell 里的 `jj workspace forget` 仍不可要求模型执行**:只有 `jj_workspace_cleanup` 工具可以注销
-   本会话通过 `jj_workspace_add` 创建的临时 workspace,其它情况清理交给用户(报告 `jj workspace list` 的名字/路径);
+   本会话通过 `jj_workspace_add` 创建的临时 workspace(它还会把 default 的空 `@` 接到刚完成栈顶);中断会话
+   留下的记录由 `jj_workspace_list detail:"full"` 标成 `orphaned`,`jj_workspace_cleanup { workspace }` 可回收,
+   其它情况清理交给用户(报告 `jj workspace list` 的名字/路径);
    并行会话一旦被检测到,收尾清单要在同一会话后续轮次继续注入(`parallelSeen` latch),子代理不注入;
    隔离段必须写成「先提交自己的路径,再**不带 parents** 调用 `jj_workspace_add`」,并解释 `parents ["@"]` 会把
    空工作副本提交带进新链;`jj_workspace_add` 的 parent 守卫与 `jj_commit` / `jj_new` 空提交守卫见规则 13/16;
@@ -434,13 +463,14 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
    (默认 `trunk()`,不得为空);
 4. `index.ts`:在 `apply` 里把存活会话列表(含 `sessionProjections` 的 `turnBoundary` 活动状态)与 workingDirectory
    接给指引;已知空闲的对端必须在 `parallelPeerCwds` 里被过滤,检测 fail-open,不可阻断启动;
-5. `service.ts` / `tools.ts`:收尾自动化(`handoff()`、`jj_handoff`、`jj_workspace_cleanup`)与
-   guard 的 `jj workspace forget <other>` / `jj workspace remove` 拒绝文案(`buildJjWorkspaceForgetRefusal` /
-   `buildJjWorkspaceRemoveRefusal`)要保持一致;
-6. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案,`test/service-tools.test.ts` 覆盖 handoff / cleanup
-   端到端(含 no-remote、already-integrated、needsCommit、conflicts、bookmark、默认 workspace 的 `firstChange`
-   约束、cleanup 所有权与回退),同步 `test/prompt-context.test.ts`、`test/guard.test.ts` 与
-   `test/build.test.ts` 的纯模块列表;
+5. `service.ts` / `tools.ts`:收尾自动化(`handoff()`、`jj_handoff`、`jj_workspace_cleanup`)、跨 workspace
+   的 `foreignWorkingCopies` 检测/恢复、统一 stale 重试,以及 guard 的 `jj workspace forget <other>` /
+   `jj workspace remove` 拒绝文案(`buildJjWorkspaceForgetRefusal` / `buildJjWorkspaceRemoveRefusal`)要保持一致;
+6. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案与 token 预算,`test/service-tools.test.ts` 覆盖 handoff /
+   cleanup 端到端(含 no-remote、already-integrated、needsCommit、conflicts、bookmark、默认 workspace 的
+   `firstChange` 约束、跨 workspace 拒绝/恢复、cleanup 所有权/孤儿/default 线性化/stale 恢复),同步
+   `test/policies.test.ts`、`test/workspace-registry.test.ts`、`test/prompt-context.test.ts`、
+   `test/guard.test.ts` 与 `test/build.test.ts` 的纯模块列表;
 7. 同步 README「使用 / 配置 / 工具一览 / 已知限制」与 `locale/*.json` 的 meta.description;默认保持 `auto`
    (跨进程需用户显式配置 `always`),不要让多会话检测变成隐式依赖。
 

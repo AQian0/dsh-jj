@@ -219,11 +219,11 @@ function genericParallelText(): string {
 function finishChecklistText(target: string): string {
   return [
     "Finishing this workspace's work (standard rebase hand-off):",
-    '1. Commit only while @ still has content changes; never commit an empty working copy (the empty commit would stay in the handed-off chain). Keep the change ids you created.',
-    `2. Call jj_handoff once instead of manual fetch/rebase/verify: it fetches (a repository without remotes is fine), picks the integration target itself (configured rebaseTarget, default ${target}, then local main/master), rebases the whole stack with source mode, verifies the base, reports conflicts and moves a bookmark you pass. In the default workspace pass firstChange: <bottom-most change id you created>; in your own workspace omit it. If the stack bottoms on an earlier session's commit, keep the chain together.`,
-    '3. Resolve conflicts yourself: edit files to their final content, remove the marker blocks, jj_status to snapshot; for a conflict in a middle commit `jj edit <change>`, fix it, then `jj new <top change>`; call jj_handoff again. Report only a conflict you cannot resolve safely.',
+    '1. Commit only while @ still has content changes; never commit an empty working copy. Keep the change ids you created.',
+    `2. Call jj_handoff once instead of manual fetch/rebase/verify: it fetches (a repository without remotes is fine), picks the integration target itself (configured rebaseTarget, default ${target}, then main/master), rebases the whole stack in source mode, verifies the base, reports conflicts, moves a bookmark you pass, recovers other workspaces' empty working copies it had to move, and keeps the chain together when it bottoms on an earlier session's commit. In the default workspace pass firstChange: <bottom-most change id you created>; in your own workspace omit it. It refuses when a live or edited workspace is in the moved set: finish that workspace first.`,
+    '3. Resolve conflicts yourself: edit files, remove the markers, jj_status; for a middle commit `jj edit <change>`, fix it, then `jj new <top change>`; call jj_handoff again. Report only a conflict you cannot resolve safely.',
     '4. Only ask the user for an integration target when jj_handoff reports none exists; never ask them to fetch, rebase, verify or move bookmarks.',
-    '5. If you created this workspace with jj_workspace_add, call jj_workspace_cleanup; if refused, report its name/path — the user runs `jj workspace forget <name>`, do not run it yourself.',
+    "5. If you created this workspace with jj_workspace_add, call jj_workspace_cleanup: it returns to the default workspace and moves the default's empty @ onto this stack. If refused, jj_workspace_list detail shows owner/orphaned; jj_workspace_cleanup { workspace } reclaims an interrupted session's clean workspace, otherwise report its name/path (do not run jj workspace forget yourself).",
     '6. Report the rebased change ids, destination, any bookmark move and the cleanup outcome.',
   ].join('\n');
 }

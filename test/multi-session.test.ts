@@ -169,8 +169,23 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   );
   assert.match(text, /resolve conflicts yourself/i, 'conflicts are resolved by the model, not handed back');
   assert.match(text, /jj_workspace_cleanup/, 'a session-created workspace is cleaned up by the plugin');
-  assert.match(text, /the user runs `jj workspace forget <name>`/, 'raw workspace forget is left to the user');
-  assert.match(text, /do not run it yourself/i, 'raw workspace forget stays denied');
+  assert.match(
+    text,
+    /moves the default's empty @ onto this stack/,
+    'cleanup linearizes the default working copy instead of leaving an empty sibling head',
+  );
+  assert.match(
+    text,
+    /jj_workspace_cleanup \{ workspace \}/,
+    "an interrupted session's recorded workspace has an explicit reclaim path",
+  );
+  assert.match(text, /report its name\/path/, 'raw workspace forget is left to the user');
+  assert.match(text, /do not run jj workspace forget yourself/i, 'raw workspace forget stays denied');
+  assert.match(
+    text,
+    /refuses when a live or edited workspace is in the moved set/,
+    'the hand-off warns about source-rebase moving other working copies',
+  );
   assert.match(
     text,
     /create the workspace WITHOUT `parents`/,
@@ -242,13 +257,14 @@ test('the exported mode list is the accepted configuration vocabulary', () => {
 
 test('the injected guidance stays within the prompt token budget', () => {
   // Rough English prompt ratio: ~3.5 chars/token. The shared variant (the largest
-  // block: isolation guidance + finish checklist) must stay within ~700 tokens.
+  // block: isolation guidance + finish checklist) must stay within ~780 tokens; the
+  // checklist grew slightly to describe cross-workspace hand-off and orphan cleanup.
   const shared = multiSessionPromptText({
     mode: 'auto',
     detection: { sharedWorkspace: ['/repo'], siblingWorkspace: [] },
   });
   const checklist = multiSessionFinishChecklistText();
-  assert.ok(shared.length <= 2450, `shared guidance is ${shared.length} chars; target is ~700 tokens`);
-  assert.ok(checklist.length <= 1450, `finish checklist is ${checklist.length} chars; target is ~400 tokens`);
+  assert.ok(shared.length <= 2750, `shared guidance is ${shared.length} chars; target is ~780 tokens`);
+  assert.ok(checklist.length <= 1750, `finish checklist is ${checklist.length} chars; target is ~500 tokens`);
   assert.ok(checklist.length < shared.length, 'the checklist is the smaller half of the shared block');
 });
