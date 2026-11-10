@@ -43,9 +43,11 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   const { service, config } = context;
   const operations = service.operations;
   /**
-   * Workspace ownership is service state, not tool state: the cleanup flow, the panel
-   * and (later) the guard read the same registry, and a restarted host starts empty.
-   * The tools only report what they created and ask before unregistering.
+   * Workspace ownership is service state, not tool state: the cleanup flow and the
+   * tools read the same registry. Records are keyed by DSH session id and persisted in
+   * the repository metadata directory, so an interrupted/restarted session keeps its
+   * workspaces (see `workspace-registry`). The tools only report what they created and
+   * ask before unregistering.
    */
   const ownership = service.workspaceOwnership;
   /**
@@ -687,7 +689,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const { cwd } = await openWorkspace(exec);
+        const { cwd, descriptor } = await openWorkspace(exec);
         // Remember the base the new working copy starts on, so a later restore can
         // recreate the workspace on the same parent after its directory is gone. Only
         // the implicit-parents form is recorded: explicit multi-parent bases cannot be
@@ -706,7 +708,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           args.colocate,
           exec.signal,
         );
-        ownership.remember(exec.agent, result.name, result.path, baseChange?.changeId);
+        ownership.remember(descriptor.jjRepoPath, exec.agent, result.name, result.path, baseChange?.changeId);
         const enter = args.enter !== false;
         const workingDirectory = context.host.workingDirectory;
         const canEnter = exec.agent !== undefined && typeof workingDirectory?.set === 'function';
@@ -927,12 +929,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         render: (_args, value) => textRender(value),
       },
       async execute(args, exec) {
-        const { cwd } = await openWorkspace(exec);
+        const { cwd, descriptor } = await openWorkspace(exec);
         const requested = args.name.trim();
         if (requested.length === 0) {
           throw new Error('jj_workspace_restore needs the workspace name recorded by jj_workspace_add.');
         }
-        const owned = ownership.list(exec.agent).find((entry) => entry.name === requested);
+        const owned = ownership.list(descriptor.jjRepoPath, exec.agent).find((entry) => entry.name === requested);
         if (owned === undefined) {
           throw new Error(
             `jj_workspace_restore only rebuilds a workspace this session created with jj_workspace_add (no record for ${JSON.stringify(requested)}): the directory and registration are both gone, so use jj_workspace_add with a new name, or ask the user to recreate it.`,
@@ -969,7 +971,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           undefined,
           exec.signal,
         );
-        ownership.remember(exec.agent, result.name, result.path, baseChangeId);
+        ownership.remember(descriptor.jjRepoPath, exec.agent, result.name, result.path, baseChangeId);
         const enter = args.enter !== false;
         const workingDirectory = context.host.workingDirectory;
         const canEnter = exec.agent !== undefined && typeof workingDirectory?.set === 'function';
@@ -1274,7 +1276,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           },
           exec.signal,
         );
-        const cleanupOwned = workspaceName !== 'default' && ownership.owns(exec.agent, workspaceName, descriptor.root);
+        const cleanupOwned =
+          workspaceName !== 'default' &&
+          ownership.owns(descriptor.jjRepoPath, exec.agent, workspaceName, descriptor.root);
         return {
           ...workspaceFields(descriptor),
           destination: result.destination,
@@ -1393,7 +1397,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         // forget" live in the flow (src/flows/cleanup.ts); the tool only supplies facts.
         return await cleanupWorkspace({
           operations,
-          owns: (name, root) => ownership.owns(exec.agent, name, root),
+          owns: (name, root) => ownership.owns(descriptor.jjRepoPath, exec.agent, name, root),
           host: context.host,
           agent: exec.agent,
           cwd,

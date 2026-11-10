@@ -57,9 +57,10 @@ export class JjService extends Service {
   /**
    * Workspaces this session created through the tools.
    *
-   * It lives on the service, not inside the tool definitions: the cleanup flow, the
-   * panel and (later) the guard must see the same ownership facts, and a restarted host
-   * must start with none of them.
+   * It lives on the service, not inside the tool definitions: the cleanup flow and the
+   * tools must see the same ownership facts. Ownership is keyed by DSH session id and
+   * persisted in the repository metadata directory (`workspace-registry`), so a
+   * restarted host can still unregister a workspace the same session created earlier.
    */
   readonly workspaceOwnership = new WorkspaceOwnership();
   /**

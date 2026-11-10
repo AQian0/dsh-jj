@@ -72,6 +72,7 @@ const PURE_MODULES = [
   'policies',
   'panel-host',
   'session-heartbeat',
+  'workspace-registry',
   'types',
   'commit-style',
   'multi-session',
