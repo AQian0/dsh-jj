@@ -1024,6 +1024,111 @@ async function makeHandoffFixture(t: Parameters<typeof makeFixture>[0], label: s
   return { fx, repo, ws, operations, calls };
 }
 
+/**
+ * Fixture for the real multi-session isolation flow: a commit made in the default
+ * workspace, two workspaces created from its parent without `-r`, and an advanced main.
+ *
+ * A source-mode rebase from the shared pre-isolation commit therefore also moves the
+ * default workspace's empty `@` and the second workspace's working copy.
+ */
+async function makeSharedBaseFixture(t: Parameters<typeof makeFixture>[0], label: string) {
+  const fx = makeFixture(t, label);
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  await writeFixtureFile(fx, repo, 'pre.txt', 'pre');
+  await commitWorkingCopy(fx, repo, 'feat: pre-isolation');
+  const one = join(fx.root, 'ws-one');
+  const two = join(fx.root, 'ws-two');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', one, '--name', 'one'], repo);
+  await mustRun(fx.run, ['jj', 'workspace', 'add', two, '--name', 'two'], repo);
+  const upstream = join(fx.root, 'ws-upstream');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', upstream, '--name', 'upstream', '-r', 'main'], repo);
+  await writeFixtureFile(fx, upstream, 'up.txt', 'up');
+  await commitWorkingCopy(fx, upstream, 'chore: upstream');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], upstream);
+  const { runJj, calls } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  return { fx, repo, one, two, upstream, operations, calls };
+}
+
+test("operation layer: jj_handoff refuses a stack that would rewrite another workspace's uncommitted working copy", async (t) => {
+  const { fx, one, two, operations, calls } = await makeSharedBaseFixture(t, 'dsh-jj-handoff-foreign-dirty');
+  await writeFixtureFile(fx, one, 'one.txt', 'one');
+  await commitWorkingCopy(fx, one, 'feat: one');
+  // Uncommitted content in the other workspace; snapshot it so jj reports it non-empty.
+  await writeFixtureFile(fx, two, 'dirty.txt', 'dirty');
+  await operations.status(two);
+
+  await assert.rejects(
+    () => operations.handoff(one),
+    /would also rewrite the working copy|uncommitted/,
+    "a source-mode rebase must not move another workspace's uncommitted work",
+  );
+  assert.ok(!calls.some((argv) => argv.includes('rebase')), 'the hand-off fails before running any rebase');
+  await operations.status(two);
+});
+
+test('operation layer: jj_handoff recovers empty foreign working copies instead of leaving them stale', async (t) => {
+  const { fx, one, two, repo, operations } = await makeSharedBaseFixture(t, 'dsh-jj-handoff-foreign-empty');
+  await writeFixtureFile(fx, one, 'one.txt', 'one');
+  await commitWorkingCopy(fx, one, 'feat: one');
+
+  const result = await operations.handoff(one);
+  assert.equal(result.rebased, true);
+  assert.equal(result.onTarget, true);
+  const names = result.foreignWorkingCopies.map((copy) => copy.workspaceName).sort();
+  assert.ok(names.includes('default'), `default working copy reported: ${names.join(', ')}`);
+  assert.ok(names.includes('two'), `sibling workspace reported: ${names.join(', ')}`);
+  assert.ok(
+    result.foreignWorkingCopies.every((copy) => copy.empty && !copy.conflict),
+    'the empty working copies were the only foreign changes',
+  );
+  assert.ok(
+    result.foreignWorkingCopies.every((copy) => copy.recovered === true),
+    `empty foreign working copies are recovered: ${JSON.stringify(result.foreignWorkingCopies)}`,
+  );
+  // Both foreign workspaces are readable again (not stale).
+  await operations.status(two);
+  await operations.status(repo);
+});
+
+test('jj_handoff tool: reports foreign working copies in a dry run and refuses a live one', async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const { fx, one, two, upstream, operations } = await makeSharedBaseFixture(t, 'dsh-jj-handoff-foreign-live');
+  await writeFixtureFile(fx, one, 'one.txt', 'one');
+  await commitWorkingCopy(fx, one, 'feat: one');
+  fx.cwd = one;
+
+  const plain = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}))),
+  ).get('jj_handoff')!;
+  const dry = (await plain.execute({ dryRun: true }, fakeExec({ id: 'one-session' }))) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(plain.output.schema, dry), [], `output: ${JSON.stringify(dry)}`);
+  assert.equal(dry['dryRun'], true);
+  const reported = dry['foreignWorkingCopies'] as { workspaceName: string; recovered?: boolean }[];
+  assert.ok(reported.some((copy) => copy.workspaceName === 'two'));
+  assert.ok(reported.some((copy) => copy.workspaceName === 'default'));
+  assert.ok(
+    reported.every((copy) => copy.recovered === undefined),
+    'a dry run reports foreign working copies without recovering them',
+  );
+
+  // A live session in the sibling workspace refuses the hand-off before any rewrite.
+  const live = definitionsByName(
+    jjToolDefinitions(
+      toolContext(fx, toolService(fx, operations), resolveConfig({}), undefined, () => [
+        { sessionId: 'two-session', cwd: two },
+      ]),
+    ),
+  ).get('jj_handoff')!;
+  await assert.rejects(() => live.execute({}, fakeExec({ id: 'one-session' })), /in use by a live session/);
+  // The upstream workspace's @ is not part of this stack, so it stays untouched.
+  await operations.status(upstream);
+});
+
 test('operation layer: jj_handoff resolves a local-only target, rebases the stack, and moves a bookmark', async (t) => {
   const { fx, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-handoff-local');
   await writeFixtureFile(fx, ws, 'one.txt', 'one');
@@ -1643,8 +1748,13 @@ test('jj_workspace_cleanup: recovers a stale default workspace before forgetting
   await mustRun(fx.run, ['jj', 'new', rootEmptyChange.changeId], ws);
   await writeFixtureFile(fx, ws, 'work.txt', 'work');
   await commitWorkingCopy(fx, ws, 'feat: work');
-  // The hand-off rebases the root workspace's checked-out change, leaving it stale.
-  const handoff = await operations.handoff(ws);
+  // The hand-off rebases the root workspace's checked-out change, leaving it stale. The
+  // service normally recovers the affected empty working copy itself; this test disables
+  // that recovery (a caller-provided review without recovery roots) so cleanup's own
+  // stale recovery stays covered.
+  const handoff = await operations.handoff(ws, {
+    reviewForeignWorkingCopies: () => ({ action: 'proceed' }),
+  });
   assert.equal(handoff.rebased, true);
   await assert.rejects(
     () => operations.status(repo),
@@ -2006,6 +2116,36 @@ test('operation layer: jj_handoff recovers a stale working copy instead of handi
   assert.ok(
     calls.some((argv) => argv.includes('workspace') && argv.includes('update-stale')),
     'the hand-off recovers the stale working copy itself and retries',
+  );
+});
+
+test('jj tools: a stale working copy is recovered once and the tool call retried', async (t) => {
+  const { fx, repo, ws, operations, calls } = await makeHandoffFixture(t, 'dsh-jj-tool-stale-recovery');
+  const definitions = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}))),
+  );
+  // Make the session workspace stale: another workspace restores an earlier operation.
+  const opLog = await mustRun(
+    fx.run,
+    ['jj', '--no-pager', '--color=never', 'op', 'log', '--no-graph', '-n', '1', '-T', 'id.short()'],
+    ws,
+  );
+  const op = opLog.stdout.trim();
+  await writeFixtureFile(fx, ws, 'one.txt', 'one');
+  await commitWorkingCopy(fx, ws, 'feat: one');
+  await mustRun(fx.run, ['jj', '--no-pager', '--color=never', 'op', 'restore', op], repo);
+  await assert.rejects(() => operations.status(ws), /stale/i, 'the fixture workspace is stale');
+
+  calls.length = 0;
+  fx.cwd = ws;
+  const value = (await definitions.get('jj_status')!.execute({}, fakeExec({ id: 'stale-tool-session' }))) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(value['workspaceName'], 'session');
+  assert.ok(
+    calls.some((argv) => argv.includes('workspace') && argv.includes('update-stale')),
+    'the tool wrapper recovers the stale working copy before retrying',
   );
 });
 

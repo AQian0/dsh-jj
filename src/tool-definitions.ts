@@ -33,7 +33,14 @@ import type { VcsDescriptor } from './types.ts';
 import { cleanupForeignWorkspace, cleanupWorkspace } from './flows/cleanup.ts';
 import { readSessionHeartbeats } from './session-heartbeat.ts';
 import { requireWorkspace, type JjLiveToolSession, type ToolContext, type ToolExec } from './tool-shared.ts';
-import { agentSessionId, canonicalWorkspacePath, isRootWorkspace, type OwnedWorkspace } from './policies.ts';
+import {
+  agentSessionId,
+  canonicalWorkspacePath,
+  isRootWorkspace,
+  isStaleWorkingCopyFailure,
+  type OwnedWorkspace,
+} from './policies.ts';
+import type { JjOperations } from './service.ts';
 
 /**
  * Build every `jj_*` tool definition (contract §7.3).
@@ -132,7 +139,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     return { cwd, descriptor: await requireWorkspace(context, cwd, exec.signal) };
   };
 
-  return [
+  const definitions: ToolDefinition[] = [
     defineTool({
       name: 'jj_status',
       description:
@@ -1237,7 +1244,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_handoff',
       description:
-        "Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace's whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. It refuses a destination that shares no real history with this workspace (only jj's empty root commit) and it never rewrites shared history; a workspace that is behind the destination is reported (onTarget: false) without a rebase. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.",
+        "Finish work in this Jujutsu (jj) workspace end to end: fetch (a repository without remotes is fine), resolve the integration target, rebase this workspace's whole change stack onto it with source mode, verify the base, report conflicts, and optionally move a bookmark this session owns. This is jj, not git: no checkout and no merge commit. It refuses a destination that shares no real history with this workspace (only jj's empty root commit) and it never rewrites shared history; a workspace that is behind the destination is reported (onTarget: false) without a rebase. A source-mode rebase also moves every descendant of the stack bottom, so when another workspace's working copy is in that set the hand-off refuses (live session or uncommitted content) or proceeds only for an empty one and recovers it with update-stale, reporting it in foreignWorkingCopies. Use it instead of running fetch/rebase/verification as separate commands, and never hand those steps to the user — the tool already resolves the target and stale-working-copy recovery on its own.",
       parameters: {
         destination: {
           type: 'string',
@@ -1337,6 +1344,27 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
                 },
               },
             },
+            foreignWorkingCopies: {
+              type: 'array',
+              required: true,
+              description:
+                "Other workspaces' working copies that the source-mode rebase moved (or would move, in a dry run). A live session's workspace or one with uncommitted content refuses the hand-off before anything is rewritten; an empty one proceeds and is recovered with `jj workspace update-stale`. `recovered` reports that recovery.",
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  workspaceName: { type: 'string', required: true },
+                  workspaceRoot: { type: 'string', required: true },
+                  changeId: { type: 'string', required: true },
+                  commitId: { type: 'string', required: true },
+                  description: { type: 'string', required: true },
+                  empty: { type: 'boolean', required: true },
+                  conflict: { type: 'boolean', required: true },
+                  recovered: { type: 'boolean' },
+                  recoveryError: { type: 'string' },
+                },
+              },
+            },
             cleanup: {
               type: 'object',
               required: true,
@@ -1362,6 +1390,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             'jj_handoff in the root (default) workspace needs `firstChange` (the bottom-most change id this session created): the root workspace history may contain changes from earlier work, and jj_handoff must never rebase changes it does not own. Inspect jj_log when unsure. Inside a dedicated session workspace the stack is detected automatically.',
           );
         }
+        const currentId = agentSessionId(exec.agent);
         const result = await operations.handoff(
           cwd,
           {
@@ -1370,6 +1399,38 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             ...(args.bookmark !== undefined ? { bookmark: args.bookmark } : {}),
             ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
             ...(args.dryRun !== undefined ? { dryRun: args.dryRun } : {}),
+            reviewForeignWorkingCopies: (copies) => {
+              const blocked: string[] = [];
+              const recover: string[] = [];
+              for (const copy of copies) {
+                const record = findRecord(descriptor, copy.workspaceName, copy.workspaceRoot);
+                const ownedByThisSession =
+                  record !== undefined && currentId !== undefined && record.sessionId === currentId;
+                const live = workspaceIsLive(descriptor, exec.agent, copy.workspaceRoot);
+                if (!copy.empty || copy.conflict) {
+                  blocked.push(
+                    `${copy.workspaceName}${copy.workspaceRoot.length > 0 ? ` (${copy.workspaceRoot})` : ''} has uncommitted ${copy.conflict ? 'conflicts' : 'changes'}`,
+                  );
+                } else if (live && !ownedByThisSession) {
+                  blocked.push(
+                    `${copy.workspaceName}${copy.workspaceRoot.length > 0 ? ` (${copy.workspaceRoot})` : ''} is in use by a live session`,
+                  );
+                } else if (copy.workspaceRoot.length > 0) {
+                  recover.push(copy.workspaceRoot);
+                }
+              }
+              if (blocked.length > 0) {
+                return {
+                  action: 'refuse',
+                  message: [
+                    'jj_handoff refuses to rebase this stack: a source-mode rebase would also rewrite the working copy of other workspaces that still need it:',
+                    ...blocked.map((line) => `  - ${line}`),
+                    'Commit or finish that work first, ask its session to hand off and clean up, or ask the user which changes to integrate. If the workspace belongs to an interrupted session, jj_workspace_list shows whether it is orphaned and jj_workspace_cleanup { workspace } unregisters it once its working copy is clean.',
+                  ].join('\n'),
+                };
+              }
+              return { action: 'proceed', ...(recover.length > 0 ? { recoverWorkspaceRoots: recover } : {}) };
+            },
           },
           exec.signal,
         );
@@ -1393,6 +1454,17 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           conflicts: result.conflicts.map((conflict) => ({
             changeId: conflict.changeId,
             description: conflict.description,
+          })),
+          foreignWorkingCopies: result.foreignWorkingCopies.map((copy) => ({
+            workspaceName: copy.workspaceName,
+            workspaceRoot: copy.workspaceRoot,
+            changeId: copy.changeId,
+            commitId: copy.commitId,
+            description: copy.description,
+            empty: copy.empty,
+            conflict: copy.conflict,
+            ...(copy.recovered !== undefined ? { recovered: copy.recovered } : {}),
+            ...(copy.recoveryError !== undefined ? { recoveryError: copy.recoveryError } : {}),
           })),
           fetch: result.fetch,
           message: result.message,
@@ -1682,4 +1754,45 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
     }),
   ];
+  return definitions.map((definition) => withStaleRecovery(definition, context, operations));
+}
+
+/**
+ * Retry one tool call once after recovering a stale working copy.
+ *
+ * Another workspace's hand-off rewrites the change this workspace checks out, after
+ * which every jj read fails with "The working copy is stale" until
+ * `jj workspace update-stale` runs. The hand-off/cleanup/amend flows already recover
+ * themselves; wrapping every tool removes the same failure mode from plain
+ * `jj_status`/`jj_commit`/`jj_log` calls, which otherwise leave the session stuck.
+ *
+ * The stale refusal happens while jj loads/snapshots the working copy, before any
+ * mutation, so retrying once is safe. A second refusal propagates unchanged, and a
+ * failed recovery rethrows the original error. `jj_workspace_update_stale` is not
+ * wrapped (its whole purpose is that recovery).
+ *
+ * @param definition - the registered tool.
+ * @param context - tool context (for the calling session's cwd).
+ * @param operations - jj operations used for the recovery.
+ * @returns the wrapped definition.
+ */
+function withStaleRecovery(definition: ToolDefinition, context: ToolContext, operations: JjOperations): ToolDefinition {
+  if (definition.name === 'jj_workspace_update_stale') return definition;
+  return {
+    ...definition,
+    async execute(args, exec) {
+      try {
+        return await definition.execute(args, exec);
+      } catch (error) {
+        if (!isStaleWorkingCopyFailure(error)) throw error;
+        try {
+          const cwd = await context.cwdFor(exec);
+          await operations.updateStale(cwd, exec.signal);
+        } catch {
+          throw error;
+        }
+        return await definition.execute(args, exec);
+      }
+    },
+  };
 }

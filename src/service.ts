@@ -267,6 +267,41 @@ export interface JjHandoffOptions {
    * repository, so the reported conflicts are the ones already present in the stack.
    */
   readonly dryRun?: boolean;
+  /**
+   * Review of the other workspaces whose working-copy commits this source-mode rebase
+   * would move as well. Called before anything is rewritten; the tool layer uses it to
+   * refuse live/dirty workspaces and to name the ones to recover afterwards. Without a
+   * callback a copy with uncommitted content or conflicts refuses the hand-off, and
+   * empty copies proceed and are recovered by the service itself.
+   */
+  readonly reviewForeignWorkingCopies?: (copies: readonly JjHandoffForeignWorkingCopy[]) => JjHandoffForeignReview;
+}
+
+/** One other workspace's working-copy change that a source-mode rebase would also move. */
+export interface JjHandoffForeignWorkingCopy {
+  readonly workspaceName: string;
+  readonly workspaceRoot: string;
+  readonly changeId: string;
+  readonly commitId: string;
+  readonly description: string;
+  readonly empty: boolean;
+  readonly conflict: boolean;
+}
+
+/**
+ * Review of the other workspaces' working copies a hand-off's source-mode rebase would
+ * move. Called before anything is rewritten, so it can fail closed.
+ */
+export type JjHandoffForeignReview =
+  | { readonly action: 'proceed'; readonly recoverWorkspaceRoots?: readonly string[] }
+  | { readonly action: 'refuse'; readonly message: string };
+
+/** Reported outcome of one foreign working copy affected by a hand-off. */
+export interface JjHandoffForeignWorkingCopyOutcome extends JjHandoffForeignWorkingCopy {
+  /** Set after the rebase: whether `jj workspace update-stale` recovered the workspace. */
+  readonly recovered?: boolean;
+  /** Why the automatic recovery failed, when it did. */
+  readonly recoveryError?: string;
 }
 
 /** One conflicted change reported by a hand-off. */
@@ -334,6 +369,13 @@ export interface JjHandoffResult {
   readonly bookmark?: JjHandoffBookmark;
   /** Why a requested bookmark move was skipped (conflicts, empty stack). */
   readonly bookmarkSkipped?: string;
+  /**
+   * Other workspaces' working copies that the rebase moved (or would move, in a dry
+   * run). A source-mode rebase moves every descendant of the stack bottom, including
+   * the empty `@` of another workspace; the hand-off reports and recovers them instead
+   * of leaving those workspaces stale by surprise.
+   */
+  readonly foreignWorkingCopies: readonly JjHandoffForeignWorkingCopyOutcome[];
 }
 
 /** Canonical filesystem spelling of one path (realpath when it exists, else the resolved absolute path). */
@@ -1628,6 +1670,7 @@ export class JjOperations {
         conflicts: [],
         needsCommit: true,
         dryRun: options.dryRun === true,
+        foreignWorkingCopies: [],
         message:
           "The working copy has uncommitted changes. Commit them first with jj_commit (description following this repository's style), then call jj_handoff again.",
       };
@@ -1678,6 +1721,7 @@ export class JjOperations {
       conflicts: [],
       needsCommit: false,
       dryRun: options.dryRun === true,
+      foreignWorkingCopies: [],
       message: '',
     };
 
@@ -1762,6 +1806,20 @@ export class JjOperations {
     await this.assertStackNotShared(cwd, first.changeId, requestedBookmark, signal);
     await this.assertDestinationCoversBase(cwd, target.revset, signal);
 
+    // A source-mode rebase moves every descendant of the stack bottom, including the
+    // working-copy commits of other workspaces based on the same history. Detect them
+    // before rewriting anything: live/edited ones refuse (the tool layer adds liveness),
+    // empty ones proceed and are recovered afterwards instead of being left stale.
+    const foreignCopies = await this.foreignWorkingCopies(cwd, first.changeId, workingCopy.changeId, signal);
+    const foreignReview = this.reviewForeignWorkingCopies(foreignCopies, options.reviewForeignWorkingCopies);
+    if (foreignReview.action === 'refuse') {
+      throw badInput(
+        foreignReview.message.trim().length > 0
+          ? foreignReview.message
+          : this.foreignWorkingCopiesRefusal(foreignCopies),
+      );
+    }
+
     if (dryRun) {
       // Planning only: the same validations ran, so a refused dry run is as meaningful
       // as a refused real one, but nothing was fetched, rebased or moved.
@@ -1771,7 +1829,8 @@ export class JjOperations {
         firstChangeId: first.changeId,
         stack,
         conflicts: this.conflictsIn(stack),
-        message: `Dry run: ${stack.length} change${stack.length === 1 ? '' : 's'} would be rebased onto ${target.revset}. Nothing was fetched, rebased or moved; call jj_handoff again without dryRun to perform it.${this.stackTruncationNote(stack)}`,
+        foreignWorkingCopies: foreignCopies.map((copy) => ({ ...copy })),
+        message: `Dry run: ${stack.length} change${stack.length === 1 ? '' : 's'} would be rebased onto ${target.revset}. Nothing was fetched, rebased or moved; call jj_handoff again without dryRun to perform it.${this.stackTruncationNote(stack)}${this.foreignCopiesDryRunNote(foreignCopies)}`,
         ...(requestedBookmark !== undefined && requestedBookmark.length > 0
           ? { bookmarkSkipped: `Bookmark ${requestedBookmark} was not moved because this was a dry run.` }
           : {}),
@@ -1783,6 +1842,11 @@ export class JjOperations {
     const conflicts = this.conflictsIn(stack);
     const rebasedParentCommitId = await this.parentCommitId(cwd, first.changeId, signal);
     const onTarget = rebasedParentCommitId !== undefined && rebasedParentCommitId === target.change.commitId;
+    const recovered = await this.recoverForeignWorkingCopies(
+      foreignReview.action === 'proceed' ? (foreignReview.recoverWorkspaceRoots ?? []) : [],
+      foreignCopies,
+      signal,
+    );
     const bookmarkOutcome = await this.moveRequestedBookmark(
       cwd,
       options.bookmark,
@@ -1799,7 +1863,8 @@ export class JjOperations {
       rebased: true,
       onTarget,
       conflicts,
-      message: `${message}${this.stackTruncationNote(stack)}`,
+      message: `${message}${this.stackTruncationNote(stack)}${this.foreignCopiesOutcomeNote(foreignCopies, recovered)}`,
+      foreignWorkingCopies: recovered,
       ...bookmarkOutcome,
     };
   }
@@ -1901,6 +1966,176 @@ export class JjOperations {
   /** Bottom-most change(s) of this workspace's stack above `target` (`roots(::@ ~ ::target)`). */
   private async stackRoots(cwd: string, target: string, signal?: AbortSignal): Promise<readonly JjChangeRecord[]> {
     return await this.log(cwd, `roots(::@ ~ ::(${target}))`, 32, signal);
+  }
+
+  /**
+   * Working copies of other workspaces inside the set a source-mode rebase would move.
+   *
+   * `jj rebase -s <first>` moves the whole descendant tree of `<first>`, not only
+   * `first::@`: another workspace created from the same pre-isolation commit (or the
+   * default workspace's empty `@`) is rewritten as well and becomes stale. This reads
+   * `working_copies() & (<first>::)` and maps each change to its workspace with one
+   * `jj workspace list` read, so the hand-off can refuse or recover them.
+   *
+   * @param cwd - workspace directory.
+   * @param first - bottom-most change of the stack being rebased.
+   * @param currentChangeId - this workspace's own `@`, always excluded.
+   * @param signal - cancellation signal.
+   * @returns one entry per foreign working-copy change (empty when only this workspace is affected).
+   */
+  private async foreignWorkingCopies(
+    cwd: string,
+    first: string,
+    currentChangeId: string,
+    signal?: AbortSignal,
+  ): Promise<JjHandoffForeignWorkingCopy[]> {
+    const copies = await this.readChangesAt(
+      cwd,
+      `(${first}):: & working_copies()`,
+      TPL_CHANGE,
+      signal,
+      this.config.maxLogLimit,
+    );
+    if (copies.length === 0) return [];
+    let states: readonly JjWorkspaceState[] = [];
+    try {
+      states = await this.workspaceStates(cwd, signal);
+    } catch {
+      // The copies are still reported; the tool layer refuses them when it cannot map
+      // a workspace, and the rebase remains the caller's decision.
+      states = [];
+    }
+    const byChange = new Map(states.map((state) => [state.changeId, state]));
+    const result: JjHandoffForeignWorkingCopy[] = [];
+    for (const copy of copies) {
+      if (copy.changeId === currentChangeId) continue;
+      const state = byChange.get(copy.changeId);
+      result.push({
+        workspaceName: state?.name ?? '(unknown)',
+        workspaceRoot: state?.root ?? '',
+        changeId: copy.changeId,
+        commitId: copy.commitId,
+        description: copy.description,
+        empty: copy.empty,
+        conflict: copy.conflict,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Apply the caller's foreign-working-copy policy (fail closed on a throwing review).
+   *
+   * Without a callback a copy with uncommitted content or conflicts refuses the
+   * hand-off, while empty copies proceed and are recovered by the service afterwards.
+   *
+   * @param copies - foreign working copies inside the moving set.
+   * @param review - optional tool-layer policy.
+   * @returns the proceed/refuse decision.
+   */
+  private reviewForeignWorkingCopies(
+    copies: readonly JjHandoffForeignWorkingCopy[],
+    review?: (copies: readonly JjHandoffForeignWorkingCopy[]) => JjHandoffForeignReview,
+  ): JjHandoffForeignReview {
+    if (copies.length === 0) return { action: 'proceed' };
+    if (review !== undefined) {
+      try {
+        return review(copies);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return {
+          action: 'refuse',
+          message: `jj_handoff could not evaluate the other workspaces a source-mode rebase would move (${bound(detail, 256).text}); nothing was rebased. Retry, or ask the user.`,
+        };
+      }
+    }
+    const blocked = copies.filter((copy) => !copy.empty || copy.conflict);
+    if (blocked.length > 0) return { action: 'refuse', message: this.foreignWorkingCopiesRefusal(blocked) };
+    return {
+      action: 'proceed',
+      recoverWorkspaceRoots: [...new Set(copies.map((copy) => copy.workspaceRoot).filter((root) => root.length > 0))],
+    };
+  }
+
+  /**
+   * Actionable refusal when a source-mode rebase would rewrite content of other workspaces.
+   *
+   * @param copies - the affected foreign working copies.
+   * @returns the model-facing message.
+   */
+  private foreignWorkingCopiesRefusal(copies: readonly JjHandoffForeignWorkingCopy[]): string {
+    const lines = copies.map(
+      (copy) =>
+        `  - ${copy.workspaceName}${copy.workspaceRoot.length > 0 ? ` (${copy.workspaceRoot})` : ''}${copy.description.length > 0 ? `: ${copy.description}` : ''}`,
+    );
+    return [
+      `jj_handoff refuses to rebase this stack: a source-mode rebase would also rewrite the working copy of ${copies.length} other workspace${copies.length === 1 ? '' : 's'} that still has uncommitted changes or conflicts:`,
+      ...lines,
+      'Commit or finish that work first (or ask its session to hand off and clean up), then run jj_handoff again. If the workspace belongs to an interrupted session, jj_workspace_list shows whether it is orphaned and jj_workspace_cleanup { workspace } unregisters it once its working copy is clean.',
+    ].join('\n');
+  }
+
+  /**
+   * Recover each workspace whose working copy the rebase moved (`jj workspace update-stale`).
+   *
+   * Fail-open: a workspace that cannot be recovered keeps its stale state (the next tool
+   * call from that session recovers it) and the failure is reported next to the result.
+   *
+   * @param roots - workspace roots requested by the review.
+   * @param copies - the affected foreign working copies.
+   * @param signal - cancellation signal.
+   * @returns the copies annotated with their recovery outcome.
+   */
+  private async recoverForeignWorkingCopies(
+    roots: readonly string[],
+    copies: readonly JjHandoffForeignWorkingCopy[],
+    signal?: AbortSignal,
+  ): Promise<JjHandoffForeignWorkingCopyOutcome[]> {
+    const outcomes = new Map<string, { readonly recovered: boolean; readonly recoveryError?: string }>();
+    for (const root of new Set(roots)) {
+      if (root.length === 0) continue;
+      try {
+        await this.updateStale(root, signal);
+        outcomes.set(root, { recovered: true });
+      } catch (error) {
+        const detail =
+          error instanceof JjError
+            ? error.detail.stderr.trim() || error.message
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        outcomes.set(root, { recovered: false, recoveryError: bound(detail, 256).text });
+      }
+    }
+    return copies.map((copy) => {
+      const outcome = copy.workspaceRoot.length > 0 ? outcomes.get(copy.workspaceRoot) : undefined;
+      return {
+        ...copy,
+        ...(outcome !== undefined ? { recovered: outcome.recovered } : {}),
+        ...(outcome?.recoveryError !== undefined ? { recoveryError: outcome.recoveryError } : {}),
+      };
+    });
+  }
+
+  /** Dry-run sentence naming the other workspaces the planned rebase would move. */
+  private foreignCopiesDryRunNote(copies: readonly JjHandoffForeignWorkingCopy[]): string {
+    if (copies.length === 0) return '';
+    return ` It would also move the working copy of ${copies.length} other workspace${copies.length === 1 ? '' : 's'} (${copies.map((copy) => copy.workspaceName).join(', ')}); a dry run reports them without recovering.`;
+  }
+
+  /** Result sentence naming the other workspaces the rebase moved and recovered. */
+  private foreignCopiesOutcomeNote(
+    copies: readonly JjHandoffForeignWorkingCopy[],
+    recovered: readonly JjHandoffForeignWorkingCopyOutcome[],
+  ): string {
+    if (copies.length === 0) return '';
+    const names = recovered
+      .map(
+        (copy) =>
+          `${copy.workspaceName}${copy.recovered === true ? ' (recovered)' : copy.recoveryError !== undefined ? ' (recovery failed)' : ''}`,
+      )
+      .join(', ');
+    return ` It also moved the working copy of ${copies.length} other workspace${copies.length === 1 ? '' : 's'} (${names}); run jj_workspace_update_stale there if a recovery failed.`;
   }
 
   /**
