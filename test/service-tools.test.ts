@@ -1831,6 +1831,110 @@ test('jj_workspace_cleanup: a restarted host keeps the recorded workspace owners
   assert.ok(!(await operationsAfterRestart.workspaceList(repo)).some((workspace) => workspace.name === 'resumed'));
 });
 
+test("jj_workspace_cleanup: rebases the default workspace's empty @ onto the finished stack", async (t) => {
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const fx = makeFixture(t, 'dsh-jj-cleanup-adopt-default');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const moved: string[] = [];
+  const workingDirectory = {
+    ensure: async () => fx.cwd as string,
+    set: async (_agent: unknown, path: string) => {
+      moved.push(path);
+      return path;
+    },
+  };
+  const definitions = definitionsByName(
+    jjToolDefinitions(toolContext(fx, toolService(fx, operations), resolveConfig({}), workingDirectory)),
+  );
+  const agent = { id: 'adopt-agent' };
+  fx.cwd = repo;
+  const wsPath = join(fx.root, 'ws-adopt');
+  await definitions.get('jj_workspace_add')!.execute({ path: wsPath, name: 'adopt', enter: false }, fakeExec(agent));
+  // Work committed inside the isolated workspace: its top is a real change, and the
+  // default workspace still holds the empty @ created before the isolation.
+  await writeFixtureFile(fx, wsPath, 'work.txt', 'work');
+  await mustRun(fx.run, ['jj', 'commit', '-m', 'feat: work'], wsPath);
+  const work = (await operations.log(wsPath, '@-', 1))[0];
+  assert.ok(work !== undefined);
+  const defaultBefore = (await operations.status(repo)).change;
+  assert.equal(defaultBefore.empty, true);
+
+  fx.cwd = wsPath;
+  const cleanup = definitions.get('jj_workspace_cleanup')!;
+  const value = (await cleanup.execute({}, fakeExec(agent))) as Record<string, unknown>;
+  assert.deepEqual(validateJsonSchemaValue(cleanup.output.schema, value), [], `output: ${JSON.stringify(value)}`);
+  const adopted = value['defaultWorkingCopy'] as {
+    changeId: string;
+    adopted: boolean;
+    ontoChangeId?: string;
+  };
+  assert.equal(adopted.adopted, true);
+  assert.equal(adopted.changeId, defaultBefore.changeId);
+  assert.equal(adopted.ontoChangeId, work.changeId);
+  assert.match(String(value['message']), /stays linear/);
+  // The default workspace is fresh and its @ now sits directly on the delivered commit,
+  // so the next work there continues the stack instead of forking it.
+  const defaultAfter = (await operations.status(repo)).change;
+  assert.equal(defaultAfter.changeId, defaultBefore.changeId);
+  assert.equal(defaultAfter.currentWorkingCopy, true);
+  const parent = (await operations.log(repo, '@-', 1))[0];
+  assert.equal(parent?.changeId, work.changeId);
+  assert.deepEqual(moved, [realpath(repo)]);
+});
+
+test('jj_workspace_cleanup: leaves the default working copy alone while another session uses it', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-cleanup-adopt-live');
+  await assertToolchain(fx.run, fx.root);
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  await writeFixtureFile(fx, repo, 'f.txt', 'base');
+  await commitWorkingCopy(fx, repo, 'chore: base');
+  await mustRun(fx.run, ['jj', 'bookmark', 'set', 'main', '-r', '@-'], repo);
+  const { runJj } = recordingRunner(fx);
+  const operations = new JjOperations({ runJj, config: {} });
+  const base = (await operations.log(repo, '@-', 1))[0];
+  assert.ok(base !== undefined);
+  const workingDirectory = {
+    ensure: async () => fx.cwd as string,
+    set: async (_agent: unknown, path: string) => path,
+  };
+  const definitions = definitionsByName(
+    jjToolDefinitions(
+      toolContext(fx, toolService(fx, operations), resolveConfig({}), workingDirectory, () => [
+        { sessionId: 'other-session', cwd: repo },
+      ]),
+    ),
+  );
+  const agent = { id: 'adopt-live-agent' };
+  fx.cwd = repo;
+  const wsPath = join(fx.root, 'ws-adopt-live');
+  await definitions
+    .get('jj_workspace_add')!
+    .execute({ path: wsPath, name: 'adopt-live', enter: false }, fakeExec(agent));
+  await writeFixtureFile(fx, wsPath, 'work.txt', 'work');
+  await mustRun(fx.run, ['jj', 'commit', '-m', 'feat: work'], wsPath);
+  const work = (await operations.log(wsPath, '@-', 1))[0];
+  assert.ok(work !== undefined);
+  const defaultBefore = (await operations.status(repo)).change;
+
+  fx.cwd = wsPath;
+  const value = (await definitions.get('jj_workspace_cleanup')!.execute({}, fakeExec(agent))) as Record<
+    string,
+    unknown
+  >;
+  const skipped = value['defaultWorkingCopy'] as { adopted: boolean; reason?: string };
+  assert.equal(skipped.adopted, false);
+  assert.equal(skipped.reason, 'live-session');
+  const defaultAfter = (await operations.status(repo)).change;
+  assert.equal(defaultAfter.changeId, defaultBefore.changeId, "the other session's working copy is untouched");
+  assert.equal((await operations.log(repo, '@-', 1))[0]?.changeId, base.changeId, 'the empty @ is still a sibling');
+});
+
 test('operation layer: jj_handoff rejects a stack that is not the whole stack, and root destinations', async (t) => {
   const { fx, ws, operations } = await makeHandoffFixture(t, 'dsh-jj-handoff-validation');
   await writeFixtureFile(fx, ws, 'one.txt', 'one');

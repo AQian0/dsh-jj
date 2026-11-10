@@ -63,6 +63,20 @@ export interface JjWorkspaceCleanupResult {
   readonly prunedEmptyChangeId?: string;
   /** True when the workspace was already unregistered and only the record was removed. */
   readonly alreadyForgotten?: boolean;
+  /** What happened to the default workspace's empty working copy during this cleanup. */
+  readonly defaultWorkingCopy?: JjCleanupDefaultWorkingCopy;
+}
+
+/** Outcome of the cleanup-time linearization of the default workspace's working copy. */
+export interface JjCleanupDefaultWorkingCopy {
+  /** The default workspace's empty working-copy change the cleanup looked at. */
+  readonly changeId: string;
+  /** True when it was rebased onto the finished stack's top. */
+  readonly adopted: boolean;
+  /** Change it was rebased onto, when adopted. */
+  readonly ontoChangeId?: string;
+  /** Why it was left in place, when it was not adopted. */
+  readonly reason?: string;
 }
 
 /** What the flow reads from the host: the session working directory, nothing else. */
@@ -84,6 +98,7 @@ export type CleanupOperations = Pick<
   | 'readAt'
   | 'log'
   | 'abandon'
+  | 'rebase'
 >;
 
 /** Ownership and liveness facts supplied by the tool layer. */
@@ -261,6 +276,65 @@ function retainedNote(retained: boolean, prunedEmptyChangeId: string | undefined
 }
 
 /**
+ * Bring the default workspace's empty working copy onto the finished stack.
+ *
+ * The standard flow commits in the shared default workspace, then isolates in a new
+ * workspace based on that commit: the default workspace keeps its empty `@` as a sibling
+ * of the isolated stack. After the hand-off and cleanup, continuing in the default
+ * workspace would create a sibling branch next to the just-delivered stack (an empty
+ * fork that needs manual integration). Rebasing that empty change onto the stack tip
+ * keeps the history linear.
+ *
+ * Strictly guarded: only an empty, conflict-free, unpublished working copy that has no
+ * descendants of its own is moved, only when no live session occupies the default
+ * workspace and the current workspace's stack top is a real, conflict-free change.
+ * Any failure leaves the graph untouched and is reported as a skip reason.
+ *
+ * @param options - operations, the current workspace, the default workspace and liveness.
+ * @returns the adoption outcome (never throws).
+ */
+async function adoptDefaultWorkingCopy(options: {
+  readonly operations: CleanupOperations;
+  readonly cwd: string;
+  readonly defaultRoot: string;
+  readonly defaultChangeId: string;
+  readonly isWorkspaceLive: (root: string) => boolean;
+  readonly signal?: AbortSignal;
+}): Promise<JjCleanupDefaultWorkingCopy> {
+  const { operations, cwd, defaultRoot, signal } = options;
+  const skip = (reason: string, changeId = options.defaultChangeId): JjCleanupDefaultWorkingCopy => ({
+    changeId,
+    adopted: false,
+    reason,
+  });
+  if (options.isWorkspaceLive(defaultRoot)) return skip('live-session');
+  const status = await readWorkingCopyOnceRecovered(operations, defaultRoot, signal);
+  if (status === undefined) return skip('unreadable-working-copy');
+  const workingCopy = status.change;
+  const changeId = workingCopy.changeId;
+  if (!workingCopy.empty) return skip('dirty-working-copy', changeId);
+  if (workingCopy.conflict) return skip('conflicted-working-copy', changeId);
+  if (workingCopy.immutable || workingCopy.remoteBookmarks.length > 0 || workingCopy.bookmarks.length > 0) {
+    return skip('published-working-copy', changeId);
+  }
+  try {
+    const descendants = await operations.log(cwd, `(${changeId}):: ~ (${changeId})`, 1, signal);
+    if (descendants.length > 0) return skip('has-descendants', changeId);
+    const parents = await operations.log(cwd, '@-', 4, signal);
+    const tip = parents.length === 1 ? parents[0] : undefined;
+    if (tip === undefined) return skip('merge-working-copy', changeId);
+    if (tip.conflict) return skip('conflicted-stack-top', changeId);
+    if (tip.empty && tip.description.length === 0) return skip('no-content-stack', changeId);
+    const above = await operations.log(cwd, `(${changeId}) & ((${tip.changeId})::)`, 1, signal);
+    if (above.length > 0) return { changeId, adopted: false, ontoChangeId: tip.changeId, reason: 'already-adopted' };
+    await operations.rebase(cwd, changeId, tip.changeId, signal, 'source');
+    return { changeId, adopted: true, ontoChangeId: tip.changeId };
+  } catch (error) {
+    return skip(`rebase-failed: ${error instanceof Error ? error.message : String(error)}`, changeId);
+  }
+}
+
+/**
  * Unregister this session's workspace and move the session back to the default one.
  *
  * @param options - operations, ownership check, host, agent, workspace and signal.
@@ -273,7 +347,7 @@ export async function cleanupWorkspace(options: CleanupWorkspaceOptions): Promis
   const workspaceRoot = descriptor.root;
 
   const status = await readWorkingCopyOnceRecovered(operations, options.cwd, signal);
-  const workspaces = await operations.workspaceList(options.cwd, signal).catch(() => []);
+  const workspaces = await operations.workspaceStates(options.cwd, signal).catch(() => []);
   const defaultWorkspace = workspaces.find((workspace) => workspace.name === 'default');
   const host = options.host;
   const canSwitch = options.agent !== undefined && typeof host.workingDirectory?.set === 'function';
@@ -290,6 +364,18 @@ export async function cleanupWorkspace(options: CleanupWorkspaceOptions): Promis
   if (status === undefined || defaultWorkspace === undefined) {
     throw new Error(refusalMessage('unreadable-working-copy', workspaceName, workspaceRoot));
   }
+
+  // Isolated work usually started from a commit in the default workspace, whose empty
+  // `@` is now a sibling of the finished stack. Move it on top before returning so the
+  // next work in the default workspace does not fork the delivered history.
+  const defaultWorkingCopy = await adoptDefaultWorkingCopy({
+    operations,
+    cwd: options.cwd,
+    defaultRoot: defaultWorkspace.root,
+    defaultChangeId: defaultWorkspace.changeId,
+    isWorkspaceLive: options.isWorkspaceLive,
+    signal,
+  });
 
   await (host.workingDirectory as { set(agent: unknown, path: string, signal?: AbortSignal): Promise<string> }).set(
     options.agent,
@@ -313,6 +399,9 @@ export async function cleanupWorkspace(options: CleanupWorkspaceOptions): Promis
   const prunedEmptyChangeId = retained
     ? await pruneEmptyWorkingCopy(operations, defaultWorkspace.root, forgotten.changeId, signal)
     : undefined;
+  const adoptionNote = defaultWorkingCopy.adopted
+    ? ` The default workspace's empty working copy ${defaultWorkingCopy.changeId} was rebased onto ${defaultWorkingCopy.ontoChangeId} so continuing there stays linear.`
+    : '';
   return {
     forgotten: true,
     mode: 'current',
@@ -320,9 +409,10 @@ export async function cleanupWorkspace(options: CleanupWorkspaceOptions): Promis
     workspaceRoot,
     currentWorkspace: 'default',
     currentWorkspaceRoot: defaultWorkspace.root,
-    message: `${message}${retainedNote(retained, prunedEmptyChangeId, forgotten)}`,
+    message: `${message}${retainedNote(retained, prunedEmptyChangeId, forgotten)}${adoptionNote}`,
     directoryNote: `The directory ${workspaceRoot} is no longer a jj working copy; its files remain on disk and nothing tracked was lost. The user can delete it whenever convenient.`,
     ...(prunedEmptyChangeId !== undefined ? { prunedEmptyChangeId } : {}),
+    defaultWorkingCopy,
   };
 }
 
