@@ -335,9 +335,12 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
     - 正文是会话作用域的 slot 组件:从 props 取 `sessionId` 与 `useSessions`(选择 `byId[sessionId].cwd`),
       再 `fetch('api/jj.overview?cwd=…')`;没有 cwd 时只显示加载态。所有网络与渲染失败都降级为一句说明,
       不得抛出。
-    - 工具卡片注册在 `tool.call.toolview`,**key 必须是 wire 工具名**(写错就静默落到通用行);组件读
-      `phase`/`block`/`t`,参数从 `block.call.argsRaw` 解析、结果从 `block.content` 的第一段 text 解析,
-      两者都可能不是 JSON,必须降级为空摘要而不是抛错。卡片只做摘要,不做写操作入口。
+    - 工具行注册在 `tool.call.toolview`,**key 必须是 wire 工具名**(写错就静默落到通用行);组件读
+      `phase`/`block`/`t`/`useDisclosure`,参数从 `block.call.argsRaw` 解析、结果从 `block.content` 的第一段
+      text 解析,两者都可能不是 JSON,必须降级为空摘要而不是抛错。渲染形态必须与 DSH 内置工具行一致
+      (`@deepseek-ai/dsh-client-ui-primitives` 的 `DisclosureRow` + 图标:24px 折叠行、hover 箭头、点击展开),
+      不要画带边框的独立卡片——工具调用夹在流式思考步骤里,卡片会打断行节奏;宿主缺少 primitives 或
+      `useDisclosure` 时退化为同高度纯文本行 / 本地展开状态,不得抛错。行只做摘要与只读展开,不做写操作入口。
     - `apply` 的每个注册都要 try/catch 并可降级:宿主缺少 sidebar-right/locale 时只登记能登记的部分,
       客户端 bundle 激活失败会拖垮整个页面。改面板时同步 `test/build.test.ts`(bundle 形态与 loader id、
       body 冒烟渲染)、`test/panel-host.test.ts` 与 README「可视化面板」。

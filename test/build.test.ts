@@ -663,8 +663,21 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
     useState: <T>(initial: T): [T, (next: T) => void] => [initial, () => {}],
     useEffect: (): void => {},
   };
+  // The shell's frozen platform table provides the shared UI primitives; the tool rows
+  // reuse its disclosure row and icons, so the stub mirrors that module's shape.
+  const primitivesStub: Record<string, unknown> = {
+    DisclosureRow: (props: Record<string, unknown>): FakeElement => ({ type: 'DisclosureRow', props }),
+    IconChecklistOutlineRegular: (props: Record<string, unknown>): FakeElement => ({ type: 'IconChecklist', props }),
+    IconBranchOutlineRegular: (props: Record<string, unknown>): FakeElement => ({ type: 'IconBranch', props }),
+    IconWorkspaceTreeOutlineRegular: (props: Record<string, unknown>): FakeElement => ({
+      type: 'IconWorkspaceTree',
+      props,
+    }),
+    IconShareOutlineRegular: (props: Record<string, unknown>): FakeElement => ({ type: 'IconShare', props }),
+  };
   const clientModule = loaded.factory((id) => {
     if (id === 'react') return reactStub;
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitivesStub;
     throw new Error(`unexpected host module request: ${id}`);
   });
   assert.equal(typeof clientModule.apply, 'function', 'the client module exposes apply');
@@ -775,35 +788,73 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   assert.equal(title({ t: zhT }), 'Jujutsu 状态');
   assert.equal(title({ t: (key: string) => key }), 'title', 'an unbound title still renders its key');
 
-  // Each tool card renders a compact summary from the recorded args/result JSON.
+  // Every tool view renders one compact disclosure row (the same shape as DSH's own
+  // tool rows), never a standalone bordered card: these rows sit inside the streaming
+  // thinking steps, where a big card breaks the row rhythm.
   const statusCard = slots[2]?.component as (props: Record<string, unknown>) => FakeElement;
-  const statusTree = statusCard({
+  const statusBlock = {
+    call: { name: 'jj_status', argsRaw: JSON.stringify({ details: true }) },
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          changeId: 'abcdefghijkl',
+          commitId: '0123456789abcdef',
+          description: 'feat: seed',
+          empty: false,
+          diffStat: '1 file changed',
+          workspaceRoot: '/tmp/repo',
+        }),
+      },
+    ],
+    isError: false,
+  };
+  const statusTree = statusCard({ phase: 'result', t: (key: string) => key, block: statusBlock });
+  assert.equal(statusTree.type, primitivesStub['DisclosureRow'], 'the row reuses the host disclosure chrome');
+  assert.equal(statusTree.props['title'], 'statusCard', 'the row title is localized');
+  assert.equal(
+    (statusTree.props['icon'] as FakeElement).type,
+    primitivesStub['IconChecklistOutlineRegular'],
+    'the row keeps a tool icon',
+  );
+  const statusCollapsed = JSON.stringify(statusTree.props['collapsedContent']);
+  assert.match(statusCollapsed, /abcdefghij/, 'the change id is summarized (short form)');
+  assert.match(statusCollapsed, /feat: seed/, 'the description is summarized');
+  assert.equal(statusTree.props['expandable'], true, 'a settled call with details is expandable');
+  assert.equal(statusTree.props['open'], false, 'the body starts collapsed');
+  // The expanded body carries the precise ids and the diff line.
+  const statusExpanded = statusCard({
     phase: 'result',
     t: (key: string) => key,
-    block: {
-      call: { name: 'jj_status', argsRaw: JSON.stringify({ details: true }) },
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            changeId: 'abcdefghijkl',
-            description: 'feat: seed',
-            empty: false,
-            diffStat: '1 file',
-          }),
-        },
-      ],
-      isError: false,
-    },
+    useDisclosure: () => ({ expanded: true, toggle: () => {} }),
+    block: statusBlock,
   });
-  assert.equal(statusTree.props['className'], 'dshjj-card');
-  const statusText = JSON.stringify(statusTree.props);
-  assert.match(statusText, /abcdefghij/, 'the change id is summarized (short form)');
-  assert.match(statusText, /feat: seed/, 'the description is summarized');
+  assert.equal(statusExpanded.props['open'], true, 'the chat-owned disclosure opens the body');
+  const statusDetail = JSON.stringify(statusExpanded.props['children']);
+  assert.match(statusDetail, /0123456789abcdef/, 'the expanded body shows the full commit id');
+  assert.match(statusDetail, /1 file changed/, 'the expanded body keeps the diff summary');
+  // A call that has not settled is a non-expandable line with the localized state.
+  const runningTree = statusCard({
+    phase: 'start',
+    t: (key: string) => key,
+    block: { phase: 'start', name: 'jj_status' },
+  });
+  assert.equal(runningTree.props['expandable'], false, 'a running call has no body yet');
+  assert.equal(runningTree.props['running'], true, 'a running call shimmers');
+  assert.match(JSON.stringify(runningTree.props['collapsedContent']), /running/, 'the running state is localized');
 
-  // Card lines go through the same dictionary; a hardcoded English fragment here would
+  // Row copy goes through the same dictionary; a hardcoded English fragment here would
   // reappear in the Chinese UI.
   const logCard = slots[3]?.component as (props: Record<string, unknown>) => FakeElement;
+  const logChanges = Array.from({ length: 8 }, (_, index) => ({
+    changeId: `change-${String(index)}`,
+    description: `commit ${String(index)}`,
+  }));
+  const logBlock = {
+    call: { name: 'jj_log', argsRaw: JSON.stringify({ revset: '@ | @-' }) },
+    content: [{ type: 'text', text: JSON.stringify({ changes: logChanges, truncated: true }) }],
+    isError: false,
+  };
   const logKeys = new Set<string>();
   const logTree = logCard({
     phase: 'result',
@@ -811,19 +862,45 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
       logKeys.add(key);
       return zhT(key);
     },
+    block: logBlock,
+  });
+  assert.equal(logTree.props['title'], '提交历史', 'the log row title is localized');
+  assert.ok(logKeys.has('revisionCount'), 'the log row localizes its revision count');
+  assert.ok(logKeys.has('moreItems'), 'the capped detail list localizes its overflow');
+  assert.ok(logKeys.has('truncated'), 'a truncated result says so');
+  const logCollapsed = JSON.stringify(logTree.props['collapsedContent']);
+  assert.match(logCollapsed, /@ \| @-/, 'the requested revset is summarized');
+  assert.match(logCollapsed, /8 条修订/, 'the matched revision count is localized');
+  const logDetail = JSON.stringify(logTree.props['children']);
+  assert.match(logDetail, /commit 0/, 'the expanded body lists the matched changes');
+  assert.match(logDetail, /另有 3 项/, 'detail rows beyond the cap are counted');
+  assert.match(logDetail, /结果已截断/, 'the truncated marker reaches the row');
+
+  const workspacesCard = slots[4]?.component as (props: Record<string, unknown>) => FakeElement;
+  const workspacesTree = workspacesCard({
+    phase: 'result',
+    t: zhT,
     block: {
-      call: { name: 'jj_log', argsRaw: JSON.stringify({ revset: '@ | @-' }) },
+      call: { name: 'jj_workspace_list', argsRaw: '{}' },
       content: [
         {
           type: 'text',
-          text: JSON.stringify({ changes: [{ changeId: 'a' }, { changeId: 'b' }, { changeId: 'c' }] }),
+          text: JSON.stringify({
+            workspaces: [
+              { name: 'default', root: '/repo', isCurrent: true },
+              { name: 'feat', root: '/repo-feat', isCurrent: false },
+            ],
+          }),
         },
       ],
       isError: false,
     },
   });
-  assert.ok(logKeys.has('revisionCount'), 'the log card localizes its revision count');
-  assert.match(JSON.stringify(logTree.props), /3 条修订/);
+  assert.equal(workspacesTree.props['title'], '工作区清单');
+  assert.match(JSON.stringify(workspacesTree.props['collapsedContent']), /2 个工作区/);
+  const workspacesDetail = JSON.stringify(workspacesTree.props['children']);
+  assert.match(workspacesDetail, /default · 当前/, 'the current workspace is marked');
+  assert.match(workspacesDetail, /\/repo-feat/, 'each workspace root is listed');
 
   const handoffCard = slots[5]?.component as (props: Record<string, unknown>) => FakeElement;
   const handoffKeys = new Set<string>();
@@ -849,9 +926,15 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
       isError: false,
     },
   });
-  assert.match(JSON.stringify(handoffTree.props), /resolve the conflict/, 'the recommended action is shown');
-  assert.ok(handoffKeys.has('rebased'), 'the handoff card localizes its rebase state');
-  assert.ok(handoffKeys.has('conflictCount'), 'the handoff card localizes its conflict count');
+  assert.equal(handoffTree.props['title'], 'handoffCard');
+  assert.match(JSON.stringify(handoffTree.props['collapsedContent']), /main/, 'the destination is summarized');
+  assert.match(
+    JSON.stringify(handoffTree.props['children']),
+    /resolve the conflict/,
+    'the recommended action is shown',
+  );
+  assert.ok(handoffKeys.has('rebased'), 'the handoff row localizes its rebase state');
+  assert.ok(handoffKeys.has('conflictCount'), 'the handoff row localizes its conflict count');
 
   const integratedTree = handoffCard({
     phase: 'result',
@@ -871,12 +954,38 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   assert.match(integratedText, /已集成/, 'an already-integrated hand-off is localized');
   assert.match(integratedText, /1 处冲突/, 'the localized conflict count fills its placeholder');
 
-  // A malformed payload degrades to a title-only card instead of throwing.
+  // A failed call keeps its one-line error text and exposes the raw payload on expand.
+  const failedTree = logCard({
+    phase: 'result',
+    t: zhT,
+    block: {
+      call: { name: 'jj_log', argsRaw: '{}' },
+      content: [{ type: 'text', text: 'boom: not a jj repository' }],
+      isError: true,
+    },
+  });
+  assert.equal(failedTree.props['title'], '提交历史', 'a failed call keeps its tool title');
+  assert.match(JSON.stringify(failedTree.props['collapsedContent']), /boom: not a jj repository/);
+  assert.equal(failedTree.props['expandable'], true, 'a failed call exposes its payload');
+
+  // A malformed payload degrades to a title-only row instead of throwing.
   assert.doesNotThrow(() =>
     statusCard({ phase: 'result', t: (key: string) => key, block: { call: { argsRaw: 'not json' } } }),
   );
   // A host without sidebar-right must not throw during activation.
   assert.doesNotThrow(() => (clientModule.apply as (ctx: unknown) => void)({}));
+
+  // A host that does not expose the shared primitives still gets a compact one-line
+  // row (never a bordered card, and never a thrown render).
+  const fallbackModule = loaded.factory((id) => {
+    if (id === 'react') return reactStub;
+    throw new Error(`host module missing: ${id}`);
+  });
+  assert.equal(typeof fallbackModule.apply, 'function');
+  const fallbackTree = logCard({ phase: 'result', t: (key: string) => key, block: logBlock });
+  assert.equal(fallbackTree.props['className'], 'dshjj-tool-row');
+  assert.match(JSON.stringify(fallbackTree.props), /logCard/, 'the fallback row keeps its title');
+  assert.match(JSON.stringify(fallbackTree.props), /@ \\| @-/, 'the fallback row keeps its summary');
 });
 
 test('the built guard entry installs a working guard against a real jj workspace', async (t) => {

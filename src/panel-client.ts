@@ -100,6 +100,13 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     noConflicts: '无冲突',
     conflictCount: '{count} 处冲突',
     revisionCount: '{count} 条修订',
+    workspaceCount: '{count} 个工作区',
+    moreItems: '另有 {count} 项',
+    destination: '目标',
+    diffStat: '改动统计',
+    integration: '集成',
+    nextAction: '下一步',
+    truncated: '结果已截断',
     rebased: '已 rebase',
     alreadyIntegrated: '已集成',
   },
@@ -145,6 +152,13 @@ const DICTIONARIES: Record<string, Record<string, string>> = {
     noConflicts: 'no conflicts',
     conflictCount: '{count} conflicts',
     revisionCount: '{count} revisions',
+    workspaceCount: '{count} workspaces',
+    moreItems: '{count} more',
+    destination: 'Destination',
+    diffStat: 'Diff stat',
+    integration: 'Integration',
+    nextAction: 'Next step',
+    truncated: 'Result truncated',
     rebased: 'rebased',
     alreadyIntegrated: 'already integrated',
   },
@@ -249,6 +263,17 @@ const PANEL_CSS = `
 .dshjj-chip[data-tone=muted]{color:var(--dsw-alias-label-tertiary)}
 .dshjj-card{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);padding:8px 10px;display:flex;flex-direction:column;gap:5px;background:var(--dsw-alias-bg-layer-1);min-width:0}
 .dshjj-card[data-current=true]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent)}
+.dshjj-tool-row{display:flex;align-items:center;height:calc(24px + var(--dsh-content-font-delta,0px));min-width:0;overflow:hidden;color:var(--dsw-alias-label-tertiary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px))}
+.dshjj-tool-row-title{flex:none;color:inherit}
+.dshjj-tool-collapsed{display:inline-flex;align-items:center;flex:1 1 auto;min-width:0;overflow:hidden}
+.dshjj-tool-sep{display:inline-block;flex:none;width:2px;height:2px;border-radius:1px;background:var(--dsw-alias-label-caption);margin:0 8px}
+.dshjj-tool-summary{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px))}
+.dshjj-tool-summary[data-tone=error]{color:var(--dsw-alias-state-error-primary)}
+.dshjj-tool-detail{display:flex;flex-direction:column;gap:2px;padding:2px 0 6px 22px;min-width:0}
+.dshjj-tool-dkv{display:flex;align-items:baseline;gap:8px;min-width:0;font-size:12px;line-height:18px}
+.dshjj-tool-dk{flex:none;min-width:64px;color:var(--dsw-alias-label-tertiary)}
+.dshjj-tool-dv{min-width:0;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshjj-tool-raw{max-height:180px;margin:2px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--dsh-font-family-code,ui-monospace,monospace);font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .dshjj-kv{display:flex;gap:8px;align-items:baseline;min-width:0}
 .dshjj-k{color:var(--dsw-alias-label-tertiary);font-size:11px;min-width:54px;flex:none}
 .dshjj-v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary)}
@@ -296,6 +321,44 @@ function ensurePanelStyles(): void {
 
 /** React implementation captured from the host module factory. */
 let ReactImpl: ReactLike | undefined;
+
+/** Host module `require` captured from the bundle factory (used lazily for primitives). */
+let hostRequire: RequireFn | undefined;
+
+/** Cached `@deepseek-ai/dsh-client-ui-primitives` module, resolved on first tool render. */
+let primitivesModule: Record<string, unknown> | undefined;
+/** Whether the lazy primitives lookup above already ran (regardless of its outcome). */
+let primitivesResolved = false;
+
+/** Forget the lazy primitives lookup; a bundle materialization always starts fresh. */
+function resetHostModules(): void {
+  primitivesResolved = false;
+  primitivesModule = undefined;
+}
+
+/**
+ * Resolve the shell's shared UI primitives lazily.
+ *
+ * `@deepseek-ai/dsh-client-ui-primitives` lives in the shell's frozen platform module
+ * table, so every client bundle may require it. Resolving on first render (not at
+ * activation) keeps a bundle loadable when a host omits it: the tool views then degrade
+ * to a compact plain row instead of failing the whole page.
+ *
+ * @returns the primitives module, or `undefined` when this host does not provide it.
+ */
+function hostPrimitives(): Record<string, unknown> | undefined {
+  if (!primitivesResolved) {
+    primitivesResolved = true;
+    if (hostRequire !== undefined) {
+      try {
+        primitivesModule = recordOf(hostRequire('@deepseek-ai/dsh-client-ui-primitives'));
+      } catch {
+        primitivesModule = undefined;
+      }
+    }
+  }
+  return primitivesModule;
+}
 
 /** Create one element (the bundle cannot use JSX: it is a classic script). */
 function h(type: unknown, props?: Readonly<Record<string, unknown>> | null, ...children: unknown[]): unknown {
@@ -680,6 +743,52 @@ interface ToolViewProps {
   readonly phase?: string;
   readonly block?: unknown;
   readonly t?: (key: string) => string;
+  /**
+   * Chat-owned expansion state for one call. The host hands its stable `useDisclosure`
+   * to every atomic tool view so collapsing the surrounding turn resets a row body;
+   * hosts from before that contract omit it and the row falls back to local state.
+   */
+  readonly useDisclosure?: () => { readonly expanded?: boolean; readonly toggle?: () => void };
+}
+
+/** One labelled line in an expanded tool row. */
+interface ToolDetail {
+  readonly label: string;
+  readonly value: string;
+}
+
+/** Everything one tool view renders: a localized title, a one-line summary and details. */
+interface ToolCardModel {
+  readonly title: string;
+  readonly summary: string;
+  readonly tone: 'none' | 'error';
+  readonly details: readonly ToolDetail[];
+  readonly raw?: string;
+}
+
+/** Above this many labelled lines an expanded row ends with a localized "n more". */
+const MAX_TOOL_DETAILS = 6;
+
+/** Resolve a localized translator; a host seat that misses keys falls back to English. */
+function translator(props: ToolViewProps): (key: string) => string {
+  const fallback = (key: string): string => DICTIONARIES.en?.[key] ?? key;
+  const t = props.t;
+  if (typeof t !== 'function') return fallback;
+  return (key: string): string => {
+    const value = t(key);
+    return typeof value === 'string' && value.length > 0 ? value : fallback(key);
+  };
+}
+
+/** Read a non-empty string field without trusting a payload's shape. */
+function stringOf(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** First line of a multi-line payload (a collapsed row stays one line). */
+function firstLine(text: string): string {
+  const newline = text.indexOf('\n');
+  return newline === -1 ? text : text.slice(0, newline);
 }
 
 /** Read a nested record without trusting its shape. */
@@ -729,85 +838,280 @@ function toolResult(block: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-/** Human-readable state of one tool call. */
-function callState(props: ToolViewProps, t: (key: string) => string): string {
-  if (props.phase === 'preparing' || props.phase === 'start') return t('running');
-  const block = recordOf(props.block);
-  if (block?.['isError'] === true) return t('failedCall');
-  return '';
+/** First non-empty plain-text result item, used for error summaries and raw bodies. */
+function toolResultText(block: unknown): string | undefined {
+  const content = recordOf(block)?.['content'];
+  if (!Array.isArray(content)) return undefined;
+  for (const item of content) {
+    const text = recordOf(item)?.['text'];
+    if (typeof text === 'string' && text.trim().length > 0) return text;
+  }
+  return undefined;
 }
 
-/** One compact tool card: a title row plus at most three detail lines. */
-function toolCard(props: ToolViewProps, title: string, summary: string, lines: readonly string[]): unknown {
-  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
-  const state = callState(props, t);
+/**
+ * Lifecycle of one atomic call: `preparing`/`start` before dispatch, then a result.
+ *
+ * A settled result block carries `kind` plus the recorded call/result (`call`,
+ * `content`, `error`); before dispatch the block carries only a `phase` discriminator
+ * (`preparing` while arguments stream, `start` once dispatched). The checks stay
+ * tolerant because projections from older hosts omit parts of that shape.
+ */
+function toolState(props: ToolViewProps): 'preparing' | 'running' | 'error' | 'ok' {
+  const block = recordOf(props.block);
+  if (block === undefined) return props.phase === 'preparing' ? 'preparing' : 'running';
+  const settled = 'kind' in block || 'call' in block || 'content' in block || 'isError' in block || 'error' in block;
+  if (!settled) return block['phase'] === 'preparing' ? 'preparing' : 'running';
+  return block['isError'] === true || block['error'] !== undefined ? 'error' : 'ok';
+}
+
+/**
+ * Chat-owned disclosure hook, with local state when the host does not pass one.
+ *
+ * The presence of `props.useDisclosure` is constant for the lifetime of a mounted row
+ * (the chat always or never composes it), so calling it behind this branch keeps the
+ * hook order stable.
+ */
+function useToolDisclosure(props: ToolViewProps): { expanded: boolean; toggle: () => void } {
+  const [expanded, setExpanded] = ReactImpl?.useState(false) ?? [false, () => {}];
+  const host = props.useDisclosure;
+  if (typeof host === 'function') {
+    const state: { expanded?: boolean; toggle?: () => void } = host();
+    return {
+      expanded: state.expanded === true,
+      toggle: typeof state.toggle === 'function' ? state.toggle : () => {},
+    };
+  }
+  return { expanded, toggle: () => setExpanded(!expanded) };
+}
+
+/** One 14px leading icon from the host's shared primitives, or nothing without them. */
+function toolIcon(name: string): unknown {
+  const icon = hostPrimitives()?.[name];
+  return typeof icon === 'function' ? h(icon, { size: 14 }) : undefined;
+}
+
+/** Expanded body: labelled lines plus the raw error payload when the call failed. */
+function toolDetailBody(model: ToolCardModel): unknown {
   return h(
     'div',
-    { className: 'dshjj-card' },
-    h(
-      'div',
-      { className: 'dshjj-row-top' },
-      h('span', { className: 'dshjj-k' }, title),
-      h('span', { className: 'dshjj-desc' }, summary),
-      state.length > 0 ? chip(state, 'muted') : null,
+    { className: 'dshjj-tool-detail' },
+    ...model.details.map((detail, index) =>
+      h(
+        'div',
+        { className: 'dshjj-tool-dkv', key: `detail-${String(index)}` },
+        detail.label.length > 0 ? h('span', { className: 'dshjj-tool-dk' }, detail.label) : null,
+        h('span', { className: 'dshjj-tool-dv', title: detail.value }, detail.value),
+      ),
     ),
-    ...lines
-      .filter((line) => line.length > 0)
-      .slice(0, 3)
-      .map((line) => h('span', { className: 'dshjj-note' }, line)),
+    model.raw === undefined ? null : h('pre', { className: 'dshjj-tool-raw' }, model.raw),
   );
 }
 
-/** `jj_status` card: where the working copy is, plus the diff summary when asked for. */
-function JjStatusCard(props: ToolViewProps): unknown {
-  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
-  const result = toolResult(props.block);
-  const changeId = typeof result?.['changeId'] === 'string' ? shortId(result['changeId']) : '';
-  const description = typeof result?.['description'] === 'string' ? result['description'] : '';
-  const state: string[] = [];
-  if (result?.['empty'] === true) state.push(t('empty'));
-  if (result?.['conflict'] === true) state.push(t('conflict'));
-  const lines: string[] = [];
-  if (typeof result?.['diffStat'] === 'string') lines.push(result['diffStat'].split('\n')[0] ?? '');
-  return toolCard(props, t('statusCard'), [changeId, description, ...state].filter(Boolean).join(' · '), lines);
+/** Keep one long stack from filling the transcript; the tail is counted, not dropped. */
+function cappedDetails(details: readonly ToolDetail[], t: (key: string) => string): ToolDetail[] {
+  if (details.length <= MAX_TOOL_DETAILS) return [...details];
+  return [
+    ...details.slice(0, MAX_TOOL_DETAILS),
+    { label: '', value: countText(t('moreItems'), details.length - MAX_TOOL_DETAILS) },
+  ];
 }
 
-/** `jj_log` card: the requested revset and how many revisions came back. */
-function JjLogCard(props: ToolViewProps): unknown {
-  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+/**
+ * Render one tool call as a compact disclosure row.
+ *
+ * This mirrors DSH's own tool rows (24px collapsed line, leading icon, hover chevron,
+ * click to expand) instead of drawing a bordered card: the call tree sits inside the
+ * streaming "thinking steps" flow, where a standalone card breaks the row rhythm.
+ */
+function toolRow(props: ToolViewProps, icon: string, model: ToolCardModel): unknown {
+  ensurePanelStyles();
+  const t = translator(props);
+  const state = toolState(props);
+  const running = state === 'preparing' || state === 'running';
+  const expandable = !running && (model.details.length > 0 || model.raw !== undefined);
+  const disclosure = useToolDisclosure(props);
+  const open = expandable && disclosure.expanded;
+  const summary = running ? t('running') : model.summary;
+  const collapsed =
+    summary.length === 0
+      ? null
+      : h(
+          'span',
+          { className: 'dshjj-tool-collapsed' },
+          h('span', { className: 'dshjj-tool-sep', 'aria-hidden': 'true' }),
+          h('span', { className: 'dshjj-tool-summary', 'data-tone': model.tone }, summary),
+        );
+  const primitives = hostPrimitives();
+  const disclosureRow = primitives?.['DisclosureRow'];
+  if (typeof disclosureRow === 'function') {
+    return h(
+      disclosureRow,
+      {
+        icon: toolIcon(icon),
+        title: model.title,
+        running,
+        open,
+        expandable,
+        expandOnRowClick: true,
+        keepContentWhenOpen: true,
+        onToggle: disclosure.toggle,
+        collapsedContent: collapsed,
+      },
+      toolDetailBody(model),
+    );
+  }
+  // Hosts without the shared primitives still get a compact one-line row; never fall
+  // back to a bordered card, which is exactly what looked wrong in the step flow.
+  return h(
+    'div',
+    { className: 'dshjj-tool-row', 'data-state': state },
+    h('span', { className: 'dshjj-tool-row-title' }, model.title),
+    collapsed,
+  );
+}
+
+/** Collapse a failed call into a one-line error summary plus its raw payload. */
+function failedModel(props: ToolViewProps, t: (key: string) => string, title: string): ToolCardModel | undefined {
+  if (toolState(props) !== 'error') return undefined;
+  const raw = toolResultText(props.block);
+  return {
+    title,
+    summary: raw === undefined ? t('failedCall') : firstLine(raw),
+    tone: 'error',
+    details: [],
+    ...(raw === undefined ? {} : { raw }),
+  };
+}
+
+/** `jj_status` row: where the working copy is, plus ids and the diff summary. */
+function statusModel(props: ToolViewProps, t: (key: string) => string): ToolCardModel {
+  const title = t('statusCard');
+  const failed = failedModel(props, t, title);
+  if (failed !== undefined) return failed;
+  const result = toolResult(props.block);
+  const changeId = stringOf(result?.['changeId']);
+  const commitId = stringOf(result?.['commitId']);
+  const description = stringOf(result?.['description']);
+  const flags: string[] = [];
+  if (result?.['empty'] === true) flags.push(t('empty'));
+  if (result?.['conflict'] === true) flags.push(t('conflict'));
+  const summary = [changeId === undefined ? '' : shortId(changeId), description ?? t('noDescription'), ...flags]
+    .filter((part) => part.length > 0)
+    .join(' · ');
+  const details: ToolDetail[] = [];
+  if (changeId !== undefined) details.push({ label: t('changeId'), value: changeId });
+  if (commitId !== undefined) details.push({ label: t('commitId'), value: commitId });
+  const diffStat = stringOf(result?.['diffStat']);
+  if (diffStat !== undefined) details.push({ label: t('diffStat'), value: firstLine(diffStat) });
+  const workspaceRoot = stringOf(result?.['workspaceRoot']);
+  if (workspaceRoot !== undefined) details.push({ label: t('root'), value: workspaceRoot });
+  return { title, summary, tone: 'none', details: cappedDetails(details, t) };
+}
+
+/** `jj_log` row: the requested revset and the revisions that matched. */
+function logModel(props: ToolViewProps, t: (key: string) => string): ToolCardModel {
+  const title = t('logCard');
+  const failed = failedModel(props, t, title);
+  if (failed !== undefined) return failed;
   const args = toolArgs(props.block);
-  const revset = typeof args?.['revset'] === 'string' ? args['revset'] : '@ | @-';
+  const revset = stringOf(args?.['revset']) ?? '@ | @-';
   const result = toolResult(props.block);
-  const count = Array.isArray(result?.['changes']) ? result['changes'].length : undefined;
-  return toolCard(props, t('logCard'), revset, count === undefined ? [] : [countText(t('revisionCount'), count)]);
+  const changes = Array.isArray(result?.['changes']) ? result['changes'] : [];
+  const details: ToolDetail[] = [];
+  // The truncation marker leads the list so the detail cap can never swallow it.
+  if (result?.['truncated'] === true) details.push({ label: '', value: t('truncated') });
+  for (const change of changes) {
+    const record = recordOf(change);
+    const changeId = stringOf(record?.['changeId']);
+    if (changeId === undefined) continue;
+    details.push({ label: shortId(changeId, 8), value: stringOf(record?.['description']) ?? t('noDescription') });
+  }
+  return {
+    title,
+    summary: `${revset} · ${countText(t('revisionCount'), changes.length)}`,
+    tone: 'none',
+    details: cappedDetails(details, t),
+  };
 }
 
-/** `jj_workspace_list` card: how many workspaces share the repository. */
-function JjWorkspacesCard(props: ToolViewProps): unknown {
-  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+/** `jj_workspace_list` row: how many workspaces share the repository. */
+function workspacesModel(props: ToolViewProps, t: (key: string) => string): ToolCardModel {
+  const title = t('workspacesCard');
+  const failed = failedModel(props, t, title);
+  if (failed !== undefined) return failed;
   const result = toolResult(props.block);
-  const workspaces = Array.isArray(result?.['workspaces']) ? result['workspaces'] : undefined;
-  const names = (workspaces ?? [])
-    .map((workspace) => recordOf(workspace)?.['name'])
-    .filter((name): name is string => typeof name === 'string');
-  return toolCard(props, t('workspacesCard'), names.length > 0 ? names.join(', ') : '', []);
+  const workspaces = Array.isArray(result?.['workspaces']) ? result['workspaces'] : [];
+  const details: ToolDetail[] = [];
+  for (const workspace of workspaces) {
+    const record = recordOf(workspace);
+    const name = stringOf(record?.['name']);
+    if (name === undefined) continue;
+    const label = recordIsCurrent(record) ? `${name} · ${t('current')}` : name;
+    details.push({ label, value: stringOf(record?.['root']) ?? '' });
+  }
+  return {
+    title,
+    summary: workspaces.length === 0 ? '' : countText(t('workspaceCount'), workspaces.length),
+    tone: 'none',
+    details: cappedDetails(details, t),
+  };
 }
 
-/** `jj_handoff` card: destination and how the integration ended. */
-function JjHandoffCard(props: ToolViewProps): unknown {
-  const t = props.t ?? ((key: string) => DICTIONARIES.en?.[key] ?? key);
+/** Whether a workspace record marks itself as the current working copy. */
+function recordIsCurrent(record: Record<string, unknown> | undefined): boolean {
+  return record?.['isCurrent'] === true || record?.['current'] === true;
+}
+
+/** `jj_handoff` row: destination, how the integration ended and the next action. */
+function handoffModel(props: ToolViewProps, t: (key: string) => string): ToolCardModel {
+  const title = t('handoffCard');
+  const failed = failedModel(props, t, title);
+  if (failed !== undefined) return failed;
   const result = toolResult(props.block);
-  const destination = typeof result?.['destination'] === 'string' ? result['destination'] : '';
-  const rebased = result?.['rebased'] === true;
+  const destination = stringOf(result?.['destination']);
+  const integration = result?.['rebased'] === true ? t('rebased') : t('alreadyIntegrated');
   const conflicts = Array.isArray(result?.['conflicts']) ? result['conflicts'].length : 0;
+  const details: ToolDetail[] = [];
+  if (destination !== undefined) details.push({ label: t('destination'), value: destination });
+  details.push({ label: t('integration'), value: integration });
+  details.push({
+    label: '',
+    value: conflicts > 0 ? countText(t('conflictCount'), conflicts) : t('noConflicts'),
+  });
   const actions = Array.isArray(result?.['nextActions']) ? result['nextActions'] : [];
-  const firstAction = recordOf(actions[0]);
-  const reason = typeof firstAction?.['reason'] === 'string' ? firstAction['reason'] : '';
-  return toolCard(props, t('handoffCard'), destination, [
-    rebased ? t('rebased') : t('alreadyIntegrated'),
-    conflicts > 0 ? countText(t('conflictCount'), conflicts) : t('noConflicts'),
-    reason,
-  ]);
+  const reason = stringOf(recordOf(actions[0])?.['reason']);
+  if (reason !== undefined) details.push({ label: t('nextAction'), value: reason });
+  return {
+    title,
+    summary: destination === undefined ? integration : `${destination} · ${integration}`,
+    tone: 'none',
+    details: cappedDetails(details, t),
+  };
+}
+
+/** `jj_status` row. */
+function JjStatusCard(props: ToolViewProps): unknown {
+  const t = translator(props);
+  return toolRow(props, 'IconChecklistOutlineRegular', statusModel(props, t));
+}
+
+/** `jj_log` row. */
+function JjLogCard(props: ToolViewProps): unknown {
+  const t = translator(props);
+  return toolRow(props, 'IconBranchOutlineRegular', logModel(props, t));
+}
+
+/** `jj_workspace_list` row. */
+function JjWorkspacesCard(props: ToolViewProps): unknown {
+  const t = translator(props);
+  return toolRow(props, 'IconWorkspaceTreeOutlineRegular', workspacesModel(props, t));
+}
+
+/** `jj_handoff` row. */
+function JjHandoffCard(props: ToolViewProps): unknown {
+  const t = translator(props);
+  return toolRow(props, 'IconShareOutlineRegular', handoffModel(props, t));
 }
 
 /** Tab title: the localized name printed on the tab chip. */
@@ -925,6 +1229,8 @@ loader?.load({
     const module = { exports: {} as { apply: (ctx: ClientContext) => void; inject: readonly string[] } };
     // React is provided by the host's frozen module table; the bundle never ships its own.
     ReactImpl = require('react') as ReactLike;
+    hostRequire = require;
+    resetHostModules();
     module.exports.apply = apply;
     module.exports.inject = inject;
     return module.exports;
