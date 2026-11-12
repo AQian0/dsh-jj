@@ -116,8 +116,9 @@ function decodeHeartbeat(value: unknown): SessionHeartbeat | undefined {
  * them would silently disable detection.
  *
  * @param jjRepoPath - shared repository path behind `.jj/repo`.
- * @param options - current time, lifetime, the id to exclude (the current session), and
- *   whether expired files may be deleted (callers that only inspect the repository pass
+ * @param options - current time, lifetime, session ids to exclude (for example the current
+ *   session and any peers already tracked in-process), and whether expired files may be
+ *   deleted (callers that only inspect the repository or run in read-only sandbox mode pass
  *   `purgeExpired: false` so a read never mutates the metadata directory).
  * @returns the fresh peer heartbeats.
  */
@@ -127,11 +128,14 @@ export function readSessionHeartbeats(
     readonly now: number;
     readonly ttlMs?: number;
     readonly excludeSessionId?: string;
+    readonly excludeSessionIds?: Iterable<string>;
     readonly purgeExpired?: boolean;
   },
 ): SessionHeartbeat[] {
   const ttl = options.ttlMs ?? SESSION_HEARTBEAT_TTL_MS;
   const purgeExpired = options.purgeExpired !== false;
+  const excluded = new Set<string>(options.excludeSessionIds);
+  if (options.excludeSessionId !== undefined) excluded.add(options.excludeSessionId);
   let entries: string[];
   try {
     entries = readdirSync(join(jjRepoPath, SESSION_HEARTBEAT_DIR));
@@ -148,7 +152,7 @@ export function readSessionHeartbeats(
       heartbeat = undefined;
     }
     if (heartbeat === undefined) continue;
-    if (options.excludeSessionId !== undefined && heartbeat.sessionId === options.excludeSessionId) continue;
+    if (excluded.has(heartbeat.sessionId)) continue;
     const age = options.now - heartbeat.updatedAt;
     if (age > ttl) {
       // Expired: the session crashed or closed without removing its file. Best-effort

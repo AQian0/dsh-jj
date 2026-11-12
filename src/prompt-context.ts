@@ -272,16 +272,12 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
       const workspace = resolveWorkspace(cwd);
       if (workspace === undefined) return '';
 
-      try {
-        options.onAssemble?.({ agent: agent.session, cwd, workspace });
-      } catch {
-        // A failed heartbeat refresh must never break prompt assembly.
-      }
-
       // Multi-session guidance is optional and must never break an assembly.
+      let applicable = true;
       let multiSessionText = '';
       try {
         const state = multiSessionStateFor(agent.session, workspace, cwd);
+        applicable = state.applicable;
         if (state.applicable) {
           const seenPeer =
             (state.detection?.sharedWorkspace.length ?? 0) > 0 || (state.detection?.siblingWorkspace.length ?? 0) > 0;
@@ -299,6 +295,16 @@ export function installJjPromptContext(host: JjPromptHost, options: JjPromptCont
         }
       } catch {
         multiSessionText = '';
+      }
+
+      // Only top-level sessions represent independent user work: a subagent must not
+      // publish a cross-process peer heartbeat that would make its own parent isolate.
+      if (applicable) {
+        try {
+          options.onAssemble?.({ agent: agent.session, cwd, workspace });
+        } catch {
+          // A failed heartbeat refresh must never break prompt assembly.
+        }
       }
 
       const base = jjPreferenceContextText(workspace.kind, workspace.workspaceRoot, workspace.workspaceName, options);

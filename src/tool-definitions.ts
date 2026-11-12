@@ -99,14 +99,20 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
   const workspaceIsLive = (descriptor: VcsDescriptor, agent: unknown, root: string): boolean => {
     const currentId = agentSessionId(agent);
     const agentSession = (agent as { session?: unknown } | null | undefined)?.session;
+    const inProcessIds = new Set<string>();
+    if (currentId !== undefined) inProcessIds.add(currentId);
     for (const entry of liveSessions()) {
+      if (entry.sessionId !== undefined) inProcessIds.add(entry.sessionId);
       if (entry.session !== undefined && entry.session === agentSession) continue;
       if (entry.sessionId !== undefined && entry.sessionId === currentId) continue;
       if (pathInside(root, entry.cwd)) return true;
     }
     if (descriptor.jjRepoPath === undefined) return false;
-    for (const heartbeat of readSessionHeartbeats(descriptor.jjRepoPath, { now: Date.now(), purgeExpired: false })) {
-      if (heartbeat.sessionId === currentId) continue;
+    for (const heartbeat of readSessionHeartbeats(descriptor.jjRepoPath, {
+      now: Date.now(),
+      excludeSessionIds: inProcessIds,
+      purgeExpired: false,
+    })) {
       if (pathInside(root, heartbeat.workspaceRoot) || pathInside(root, heartbeat.cwd)) return true;
     }
     return false;

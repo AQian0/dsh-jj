@@ -41,8 +41,34 @@ test('a heartbeat round-trips through the repository metadata directory', (t) =>
   assert.equal(peers[0]?.sessionId, 'session-a');
   assert.equal(peers[0]?.active, true);
 
-  // The current session excludes its own file.
+  // The current session excludes its own file, and callers can also exclude every
+  // peer session already tracked in-process so stale disk state cannot shadow memory.
   assert.deepEqual(readSessionHeartbeats(repo, { now: now + 1000, excludeSessionId: 'session-a' }), []);
+  writeSessionHeartbeat(repo, {
+    sessionId: 'session-b',
+    cwd: '/repo',
+    workspaceName: 'default',
+    workspaceRoot: '/repo',
+    active: false,
+    updatedAt: now,
+  });
+  writeSessionHeartbeat(repo, {
+    sessionId: 'session-remote',
+    cwd: '/repo',
+    workspaceName: 'default',
+    workspaceRoot: '/repo',
+    active: true,
+    updatedAt: now,
+  });
+  const remoteOnly = readSessionHeartbeats(repo, {
+    now: now + 1000,
+    excludeSessionId: 'session-a',
+    excludeSessionIds: new Set(['session-b']),
+  });
+  assert.deepEqual(
+    remoteOnly.map((entry) => entry.sessionId),
+    ['session-remote'],
+  );
 });
 
 test('expired and malformed heartbeats are ignored; expired files are cleaned up', (t) => {

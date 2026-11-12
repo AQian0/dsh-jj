@@ -204,6 +204,34 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
     const id = (session as { id?: unknown } | null | undefined)?.id;
     return typeof id === 'string' && id.length > 0 ? id : undefined;
   };
+  /** Whether a session header marks an independent user session rather than a delegated subagent. */
+  const isTopLevelSession = (session: unknown): boolean => {
+    const header = (session as { header?: { origin?: unknown; delegationDepth?: unknown } } | null | undefined)?.header;
+    if (header?.origin === 'subagent') return false;
+    return !(typeof header?.delegationDepth === 'number' && header.delegationDepth > 0);
+  };
+  /**
+   * Read the effective DSH file-sandbox mode for one session when `sandboxPolicy` is mounted.
+   *
+   * Read-only sessions must not create, refresh, or purge metadata files under `.jj/repo/dsh-jj/`.
+   */
+  const sandboxModeOf = (session: unknown): string | undefined => {
+    const policyService = readService<{
+      resolve?: (request?: { session?: unknown }) => { mode?: unknown } | undefined;
+    }>('sandboxPolicy');
+    if (typeof policyService?.resolve !== 'function') return undefined;
+    try {
+      const mode = policyService.resolve(session !== undefined ? { session } : {})?.mode;
+      return typeof mode === 'string' ? mode : undefined;
+    } catch {
+      try {
+        const mode = policyService.resolve({})?.mode;
+        return typeof mode === 'string' ? mode : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  };
   /** Synchronous identity read for the heartbeat: warm cache first, then the filesystem sniff. */
   const workspaceIdentityOf = (
     cwd: string,
@@ -236,13 +264,18 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   /**
    * Live top-level sessions, both in this process and in other `dsh` processes.
    *
-   * In-process agents are authoritative for activity; sessions in other processes are
-   * known from the repository heartbeat files, which each session refreshes while its
-   * prompt is assembled. Heartbeat peers are synthesised as opaque session objects: they
-   * are never the current session, and their id is only used for display-free matching.
+   * In-process agents are authoritative for activity and directory state, so every
+   * session already observed via `agents.roots()` is excluded when reading disk
+   * heartbeats (preventing an idle peer's earlier `active: true` file from shadowing
+   * its live `turnBoundary` state). Sessions in other processes are known from the
+   * repository heartbeat files, which each session refreshes on assembly and marks
+   * `active: false` on `turn/end`.
    */
   const liveRootSessions = (cwd: string, current: unknown): readonly JjLiveSession[] => {
     const sessions: JjLiveSession[] = [];
+    const inProcessIds = new Set<string>();
+    const currentId = sessionIdOf(current);
+    if (currentId !== undefined) inProcessIds.add(currentId);
     const agents = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents');
     let roots: readonly { session?: unknown }[] | undefined;
     try {
@@ -262,16 +295,19 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
           continue;
         }
         if (typeof peerCwd !== 'string' || peerCwd.length === 0) continue;
+        const peerId = sessionIdOf(session);
+        if (peerId !== undefined) inProcessIds.add(peerId);
         const active = sessionIsActive(session);
         sessions.push({ session, cwd: peerCwd, ...(active !== undefined ? { active } : {}) });
       }
     }
     const identity = workspaceIdentityOf(cwd);
     if (identity?.jjRepoPath === undefined) return sessions;
-    const currentId = sessionIdOf(current);
+    const purgeExpired = sandboxModeOf(current) !== 'read-only';
     for (const heartbeat of readSessionHeartbeats(identity.jjRepoPath, {
       now: Date.now(),
-      ...(currentId !== undefined ? { excludeSessionId: currentId } : {}),
+      excludeSessionIds: inProcessIds,
+      purgeExpired,
     })) {
       sessions.push({
         session: { id: heartbeat.sessionId, heartbeat: true },
@@ -281,8 +317,66 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
     }
     return sessions;
   };
-  /** Heartbeats written by this process, for disposal. */
-  const writtenHeartbeats = new Set<string>();
+  /** One heartbeat written by this process, kept in memory for turn-end/chdir/dispose sync. */
+  interface TrackedHeartbeat {
+    readonly jjRepoPath: string;
+    readonly sessionId: string;
+    cwd: string;
+    workspaceName: string;
+    workspaceRoot: string;
+  }
+  const heartbeatKey = (jjRepoPath: string, sessionId: string): string => `${jjRepoPath}\u0000${sessionId}`;
+  /** Heartbeats written by this process, keyed by `<jjRepoPath>\0<sessionId>`. */
+  const writtenHeartbeats = new Map<string, TrackedHeartbeat>();
+  /** Whether this process currently owns at least one heartbeat for `sessionId`. */
+  const hasTrackedHeartbeat = (sessionId: string): boolean => {
+    for (const entry of writtenHeartbeats.values()) {
+      if (entry.sessionId === sessionId) return true;
+    }
+    return false;
+  };
+  /** Remove every heartbeat this process wrote for `sessionId`, optionally keeping `keepRepoPath`. */
+  const clearHeartbeatsForSession = (sessionId: string, keepRepoPath?: string): void => {
+    for (const [key, entry] of writtenHeartbeats) {
+      if (entry.sessionId !== sessionId || entry.jjRepoPath === keepRepoPath) continue;
+      removeSessionHeartbeat(entry.jjRepoPath, entry.sessionId);
+      writtenHeartbeats.delete(key);
+    }
+  };
+  /** Write or relocate one top-level session's heartbeat unless the session is read-only. */
+  const syncSessionHeartbeat = (
+    session: unknown,
+    cwd: string,
+    workspace:
+      | { readonly workspaceRoot: string; readonly workspaceName?: string; readonly jjRepoPath?: string }
+      | undefined,
+  ): void => {
+    const sessionId = sessionIdOf(session);
+    if (sessionId === undefined) return;
+    if (!isTopLevelSession(session)) return;
+    if (sandboxModeOf(session) === 'read-only') return;
+    clearHeartbeatsForSession(sessionId, workspace?.jjRepoPath);
+    if (workspace?.jjRepoPath === undefined) return;
+    const workspaceName = workspace.workspaceName ?? 'default';
+    const active = sessionIsActive(session);
+    const written = writeSessionHeartbeat(workspace.jjRepoPath, {
+      sessionId,
+      cwd,
+      workspaceName,
+      workspaceRoot: workspace.workspaceRoot,
+      updatedAt: Date.now(),
+      ...(active !== undefined ? { active } : {}),
+    });
+    if (written) {
+      writtenHeartbeats.set(heartbeatKey(workspace.jjRepoPath, sessionId), {
+        jjRepoPath: workspace.jjRepoPath,
+        sessionId,
+        cwd,
+        workspaceName,
+        workspaceRoot: workspace.workspaceRoot,
+      });
+    }
+  };
   /**
    * Install the session prompt context, reading `systemPrompt` through the host view.
    *
@@ -331,22 +425,51 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
         // assembled: other DSH processes read it to detect parallel work in the same
         // repository without a shared process.
         onAssemble: ({ agent, cwd, workspace }) => {
-          const sessionId = sessionIdOf(agent);
-          if (sessionId === undefined || workspace.jjRepoPath === undefined) return;
-          const active = sessionIsActive(agent);
-          const written = writeSessionHeartbeat(workspace.jjRepoPath, {
-            sessionId,
-            cwd,
-            workspaceName: workspace.workspaceName ?? 'default',
-            workspaceRoot: workspace.workspaceRoot,
-            updatedAt: Date.now(),
-            ...(active !== undefined ? { active } : {}),
-          });
-          if (written) writtenHeartbeats.add(`${workspace.jjRepoPath}\u0000${sessionId}`);
+          syncSessionHeartbeat(agent, cwd, workspace);
         },
       },
     );
   };
+  // Keep on-disk heartbeats synchronized with turn completion, directory switches, and
+  // session disposal: without `turn/end`, a finished turn would stay `active: true` on
+  // disk for up to 15 minutes and make other processes isolate unnecessarily, while
+  // keeping `active: false` on disk still preserves ownership liveness between turns.
+  const listen = (ctx as unknown as { on?: (event: string, listener: (...args: unknown[]) => unknown) => unknown }).on;
+  if (typeof listen === 'function') {
+    listen.call(ctx, 'session/event', (...args: unknown[]) => {
+      const session = args[0];
+      const event = args[1] as { type?: unknown; data?: unknown } | undefined;
+      if (session === undefined || event === undefined) return;
+      const sessionId = sessionIdOf(session);
+      if (sessionId === undefined || !hasTrackedHeartbeat(sessionId)) return;
+      if (event.type === 'turn/end') {
+        if (sandboxModeOf(session) === 'read-only') return;
+        const now = Date.now();
+        for (const entry of writtenHeartbeats.values()) {
+          if (entry.sessionId !== sessionId) continue;
+          writeSessionHeartbeat(entry.jjRepoPath, {
+            sessionId: entry.sessionId,
+            cwd: entry.cwd,
+            workspaceName: entry.workspaceName,
+            workspaceRoot: entry.workspaceRoot,
+            active: false,
+            updatedAt: now,
+          });
+        }
+        return;
+      }
+      if (event.type === 'working-directory/change') {
+        const nextCwd =
+          event.data !== null && typeof event.data === 'object' ? (event.data as { cwd?: unknown }).cwd : undefined;
+        if (typeof nextCwd !== 'string' || nextCwd.length === 0) return;
+        syncSessionHeartbeat(session, nextCwd, workspaceIdentityOf(nextCwd));
+      }
+    });
+    listen.call(ctx, 'session/disposed', (...args: unknown[]) => {
+      const sessionId = sessionIdOf(args[0]);
+      if (sessionId !== undefined) clearHeartbeatsForSession(sessionId);
+    });
+  }
   // Remove the heartbeats this process wrote when the runtime row unloads, so other
   // processes stop seeing this session immediately instead of waiting for the TTL.
   const registerEffect = (ctx as unknown as { effect?: (body: () => () => void, label?: string) => unknown }).effect;
@@ -354,10 +477,8 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
     registerEffect.call(
       ctx,
       () => () => {
-        for (const entry of writtenHeartbeats) {
-          const separator = entry.indexOf('\u0000');
-          if (separator < 0) continue;
-          removeSessionHeartbeat(entry.slice(0, separator), entry.slice(separator + 1));
+        for (const entry of writtenHeartbeats.values()) {
+          removeSessionHeartbeat(entry.jjRepoPath, entry.sessionId);
         }
         writtenHeartbeats.clear();
       },

@@ -9,11 +9,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { ROW_CONFIG_KEYS } from '../src/config.ts';
+import { sniffVcsSync } from '../src/detect.ts';
+import { SESSION_HEARTBEAT_DIR, sessionHeartbeatPath, writeSessionHeartbeat } from '../src/session-heartbeat.ts';
 import { createGuardContext, initJjColocated, makeFixture } from './helpers/fixtures.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -1198,6 +1200,154 @@ test('the runtime entry forwards live top-level sessions into the multi-session 
   assert.match(always, /separate dsh processes/, 'always covers cross-process parallel sessions');
 
   assert.throws(() => applyWith({ rebaseTarget: '   ' }, [{ session: current }]), /rebaseTarget/);
+});
+
+test('runtime heartbeats deduplicate in-process peers, flip idle on turn/end, and respect read-only mode', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-apply-heartbeats');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const outside = fx.path('outside');
+  mkdirSync(outside, { recursive: true });
+  const jjRepoPath = sniffVcsSync(repo).jjRepoPath;
+  assert.ok(jjRepoPath !== undefined, 'fixture repo must expose jjRepoPath');
+  const { Context } = await import('@deepseek-ai/cordis');
+  const runtimeEntry = await import('@aqian0/dsh-jj');
+
+  interface CapturedPromptContext {
+    readonly name: string;
+    readonly text: (context: { readonly agent?: { readonly session?: unknown } } | undefined) => string;
+  }
+
+  const sessionA = { id: 'hb-peer' };
+  const sessionB = { id: 'hb-current' };
+  const subagent = { id: 'hb-subagent', header: { origin: 'subagent', delegationDepth: 1 } };
+  const cwdBySession = new Map<unknown, string>([
+    [sessionA, repo],
+    [sessionB, repo],
+    [subagent, repo],
+  ]);
+  const turnState = new Map<unknown, unknown>([
+    [sessionA, { openTurnStartSeq: 1 }],
+    [sessionB, { openTurnStartSeq: null }],
+  ]);
+  let sandboxMode: 'read-only' | 'workspace-write' = 'workspace-write';
+
+  const captured: CapturedPromptContext[] = [];
+  const ctx = new Context();
+  ctx.provide('systemPrompt');
+  ctx.set('systemPrompt', {
+    context: (context: CapturedPromptContext) => {
+      captured.push(context);
+      return () => {};
+    },
+    getContextOrder: () => 100,
+  });
+  ctx.provide('workingDirectory');
+  ctx.set('workingDirectory', { get: (session: unknown) => cwdBySession.get(session) });
+  ctx.provide('agents');
+  ctx.set('agents', { roots: () => [{ session: sessionA }, { session: sessionB }] });
+  ctx.provide('sessionProjections');
+  ctx.set('sessionProjections', { stateOf: (session: unknown) => turnState.get(session) });
+  ctx.provide('sandboxPolicy');
+  ctx.set('sandboxPolicy', { resolve: () => ({ mode: sandboxMode, workspaceRoot: repo }) });
+  runtimeEntry.apply(ctx, {});
+
+  // 1. Session A runs an active turn: its heartbeat is written with `active: true`.
+  const firstTurn = captured[0]?.text({ agent: { session: sessionA } }) ?? '';
+  assert.ok(!firstTurn.includes('Parallel sessions'), 'session B is idle during session A turn');
+  const peerHbFile = sessionHeartbeatPath(jjRepoPath, sessionA.id);
+  assert.equal(existsSync(peerHbFile), true);
+  assert.equal((JSON.parse(readFileSync(peerHbFile, 'utf8')) as { active?: boolean }).active, true);
+
+  // 2. Even if `sessionA` still had `active: true` on disk before `turn/end` processed,
+  // an in-process assembly for `sessionB` trusts `turnBoundary` (`openTurnStartSeq: null`)
+  // and excludes in-process peers from disk heartbeats instead of double-counting them.
+  turnState.set(sessionA, { openTurnStartSeq: null });
+  turnState.set(sessionB, { openTurnStartSeq: 2 });
+  const secondTurnInProcess = captured[0]?.text({ agent: { session: sessionB } }) ?? '';
+  assert.ok(
+    !secondTurnInProcess.includes('Parallel sessions'),
+    'stale active:true disk heartbeat of an in-process idle peer must not trigger parallel isolation',
+  );
+
+  // 3. `turn/end` immediately marks the on-disk heartbeat `active: false` while keeping
+  // the file alive for cross-process ownership liveness.
+  (ctx as unknown as { emit: (event: string, ...args: unknown[]) => void }).emit('session/event', sessionA, {
+    type: 'turn/end',
+    data: { turn: 0 },
+  });
+  const afterTurnEnd = JSON.parse(readFileSync(peerHbFile, 'utf8')) as { active?: boolean };
+  assert.equal(afterTurnEnd.active, false, 'turn/end must clear active:true on disk');
+
+  // A separate DSH process reading the same repository now sees `sessionA` as idle too.
+  const otherProcessCaptured: CapturedPromptContext[] = [];
+  const otherCtx = new Context();
+  otherCtx.provide('systemPrompt');
+  otherCtx.set('systemPrompt', {
+    context: (context: CapturedPromptContext) => {
+      otherProcessCaptured.push(context);
+      return () => {};
+    },
+    getContextOrder: () => 100,
+  });
+  otherCtx.provide('workingDirectory');
+  otherCtx.set('workingDirectory', { get: () => repo });
+  const remoteSession = { id: 'hb-remote' };
+  otherCtx.provide('agents');
+  otherCtx.set('agents', { roots: () => [{ session: remoteSession }] });
+  otherCtx.provide('sessionProjections');
+  otherCtx.set('sessionProjections', { stateOf: () => ({ openTurnStartSeq: 1 }) });
+  // Ensure `sessionB` also finishes its turn first so both earlier turns are idle on disk.
+  (ctx as unknown as { emit: (event: string, ...args: unknown[]) => void }).emit('session/event', sessionB, {
+    type: 'turn/end',
+    data: { turn: 0 },
+  });
+  runtimeEntry.apply(otherCtx, {});
+  const crossProcessText = otherProcessCaptured[0]?.text({ agent: { session: remoteSession } }) ?? '';
+  assert.ok(
+    !crossProcessText.includes('Parallel sessions'),
+    'cross-process peers whose turns ended must not look concurrently active',
+  );
+
+  // 4. Delegated subagents never publish a heartbeat file.
+  captured[0]?.text({ agent: { session: subagent } });
+  assert.equal(existsSync(sessionHeartbeatPath(jjRepoPath, subagent.id)), false);
+
+  // 5. Moving a tracked session outside any jj repository removes its old heartbeat;
+  // disposing a session removes its heartbeat immediately.
+  (ctx as unknown as { emit: (event: string, ...args: unknown[]) => void }).emit('session/event', sessionA, {
+    type: 'working-directory/change',
+    data: { cwd: outside },
+  });
+  assert.equal(existsSync(peerHbFile), false, 'leaving the jj repository clears the old heartbeat');
+
+  assert.equal(existsSync(sessionHeartbeatPath(jjRepoPath, sessionB.id)), true);
+  (ctx as unknown as { emit: (event: string, ...args: unknown[]) => void }).emit('session/disposed', sessionB);
+  assert.equal(existsSync(sessionHeartbeatPath(jjRepoPath, sessionB.id)), false, 'dispose removes the heartbeat');
+
+  // 6. Under `read-only` sandboxPolicy, prompt assembly neither writes a new heartbeat
+  // nor purges expired heartbeat files from `.jj/repo/dsh-jj/sessions/`.
+  writeSessionHeartbeat(jjRepoPath, {
+    sessionId: 'hb-expired',
+    cwd: repo,
+    workspaceName: 'default',
+    workspaceRoot: repo,
+    active: false,
+    updatedAt: 1,
+  });
+  sandboxMode = 'read-only';
+  const readOnlySession = { id: 'hb-readonly' };
+  cwdBySession.set(readOnlySession, repo);
+  ctx.set('agents', { roots: () => [{ session: readOnlySession }] });
+  captured[0]?.text({ agent: { session: readOnlySession } });
+  assert.equal(
+    existsSync(sessionHeartbeatPath(jjRepoPath, readOnlySession.id)),
+    false,
+    'read-only mode must not write heartbeat files',
+  );
+  assert.ok(
+    readdirSync(join(jjRepoPath, SESSION_HEARTBEAT_DIR)).includes('hb-expired.json'),
+    'read-only mode must not delete expired heartbeat files',
+  );
 });
 
 /** Map a subpath step in the loadability loop to the emitted entry file. */

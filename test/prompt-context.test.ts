@@ -287,15 +287,18 @@ test('a subagent session (not a top-level root) never counts its parent as a par
   const repo = await initJjColocated(fx.run, fx.path('repo'));
   const parent = { id: 'parent-session' };
   const child = { id: 'child-subagent' };
+  const assembled: unknown[] = [];
   const { host, captured } = fakeHost({ cwdBySession: new Map<FakeSession, string>([[child, repo]]) });
   installJjPromptContext(host, {
     sniff: colocatedSniff(repo),
     // The registry only reports roots: the child is absent, so it is a subagent.
     liveRootSessions: () => [{ session: parent, cwd: repo }],
+    onAssemble: ({ agent }) => assembled.push(agent),
   });
   const text = captured[0].text({ agent: { session: child } });
   assert.match(text, /Jujutsu \(jj\) workspace/, 'the jj preference still applies');
   assert.ok(!text.includes('Parallel sessions'), 'a delegated subagent is not a parallel session peer');
+  assert.deepEqual(assembled, [], 'subagents must not publish top-level session heartbeats');
 });
 
 test('multi-session guidance respects off/auto/always', async (t) => {
