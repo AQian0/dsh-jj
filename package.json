@@ -1,6 +1,6 @@
 {
   "name": "@aqian0/dsh-jj",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "First-class Jujutsu (jj) support for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
