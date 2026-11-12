@@ -107,6 +107,13 @@ export interface JjPanelRouteOptions {
   readonly service: JjPanelServiceLike;
   /** `uiPanel` config: `off` keeps the routes answering `enabled: false`. */
   readonly enabled: boolean;
+  /**
+   * Optional directory allow-list check supplied by the Host runtime.
+   *
+   * When present and returning `false`, the routes reject the request with HTTP 403
+   * before spawning `jj` so arbitrary directories outside active sessions are not probed.
+   */
+  readonly isAllowedCwd?: (cwd: string) => boolean;
   /** Injectable clock/cache lifetime for tests. */
   readonly now?: () => number;
   readonly ttlMs?: number;
@@ -230,9 +237,11 @@ export async function buildJjOverview(
     name: descriptor.workspaceName ?? 'default',
   } as const;
   const [change, stack, workspaces, bookmarks, operations] = await Promise.all([
-    service.operations.readAt(cwd, options.signal).catch(() => undefined),
+    service.operations.readAt(cwd, options.signal, '@', { ignoreWorkingCopy: true }).catch(() => undefined),
     readStack(service, cwd, options.signal),
-    service.operations.workspaceStates(cwd, options.signal).catch(() => [] as JjWorkspaceState[]),
+    service.operations
+      .workspaceStates(cwd, options.signal, { ignoreWorkingCopy: true })
+      .catch(() => [] as JjWorkspaceState[]),
     readBookmarks(service, cwd, options.signal),
     readOperations(service, cwd, options.signal),
   ]);
@@ -324,6 +333,9 @@ export function registerJjPanelRoutes(host: JjPanelRouteHost, options: JjPanelRo
       if (cwd === undefined) {
         return Response.json({ error: 'missing cwd query parameter' }, { status: 400 });
       }
+      if (options.isAllowedCwd !== undefined && !options.isAllowedCwd(cwd)) {
+        return Response.json({ error: 'cwd is outside active session workspaces' }, { status: 403 });
+      }
       return Response.json(await overviewFor(cwd), { headers: { 'cache-control': 'no-store' } });
     },
   });
@@ -333,10 +345,16 @@ export function registerJjPanelRoutes(host: JjPanelRouteHost, options: JjPanelRo
     methods: ['POST'],
     requestBody: 'buffered',
     fetch: async (request: Request): Promise<Response> => {
+      if (!options.enabled) {
+        return Response.json({ enabled: false, stack: [], workspaces: [], bookmarks: [], operations: [] });
+      }
       const body = (await request.json().catch(() => undefined)) as { cwd?: unknown } | undefined;
       const cwd = typeof body?.cwd === 'string' && body.cwd.trim().length > 0 ? body.cwd.trim() : undefined;
       if (cwd === undefined) {
         return Response.json({ error: 'missing cwd' }, { status: 400 });
+      }
+      if (options.isAllowedCwd !== undefined && !options.isAllowedCwd(cwd)) {
+        return Response.json({ error: 'cwd is outside active session workspaces' }, { status: 403 });
       }
       cache.delete(cwd);
       return Response.json(await overviewFor(cwd), { headers: { 'cache-control': 'no-store' } });

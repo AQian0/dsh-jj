@@ -16,7 +16,7 @@ import { promisify } from 'node:util';
 import { ROW_CONFIG_KEYS } from '../src/config.ts';
 import { sniffVcsSync } from '../src/detect.ts';
 import { SESSION_HEARTBEAT_DIR, sessionHeartbeatPath, writeSessionHeartbeat } from '../src/session-heartbeat.ts';
-import { createGuardContext, initJjColocated, makeFixture } from './helpers/fixtures.ts';
+import { createGuardContext, initJjColocated, makeFixture, mustRun } from './helpers/fixtures.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -1016,11 +1016,12 @@ test('the built runtime entry registers the ctx.jj service on a real Cordis cont
   assert.equal(service.describe('jj-native'), 'Jujutsu (jj) native repository');
 });
 
-test('the runtime entry registers the panel routes once the connection service exists', async () => {
+test('the runtime entry registers the panel routes once the connection service exists', async (t) => {
   const { Context } = await import('@deepseek-ai/cordis');
   const runtimeEntry = await import('@aqian0/dsh-jj');
   interface RegisteredRoute {
     readonly path: string;
+    readonly fetch: (request: Request) => Promise<Response>;
   }
   const routesOf = (): { routes: RegisteredRoute[]; connection: unknown } => {
     const routes: RegisteredRoute[] = [];
@@ -1064,6 +1065,34 @@ test('the runtime entry registers the panel routes once the connection service e
     [overviewPath, refreshPath],
     'the routes register when the connection service is provided later',
   );
+
+  // When live sessions are present, panel routes allow the session workspace and any
+  // sibling jj workspace of the same repository, and reject unrelated host paths.
+  const fx = makeFixture(t, 'dsh-jj-panel-scope');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const sibling = fx.path('repo-sibling');
+  await mustRun(fx.run, ['jj', 'workspace', 'add', sibling, '--name', 'sibling'], repo);
+  const unrelated = fx.path('unrelated');
+  mkdirSync(unrelated, { recursive: true });
+  const scoped = routesOf();
+  const scopedCtx = new Context();
+  const session = { id: 'panel-session', header: { cwd: repo } };
+  scopedCtx.provide('connection');
+  scopedCtx.set('connection', scoped.connection);
+  scopedCtx.provide('workingDirectory');
+  scopedCtx.set('workingDirectory', { get: () => repo });
+  scopedCtx.provide('sessions');
+  scopedCtx.set('sessions', { list: () => [session] });
+  runtimeEntry.apply(scopedCtx, {});
+  const scopedOverview = scoped.routes.find((route) => route.path === overviewPath)!;
+  const blocked = await scopedOverview.fetch(
+    new Request(`http://localhost/api/jj.overview?cwd=${encodeURIComponent(unrelated)}`),
+  );
+  assert.equal(blocked.status, 403, 'unrelated host directories must be rejected when sessions are known');
+  const siblingResp = await scopedOverview.fetch(
+    new Request(`http://localhost/api/jj.overview?cwd=${encodeURIComponent(sibling)}`),
+  );
+  assert.equal(siblingResp.status, 200, 'sibling workspaces of an open repository remain inspectable');
 });
 
 test('the runtime entry forwards the commit policy into the registered prompt context', async (t) => {

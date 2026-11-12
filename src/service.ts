@@ -494,19 +494,20 @@ export class JjOperations {
   async status(
     cwd: string,
     signal?: AbortSignal,
-    options: { readonly details?: boolean } = {},
+    options: { readonly details?: boolean; readonly ignoreWorkingCopy?: boolean } = {},
   ): Promise<JjStatusResult> {
+    const ignoreWorkingCopy = options.ignoreWorkingCopy === true;
     // `details: false` is the cheap path agents use for orientation: the change record
     // comes from the same template as `readAt` (no `self.diff()`), and `jj status` (which
     // duplicates the description and costs a full snapshot diff) is skipped entirely.
     if (options.details === false) {
-      const change = await this.readAt(cwd, signal);
+      const change = await this.readAt(cwd, signal, '@', { ignoreWorkingCopy });
       return { change, changedPaths: [], diffStat: '', raw: '', truncated: false };
     }
-    const argv = ['log', '-r', '@', '--no-graph', '-T', TPL_STATUS];
+    const argv = logArgv('@', TPL_STATUS, undefined, ignoreWorkingCopy);
     const changeResult = await this.run(cwd, argv, signal);
     const change = readChangeRecord(changeResult.stdout, argv);
-    const statusArgv = ['status'];
+    const statusArgv = ignoreWorkingCopy ? ['status', '--ignore-working-copy'] : ['status'];
     const statusResult = await this.run(cwd, statusArgv, signal);
     const raw = statusResult.stdout;
     const bounded = bound(raw, 8 * 1024);
@@ -529,22 +530,29 @@ export class JjOperations {
   ): Promise<readonly JjChangeRecord[]> {
     // Content-reporting reads intentionally snapshot: `jj log -r @` must show the
     // current working-copy content (contract §5.8's --ignore-working-copy applies
-    // to metadata reads, which are listed below). Read-only callers (the panel) pass
-    // `ignoreWorkingCopy` so opening a panel never rewrites the snapshot commit.
+    // to metadata reads, which are listed below). Read-only callers (the panel and
+    // read-only sandbox mode) pass `ignoreWorkingCopy` so inspection never writes.
     const argv = logArgv(revset, TPL_LOG, limit, options.ignoreWorkingCopy === true);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecords(result.stdout, argv);
   }
 
-  /** `jj diff -r <revset> (--stat|--git) [-- <paths…>]`. */
+  /** `jj diff -r <revset> [--ignore-working-copy] (--stat|--git) [-- <paths…>]`. */
   async diff(
     cwd: string,
     revset: string,
     format: 'stat' | 'patch',
     paths: readonly string[],
     signal?: AbortSignal,
+    options: { readonly ignoreWorkingCopy?: boolean } = {},
   ): Promise<{ text: string; truncated: boolean }> {
-    const argv = ['diff', '-r', revset, format === 'stat' ? '--stat' : '--git'];
+    const argv = [
+      'diff',
+      '-r',
+      revset,
+      ...(options.ignoreWorkingCopy === true ? ['--ignore-working-copy'] : []),
+      format === 'stat' ? '--stat' : '--git',
+    ];
     if (paths.length > 0) argv.push('--', ...paths);
     const result = await this.run(cwd, argv, signal);
     const bounded = bound(result.stdout, this.config.maxOutputBytes);
@@ -694,8 +702,9 @@ export class JjOperations {
     revset: string,
     limit: number,
     signal?: AbortSignal,
+    options: { readonly ignoreWorkingCopy?: boolean } = {},
   ): Promise<readonly string[]> {
-    const argv = logArgv(revset, TPL_DESCRIPTION, limit);
+    const argv = logArgv(revset, TPL_DESCRIPTION, limit, options.ignoreWorkingCopy === true);
     const result = await this.run(cwd, argv, signal);
     const descriptions: string[] = [];
     const lines = result.stdout.split('\n');
@@ -1284,13 +1293,17 @@ export class JjOperations {
    * @param signal - cancellation signal.
    * @returns one state per workspace, in jj's order.
    */
-  async workspaceStates(cwd: string, signal?: AbortSignal): Promise<readonly JjWorkspaceState[]> {
+  async workspaceStates(
+    cwd: string,
+    signal?: AbortSignal,
+    options: { readonly ignoreWorkingCopy?: boolean } = {},
+  ): Promise<readonly JjWorkspaceState[]> {
     const argv = ['workspace', 'list', '--ignore-working-copy', '-T', TPL_WORKSPACE_LIST_STATE];
     const result = await this.run(cwd, argv, signal);
     const records = parseWorkspaceStates(result.stdout, argv);
     let currentChangeId: string | undefined;
     try {
-      currentChangeId = (await this.readAt(cwd, signal)).changeId;
+      currentChangeId = (await this.readAt(cwd, signal, '@', options)).changeId;
     } catch {
       // A stale or unreadable working copy still lists other workspaces; "current" then
       // stays unresolved instead of failing the whole listing.
@@ -1305,9 +1318,12 @@ export class JjOperations {
       description: record.description,
       empty: record.empty,
       conflict: record.conflict,
-      // Only this workspace's readability is known: a successful `@` read proves it is
-      // fresh, and a failed one leaves the question open (a stale checkout refuses reads).
-      stale: currentChangeId !== undefined && record.changeId === currentChangeId ? 'no' : 'unknown',
+      // Only a snapshotting `@` read proves the checkout is fresh; read-only callers
+      // pass `ignoreWorkingCopy: true`, which intentionally leaves staleness `'unknown'`.
+      stale:
+        options.ignoreWorkingCopy !== true && currentChangeId !== undefined && record.changeId === currentChangeId
+          ? 'no'
+          : 'unknown',
     }));
   }
 
@@ -2304,8 +2320,13 @@ export class JjOperations {
    * @param revset - revision to read (default `@`).
    * @returns the change record.
    */
-  async readAt(cwd: string, signal?: AbortSignal, revset = '@'): Promise<JjChangeRecord> {
-    const argv = logArgv(revset, TPL_CHANGE);
+  async readAt(
+    cwd: string,
+    signal?: AbortSignal,
+    revset = '@',
+    options: { readonly ignoreWorkingCopy?: boolean } = {},
+  ): Promise<JjChangeRecord> {
+    const argv = logArgv(revset, TPL_CHANGE, undefined, options.ignoreWorkingCopy === true);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecord(result.stdout, argv);
   }

@@ -12,6 +12,7 @@
  * @module dsh-jj
  */
 
+import { isAbsolute, resolve, sep } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { VcsKind } from './types.ts';
 // Type-only: loads the `@deepseek-ai/dsh-tools` module augmentation that adds `ctx.tools`.
@@ -31,6 +32,7 @@ import {
 } from './guard.ts';
 import type { JjLiveSession } from './multi-session.ts';
 import { sniffVcsSync } from './detect.ts';
+import { canonicalWorkspacePath } from './policies.ts';
 import { readSessionHeartbeats, removeSessionHeartbeat, writeSessionHeartbeat } from './session-heartbeat.ts';
 import { registerJjPanelRoutes, type JjPanelRouteHost } from './panel-host.ts';
 import { installJjPromptContext } from './prompt-context.ts';
@@ -522,13 +524,90 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // A child fiber through `ctx.inject` installs the routes as soon as `connection`
   // appears (and re-installs them after a service reload), exactly like `systemPrompt`.
   if (resolved.uiPanel === 'auto') {
+    /**
+     * Restrict panel overview/refresh queries to directories belonging to live sessions
+     * (or sibling workspaces of those repositories) when session registries exist.
+     *
+     * Stays fail-open only when neither `sessions` nor `agents` reports any session yet.
+     */
+    const isAllowedPanelCwd = (cwd: string): boolean => {
+      if (!isAbsolute(cwd)) return false;
+      const liveSessions: unknown[] = [];
+      try {
+        const listed = readService<{ list?: () => readonly unknown[] }>('sessions')?.list?.();
+        if (Array.isArray(listed)) liveSessions.push(...listed);
+      } catch {
+        // Optional service.
+      }
+      try {
+        const roots = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents')?.roots?.();
+        if (Array.isArray(roots)) {
+          for (const entry of roots) {
+            if (entry?.session !== undefined) liveSessions.push(entry.session);
+          }
+        }
+      } catch {
+        // Optional service.
+      }
+      if (liveSessions.length === 0) return true;
+      const workingDirectory = readService<{ get?: (session: unknown) => unknown }>('workingDirectory');
+      const candidateDirs: string[] = [];
+      if (typeof resolved.defaultCwd === 'string' && resolved.defaultCwd.trim().length > 0) {
+        candidateDirs.push(resolved.defaultCwd.trim());
+      }
+      for (const session of liveSessions) {
+        try {
+          const wd = workingDirectory?.get?.(session);
+          if (typeof wd === 'string' && wd.length > 0) candidateDirs.push(wd);
+        } catch {
+          // Ignore per-session workingDirectory read failures.
+        }
+        const headerCwd = (session as { header?: { cwd?: unknown } } | null | undefined)?.header?.cwd;
+        if (typeof headerCwd === 'string' && headerCwd.length > 0) candidateDirs.push(headerCwd);
+      }
+      if (candidateDirs.length === 0) return true;
+      const allowedRoots = new Set<string>();
+      const allowedRepoPaths = new Set<string>();
+      for (const dir of candidateDirs) {
+        const canonicalDir = canonicalWorkspacePath(resolve(dir));
+        allowedRoots.add(canonicalDir);
+        const identity = workspaceIdentityOf(canonicalDir);
+        if (identity !== undefined) {
+          allowedRoots.add(canonicalWorkspacePath(resolve(identity.workspaceRoot)));
+          if (identity.jjRepoPath !== undefined) {
+            allowedRepoPaths.add(canonicalWorkspacePath(resolve(identity.jjRepoPath)));
+          }
+        }
+      }
+      const target = canonicalWorkspacePath(resolve(cwd));
+      for (const root of allowedRoots) {
+        const prefix = root === sep ? sep : `${root}${sep}`;
+        if (target === root || target.startsWith(prefix)) return true;
+      }
+      const targetIdentity = workspaceIdentityOf(target);
+      if (targetIdentity !== undefined) {
+        const targetRoot = canonicalWorkspacePath(resolve(targetIdentity.workspaceRoot));
+        if (allowedRoots.has(targetRoot)) return true;
+        if (
+          targetIdentity.jjRepoPath !== undefined &&
+          allowedRepoPaths.has(canonicalWorkspacePath(resolve(targetIdentity.jjRepoPath)))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
     const installPanelRoutes = (): (() => void) => {
       const connection = readService<JjPanelRouteHost>('connection');
       if (connection?.fetch === undefined || typeof connection.fetch.register !== 'function') {
         return () => {};
       }
       try {
-        return registerJjPanelRoutes(connection, { service: jjService, enabled: true });
+        return registerJjPanelRoutes(connection, {
+          service: jjService,
+          enabled: true,
+          isAllowedCwd: isAllowedPanelCwd,
+        });
       } catch {
         return () => {};
       }

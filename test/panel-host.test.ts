@@ -6,6 +6,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { resolveConfig } from '../src/config.ts';
+import { detectVcs } from '../src/detect.ts';
+import { createCommandRunJj } from '../src/jj-command.ts';
 import {
   JJ_OVERVIEW_PATH,
   JJ_REFRESH_PATH,
@@ -14,7 +19,9 @@ import {
   type JjPanelRouteHost,
   type JjPanelServiceLike,
 } from '../src/panel-host.ts';
+import { JjOperations } from '../src/service.ts';
 import type { VcsDescriptor } from '../src/types.ts';
+import { initJjColocated, makeFixture } from './helpers/fixtures.ts';
 
 /** One captured route registration. */
 interface RegisteredRoute {
@@ -257,4 +264,55 @@ test('a throwing read degrades to a reasoned snapshot instead of a 500', async (
   assert.equal(body.enabled, true);
   assert.match(body.reason ?? '', /jj exploded/);
   assert.deepEqual(body.workspaces, []);
+});
+
+test('buildJjOverview reads a dirty real jj workspace without snapshotting or creating an operation', async (t) => {
+  const fx = makeFixture(t, 'dsh-jj-panel-no-snapshot');
+  const repo = await initJjColocated(fx.run, fx.path('repo'));
+  const runJj = createCommandRunJj(fx.run, resolveConfig({}));
+  const operations = new JjOperations({ runJj });
+  const service: JjPanelServiceLike = {
+    detect: async (cwd, signal) => await detectVcs(cwd, fx.run, signal),
+    operations,
+  };
+
+  const opsBefore = await operations.opLog(repo, 20);
+  // Dirty the working tree without running any snapshotting jj command.
+  writeFileSync(join(repo, 'unsnapshotted.txt'), 'dirty working tree\n');
+
+  const overview = await buildJjOverview(service, repo, { enabled: true });
+  assert.equal(overview.enabled, true);
+  assert.equal(overview.workspace?.root, repo);
+  assert.equal(overview.workingCopy?.stale, 'unknown');
+
+  const opsAfter = await operations.opLog(repo, 20);
+  assert.deepEqual(
+    opsAfter.map((op) => op.id),
+    opsBefore.map((op) => op.id),
+    'panel overview must pass --ignore-working-copy on every jj command and create zero snapshot operations',
+  );
+});
+
+test('panel routes reject out-of-scope directories with HTTP 403 before spawning jj', async () => {
+  const calls = zeroCalls();
+  const host = fakeHost();
+  registerJjPanelRoutes(host, {
+    service: fakeService(calls),
+    enabled: true,
+    isAllowedCwd: (cwd) => cwd === '/repo',
+  });
+  const overviewRoute = host.routes.find((route) => route.path === JJ_OVERVIEW_PATH)!;
+  const refreshRoute = host.routes.find((route) => route.path === JJ_REFRESH_PATH)!;
+
+  const deniedGet = await overviewRoute.fetch(new Request('http://localhost/api/jj.overview?cwd=/etc'));
+  assert.equal(deniedGet.status, 403);
+  const deniedPost = await refreshRoute.fetch(
+    new Request('http://localhost/api/jj.refresh', { method: 'POST', body: JSON.stringify({ cwd: '/etc' }) }),
+  );
+  assert.equal(deniedPost.status, 403);
+  assert.equal(calls.detect, 0, 'rejected directories must never reach detect()');
+
+  const allowedGet = await overviewRoute.fetch(new Request('http://localhost/api/jj.overview?cwd=/repo'));
+  assert.equal(allowedGet.status, 200);
+  assert.equal(calls.detect, 1);
 });
