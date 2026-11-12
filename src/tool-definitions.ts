@@ -879,12 +879,12 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
     defineTool({
       name: 'jj_workspace_add',
       description:
-        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, start a new change in it, and move this session into it (like create_worktree in the official Git tooling). This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots). Omit `parents` to start from the parents of the current change: after jj_commit that bases the new workspace on the commit you just made, which is the intended way to carry your committed work over. Do not pass `parents: ["@"]` for that — @ is the working-copy change (usually the fresh empty change), so it would become an empty commit in the new workspace\'s chain and reach the handed-off/pushed history; the tool drops a bare empty @ and refuses @ while the working copy still has uncommitted changes.',
+        'Create an additional Jujutsu (jj) workspace — a second working copy of the same repository — at a path, start a new change in it, and move this session into it (like create_worktree in the official Git tooling). This is jj, not git: the workspace is registered in jj and visible to jj_workspace_list, unlike a raw git worktree. Prefer an absolute path outside the repository root (a path inside it leaves a phantom entry in git-side snapshots), ideally under the system temporary directory such as /tmp/<repo>-<name> so workspace-write sandbox mode needs no approval prompts (paths outside writable roots require sandbox approval). Omit `parents` to start from the parents of the current change: after jj_commit that bases the new workspace on the commit you just made, which is the intended way to carry your committed work over. Do not pass `parents: ["@"]` for that — @ is the working-copy change (usually the fresh empty change), so it would become an empty commit in the new workspace\'s chain and reach the handed-off/pushed history; the tool drops a bare empty @ and refuses @ while the working copy still has uncommitted changes.',
       parameters: {
         path: {
           type: 'string',
           description:
-            'Directory for the new workspace; relative paths resolve against the current working directory, absolute paths are supported and are the way to place it outside the repository. jj creates it if missing.',
+            'Directory for the new workspace; relative paths resolve against the current working directory, absolute paths are supported and are the way to place it outside the repository (prefer /tmp/<repo>-<name> to stay inside workspace-write sandbox roots without approval prompts). jj creates it if missing.',
           required: true,
         },
         name: {

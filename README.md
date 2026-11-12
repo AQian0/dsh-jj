@@ -84,11 +84,11 @@ Use the jj equivalent instead:
 
 ### 多会话协作
 
-同一个 DSH 进程里可能有多个会话同时工作（Web GUI 的会话就共用一个进程）。插件只把**正在执行回合**的其它顶层会话算作并行：只是打开过或已经空闲的会话不会触发隔离。
+同一个 DSH 进程（如 Web GUI）或多个独立 `dsh` 进程里可能有多个会话同时工作。插件只把**正在执行回合**的其它顶层会话算作并行（子代理不写顶层心跳；跨进程心跳在回合结束时同步为 `active: false`、离开仓库或销毁会话时立即清理，`read-only` 沙箱下不写心跳）：只是打开过或已经空闲的会话不会触发隔离。
 
 检测到并行时：
 
-- **共用同一个工作副本**：动文件前先用 `jj_workspace_add` 在仓库外建一个独立的 workspace（例如 `<仓库同级目录>/repo-session-a`）；它默认就把会话切进新 workspace（`enter: false` 可只创建不切换，`jj_workspace_enter` 用于切到已存在的工作区，目录被误删后可用 `jj_workspace_restore` 按创建时记录的基础提交重建）。不要放在仓库内部，也不要复用别人的 workspace。
+- **共用同一个工作副本**：动文件前先用 `jj_workspace_add` 在仓库外建一个独立的 workspace——推荐放在系统临时目录下（例如 `/tmp/repo-session-a`），既在仓库根之外（不会污染 Git 侧快照），又处于 DSH `workspace-write` 默认可写范围（`[workspaceRoot, /tmp, os.tmpdir()]`）内，全程不会触发沙箱权限确认；放在仓库同级或其它外部目录会按宿主沙箱策略先请求审批。它默认就把会话切进新 workspace（`enter: false` 可只创建不切换，`jj_workspace_enter` 用于切到已存在的工作区，目录被误删后可用 `jj_workspace_restore` 按创建时记录的基础提交重建）。不要放在仓库内部，也不要复用别人的 workspace。
   如果已经在这个共用工作副本里改过文件，先**只提交自己的路径**（`jj_commit` 传 `paths`），再**不带 `parents`** 调用 `jj_workspace_add`：jj 会以当前 change 的父提交为起点，也就把你刚提交的那一步带进新 workspace。不要传 `parents: ["@"]`——`@` 是工作副本提交（提交后通常是空的），把它当 parent 会把一个空提交塞进新 workspace 的提交链，最后出现在收尾和推送的历史里。工具层面也做了防护：与当前 `@` 重叠的 parent 会被拒绝或忽略（空 `@` 自动忽略并返回提示，非空 `@` 报错要求先提交）。
 - **同一仓库的不同 workspace**：工作副本互不影响，但 bookmark 和 operation log 是共享的。只改自己的提交，不要 rebase、undo 或移动别人 workspace 的 bookmark。
 - **中断/重启后的 workspace**：`jj_workspace_add` 的创建记录持久化在 `<.jj/repo>/dsh-jj/workspaces/`（按 DSH session id 归属），同一会话重启后仍可 `jj_workspace_cleanup` 自己的 workspace。会话真的结束（进程/Agent 不在且心跳过期）而工作副本干净时，`jj_workspace_list detail: "full"` 会把它标成 `orphaned`，任一会话可用 `jj_workspace_cleanup { workspace: "<名字>" }` 注销；目录保留，shell 的 `jj workspace forget` 仍被 guard 拒绝。
@@ -118,28 +118,31 @@ Use the jj equivalent instead:
 
 ### 工具一览
 
-| 工具                                      | 作用                                                                                                               |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `jj_status`                               | 查看当前 change 的状态；默认不跑 `jj status`（`details: true` 才带改动路径与 diff 统计）                           |
-| `jj_log`                                  | 按 revset 查看提交历史                                                                                             |
-| `jj_diff`                                 | 查看指定 revset 的 diff                                                                                            |
-| `jj_new`                                  | 新建 change 并设为 `@`；`@` 已空且未给 parents 时拒绝（避免空提交）                                                |
-| `jj_commit`                               | 描述当前 change 并新建 change；空工作副本会拒绝；传 `paths` 可只提交部分文件                                       |
-| `jj_describe`                             | 修改当前 change 的描述（相当于 `git commit --amend`）                                                              |
-| `jj_commit_style`                         | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项                                                             |
-| `jj_squash`                               | 把改动合并进另一个提交；传 `paths` 可只合并部分文件                                                                |
-| `jj_amend`                                | 把修正折叠进之前的提交（未推送时），并报告被 rebase 的后代                                                         |
-| `jj_abandon`                              | 丢弃指定 revision（拒绝 `@` 与已发布提交），后代自动 rebase 到其父提交                                             |
-| `jj_undo` / `jj_op_log` / `jj_op_restore` | 撤销最后一次操作 / 查看 operation 历史（条数受 `defaultLogLimit`/`maxLogLimit` 约束）/ 恢复到指定 operation        |
-| `jj_fetch`                                | `jj git fetch`；没有远端时返回 `no-remote`，不视为错误                                                             |
-| `jj_workspace_add` / `jj_workspace_list`  | 新建 / 列出 jj workspace；`detail: "full"` 带 `@` 状态与 owner/`orphaned`；与当前 `@` 重叠的 parent 会被拒绝或忽略 |
-| `jj_bookmark_list` / `jj_bookmark_set`    | 列出（隐藏 colocated 的 `@git` 镜像，`includeGitMirror: true` 可显示；`conflicted` 标出冲突）/ 设置 bookmark       |
-| `jj_rebase`                               | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动                                                       |
-| `jj_handoff`                              | 收尾集成：fetch、选目标、整栈 rebase、stale 恢复、冲突/空提交上报；跨 workspace 拒绝改写活跃或脏的工作副本         |
-| `jj_workspace_cleanup`                    | 注销本会话的临时 workspace（并把 default 空 `@` 接回栈顶）；`workspace` 参数可回收记录的孤儿 workspace             |
-| `jj_workspace_update_stale`               | 恢复 stale 工作副本（`jj workspace update-stale`），不改写任何提交                                                 |
+| 工具                                          | 作用                                                                                                               |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `jj_status`                                   | 查看当前 change 的状态；默认不跑 `jj status`（`details: true` 才带改动路径与 diff 统计）                           |
+| `jj_log`                                      | 按 revset 查看提交历史                                                                                             |
+| `jj_diff`                                     | 查看指定 revset 的 diff                                                                                            |
+| `jj_new`                                      | 新建 change 并设为 `@`；`@` 已空且未给 parents 时拒绝（避免空提交）                                                |
+| `jj_commit`                                   | 描述当前 change 并新建 change；空工作副本会拒绝；传 `paths` 可只提交部分文件                                       |
+| `jj_describe`                                 | 修改当前 change 的描述（相当于 `git commit --amend`）                                                              |
+| `jj_commit_style`                             | 采样最近的提交描述，报告仓库风格；无法确定时返回候选项                                                             |
+| `jj_squash`                                   | 把改动合并进另一个提交；传 `paths` 可只合并部分文件                                                                |
+| `jj_amend`                                    | 把修正折叠进之前的提交（未推送时），并报告被 rebase 的后代                                                         |
+| `jj_abandon`                                  | 丢弃指定 revision（拒绝 `@` 与已发布提交），后代自动 rebase 到其父提交                                             |
+| `jj_undo` / `jj_op_log` / `jj_op_restore`     | 撤销最后一次操作 / 查看 operation 历史（条数受 `defaultLogLimit`/`maxLogLimit` 约束）/ 恢复到指定 operation        |
+| `jj_fetch`                                    | `jj git fetch`；没有远端时返回 `no-remote`，不视为错误                                                             |
+| `jj_workspace_add` / `jj_workspace_list`      | 新建 / 列出 jj workspace；`detail: "full"` 带 `@` 状态与 owner/`orphaned`；与当前 `@` 重叠的 parent 会被拒绝或忽略 |
+| `jj_workspace_enter` / `jj_workspace_restore` | 切换到已存在的同仓库 jj workspace / 按创建记录的基础提交重建目录被误删的 workspace                                 |
+| `jj_bookmark_list` / `jj_bookmark_set`        | 列出（隐藏 colocated 的 `@git` 镜像，`includeGitMirror: true` 可显示；`conflicted` 标出冲突）/ 设置 bookmark       |
+| `jj_rebase`                                   | 把 revision rebase 到目标；`mode: source` 会连同后代一起移动                                                       |
+| `jj_handoff`                                  | 收尾集成：fetch、选目标、整栈 rebase、stale 恢复、冲突/空提交上报；跨 workspace 拒绝改写活跃或脏的工作副本         |
+| `jj_workspace_cleanup`                        | 注销本会话的临时 workspace（并把 default 空 `@` 接回栈顶）；`workspace` 参数可回收记录的孤儿 workspace             |
+| `jj_workspace_update_stale`                   | 恢复 stale 工作副本（`jj workspace update-stale`），不改写任何提交                                                 |
 
 非 jj 仓库会直接拒绝工具调用并说明如何初始化 jj，不会回退到 git。
+
+全部 24 个 `jj_*` 工具对齐宿主会话的 `sandboxPolicy` 与标准审批流程：`read-only` 沙箱下只读与工作区切换工具统一启用 `--ignore-working-copy`（不写工作副本快照、不自动执行 `update-stale`），写操作先向用户请求审批；`workspace-write` 沙箱下在 `[workspaceRoot, /tmp, os.tmpdir()]` 内直接放行，向可写边界之外创建、重建或切换 workspace 时先请求审批并附带沙箱边界说明。
 
 ### 变更卡片（行数与文件列表）
 
@@ -161,7 +164,7 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 
 Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Jujutsu tab（可在侧栏的「添加」里打开）。它不写仓库：不 commit、不 rebase、不清 workspace，也不触发工作副本快照。
 
-- 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、待集成栈（`::@ ~ ::immutable_heads()`，最多 20 条）、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，所有读取都用 `--ignore-working-copy`（包括栈的 `jj log`），打开面板不会触发工作副本快照。
+- 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、待集成栈（`::@ ~ ::immutable_heads()`，最多 20 条）、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，**全部读取**（包括 `@`、兄弟 workspace 状态、栈的 `jj log`、bookmark 与 operation log）均强制 `--ignore-working-copy`，打开或刷新面板不会触发工作副本快照；存在已注册会话时路由只响应活跃会话目录及其同仓库兄弟 jj workspace（越界路径返回 `403`，不探测无关目录）。
 - 面板读取失败（jj 缺失、目录不是 jj workspace、元数据损坏）时返回 `enabled: true` + `reason`，界面上是一句说明，不会报错也不会影响会话。
 - 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。面板正文按「工作副本 → 栈 → 工作区 → 书签 → 操作日志」分区渲染，并用会话作用域的 slot props（`sessionId` + `useSessions`）取得当前目录。
 - 面板文案统一走 DSH 的 client locale（`jjPanel` 命名空间，注册 `zh` / `en` 字典）：guide 入口、右侧栏 tab 标题、正文与四个工具行共用同一份词典，tab 标题 slot 也绑定该命名空间，因此切换语言时 tab 与正文保持同一种语言。jj 的 operation 描述、commit 描述、workspace 名与路径属于数据，保持 jj 或用户写入时的原文；Host 返回的诊断也只在本地化的「原因」标签后作为原文展示。zh 词典里的 change / commit / stale 等标签已统一为「变更 / 提交 / 过期」，非空工作副本显示「有改动」而不是「干净」。
@@ -236,7 +239,8 @@ Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Juju
 - **仓库归属按最近者判断**：jj workspace 内嵌套的独立 Git 仓库（最近的 `.git` 比 `.jj` 更深）按普通 Git 仓库处理——`git` 命令与 `create_worktree` 都不会被 jj guard 拦截；只有祖先 jj 的目录才受 guard 约束。
 - **hard-deny 不随配置放开**：`jj restore`（不带 fileset，含 `--from` / `--changes-in` / 重定向等写法）、`jj abandon`（默认 `@` 或显式 `@`）、`jj undo --allow-cross-workspace`，以及指向其它仓库的 `jj -R` / 越权的 `jj workspace forget`（多个名字逐个检查）/ 任何 `jj workspace remove`（它会把 workspace 连同目录从磁盘删除，stale workspace 也不例外；被忽略的文件不会被快照、无法恢复）。`-R/--repository` 写在 subcommand 前后都按同一规则处理（jj 全局选项两种位置都接受）。
 - **描述风格靠推断**：风格判定只看描述首行，历史太少或风格混杂时会请求你选择；Angular 与 Conventional Commits 语法相同，自动识别统一报 `conventional`，需要严格规则时可配置 `commitStyle: angular`。
-- **多会话检测跨进程但限同一仓库**：同一进程内的顶层会话直接可见；其它 `dsh` 进程通过仓库元数据目录 `<.jj/repo>/dsh-jj/sessions/*.json` 的心跳（每次组装提示词时刷新，15 分钟过期）识别，因此需要共享同一份仓库元数据与文件系统。心跳不可用时退回进程内检测，跨机器/无共享文件系统的并行仍需配置 `multiSessionGuidance: always`。
+- **多会话检测跨进程但限同一仓库**：同一进程内的顶层会话直接经内存态识别（排除自身进程的磁盘心跳，避免重复计数）；其它 `dsh` 进程通过仓库元数据目录 `<.jj/repo>/dsh-jj/sessions/*.json` 的心跳（组装提示词时刷新、回合结束立即更新为 `active: false`、离开仓库或会话销毁时删除、异常退出后 15 分钟过期；`read-only` 沙箱下不写心跳）识别，因此需要共享同一份仓库元数据与文件系统。心跳不可用时退回进程内检测，跨机器/无共享文件系统的并行仍需配置 `multiSessionGuidance: always`。
+- **沙箱边界与 Linux `bwrap` 的 `/tmp` 隔离**：`jj_*` 工具按会话 `sandboxPolicy` 门禁。在 macOS Seatbelt 下，宿主进程与 shell 子进程共享 `/tmp` 与系统临时目录，把临时 workspace 放在 `/tmp/<repo>-<name>` 全程无需额外审批；在 Linux 的 `bwrap` 沙箱下，`bash` 命令每次挂载私有临时 `/tmp`（文件工具 `write`/`edit` 与 `jj_*` 工具仍在宿主侧访问真实 `/tmp`），若需在隔离工作区里运行 shell 构建/测试，可经用户审批把 workspace 建在仓库同级目录或切到无限制沙箱模式。
 - **子代理不受多会话指引覆盖**：子代理与父会话共享工作副本，父会话继续运行时两者可能同时写文件；需要严格隔离时，由父会话为子任务指定独立 workspace。
 - **临时 workspace 清理有前提**：`jj_workspace_cleanup` 只注销有 `jj_workspace_add` 记录的 workspace，且要求没有未提交改动或冲突；其它 workspace 需要你手动执行 `jj workspace forget <name>`，插件不会删除目录，shell 里的 `jj workspace remove` / 越权的 `jj workspace forget` 也被 guard 拒绝。同一会话重启后仍拥有自己的记录；中断会话留下的记录在 `jj_workspace_list detail: "full"` 里标为 `orphaned`，可由任一会话用 `jj_workspace_cleanup { workspace }` 注销（要求 owner 不在、无人占用、工作副本干净；目录不存在时也允许）。注销后保留的空工作副本只有在空、无冲突、无后代、未发布时才会自动 abandon。
 - **并行内容栈不会自动互相合并**：`jj_handoff` 只把当前 workspace 的栈 rebase 到解析出的目标；两个并行会话各自从同一 base 分叉时，两个栈仍是目标上的两个头，谁压谁需要你决定。插件保证的是不改写活跃/有内容的其它 workspace、不留下无主的空 `@`。

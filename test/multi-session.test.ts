@@ -151,6 +151,8 @@ test('a shared working copy asks for a dedicated workspace and the rebase hand-o
   assert.match(text, /jj_workspace_add/);
   assert.match(text, /jj_workspace_enter/, 'switching to an existing workspace has its own tool');
   assert.match(text, /outside the repository/i);
+  assert.match(text, /\/tmp\/<repo>-<name>/, 'recommends system temp directory inside workspace-write roots');
+  assert.match(text, /workspace-write/, 'explains why /tmp avoids sandbox approval prompts');
   assert.match(text, /git worktree/, 'the guard-equivalent git worktree pitfall is named');
   assert.match(text, /standard rebase hand-off/);
   assert.match(text, /trunk\(\)/, 'the default rebase target is trunk()');
@@ -225,6 +227,8 @@ test('detection counts deduplicate peers without leaking a misleading session co
 test("'always' mode covers separate processes where detection cannot see peers", () => {
   const text = multiSessionPromptText({ mode: 'always' });
   assert.match(text, /separate dsh processes/);
+  assert.match(text, /\/tmp\/<repo>-<name>/, 'generic parallel guidance also recommends system temp directory');
+  assert.match(text, /workspace-write/);
   assert.match(text, /standard rebase hand-off/);
   assert.match(text, /jj_handoff/, 'the generic variant points at the one-shot hand-off tool');
 });
