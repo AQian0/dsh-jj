@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { Script, createContext } from 'node:vm';
 import { ROW_CONFIG_KEYS } from '../src/config.ts';
 import { sniffVcsSync } from '../src/detect.ts';
 import { SESSION_HEARTBEAT_DIR, sessionHeartbeatPath, writeSessionHeartbeat } from '../src/session-heartbeat.ts';
@@ -625,6 +626,27 @@ test('each component publishes its implementation on its own subpath', async () 
   for (const name of ['jjToolDefinitions', 'registerJjTools', 'jjRefusalText'] as const) {
     assert.equal(typeof tools[name], 'function', `${name} lives on ./tools`);
   }
+});
+
+test('the client bundle survives re-execution as a classic script without leaking globals', () => {
+  // The host injects `<script src=…&rev=…>` again whenever the bundle revision changes
+  // (HMR, upgrade). Classic scripts share one global lexical scope, so a top-level
+  // `const` would throw "already declared" on the second run before registering.
+  const source = readFileSync(join(packageDir, 'lib', 'panel-client.js'), 'utf8');
+  const registered: string[] = [];
+  const sandbox: Record<string, unknown> = {
+    __ModuleLoader__: { load: (module: { id: string }) => registered.push(module.id) },
+  };
+  const context = createContext(sandbox);
+  const baseline = new Set(Object.getOwnPropertyNames(sandbox));
+  for (const run of [1, 2]) {
+    new Script(source, { filename: `panel-client.js?rev=${run}` }).runInContext(context);
+  }
+  assert.deepEqual(registered, ['@aqian0/dsh-jj', '@aqian0/dsh-jj'], 'every execution registers the factory');
+  const leaked = Object.getOwnPropertyNames(sandbox).filter((name) => !baseline.has(name));
+  assert.deepEqual(leaked, [], 'the bundle must not define globals other plugins could clash with');
+  const lexical = new Script('typeof PANEL_BUNDLE_ID').runInContext(context) as string;
+  assert.equal(lexical, 'undefined', 'top-level bindings stay inside the bundle scope');
 });
 
 test('the client bundle is a classic script that registers a lazy sidebar tab', async () => {

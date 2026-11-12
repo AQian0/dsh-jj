@@ -356,6 +356,9 @@ npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已�
       与 `exports["./client"]`。**不引入打包器**:`src/panel-client.ts` 不写任何运行时 `import`/`export`,
       由 `tsconfig.client.json`(`module: ES2022` + `moduleResolution: Bundler` + `moduleDetection: legacy`,
       主 tsconfig 明确 exclude 它)单独编译成 `lib/panel-client.js`,这样 `tsc` 不会追加 `export {}` 把它变成 ESM。
+      整个文件体必须包在一个 IIFE 里:经典 script 共享页面的全局词法作用域,宿主在 rev 变化(HMR/升级)时会再注入
+      一次 `<script>`,顶层 `const`/`let` 会抛 "already declared" 导致 "loaded without registering";
+      `build.test.ts` 用 `node:vm` 同一上下文执行两次并断言不泄漏全局。
     - UI 遵循 DSH 官方风格:只用 `--dsw-*`/`--dsh-*` 设计令牌、scoped CSS + 唯一类前缀、roving 的圆角标度、
       hover 仅在 `@media (hover: hover)`、`aria-*` 状态跟随、主题只靠令牌;组件优先复用
       `@deepseek-ai/dsh-client-ui-primitives`(Button/Tooltip/HoverCard/Icon 等),不引第三方图标或自造按钮。
