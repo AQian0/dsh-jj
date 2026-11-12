@@ -11,14 +11,22 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  JJ_TOOL_SANDBOX_CLASSES,
   WorkspaceOwnership,
   agentSessionId,
   canonicalWorkspacePath,
+  decideJjToolSandbox,
   decideOrphanWorkspaceCleanup,
   decideWorkspaceCleanup,
+  isPathWithinSandboxRoots,
   isRootWorkspace,
   isStaleWorkingCopyFailure,
+  resolveSandboxTargetPath,
+  sandboxWritableRoots,
 } from '../src/policies.ts';
+import { resolveConfig } from '../src/config.ts';
+import { JjOperations } from '../src/service.ts';
+import { jjToolDefinitions } from '../src/tools.ts';
 import type { VcsDescriptor } from '../src/types.ts';
 
 /** Minimal descriptor for the layout checks. */
@@ -177,4 +185,195 @@ test('decideOrphanWorkspaceCleanup covers every refusal reason', () => {
   // A workspace whose directory disappeared cannot be read any more, but unregistering
   // the leftover registration is safe.
   assert.equal(decideOrphanWorkspaceCleanup({ ...ok, directoryExists: false, workingCopy: undefined }), undefined);
+});
+
+test('WorkspaceOwnership can keep memory-only entries when persist is false', (t) => {
+  const repo = mkdtempSync(join(tmpdir(), 'dsh-jj-ownership-nopersist-'));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const root = join(repo, 'ws');
+  mkdirSync(root);
+
+  const memoryOnly = new WorkspaceOwnership();
+  memoryOnly.remember(repo, { id: 'session-ro' }, 'ws', root, 'base-1', { persist: false });
+  assert.equal(memoryOnly.owns(repo, { id: 'session-ro' }, 'ws', root), true);
+  assert.deepEqual(new WorkspaceOwnership().records(repo), [], 'no durable file was written when persist is false');
+});
+
+test('JJ_TOOL_SANDBOX_CLASSES covers every registered jj_* tool with no drift', () => {
+  const dummyOps = new JjOperations({
+    runJj: async () => ({
+      exitCode: 0,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      truncated: false,
+      killedByTimeout: false,
+    }),
+  });
+  const definitions = jjToolDefinitions({
+    service: {
+      operations: dummyOps,
+      workspaceOwnership: new WorkspaceOwnership(),
+      detect: async (cwd) => descriptorAt(cwd, 'default'),
+    },
+    config: resolveConfig({}),
+    host: { tools: { register: () => () => {} } },
+    cwdFor: async () => '/repo',
+  });
+  const definedNames = definitions.map((definition) => definition.name).sort();
+  const classifiedNames = Object.keys(JJ_TOOL_SANDBOX_CLASSES).sort();
+  assert.deepEqual(classifiedNames, definedNames, 'every jj_* tool has an explicit sandbox class');
+  assert.equal(definedNames.length, 24);
+});
+
+test('resolveSandboxTargetPath and isPathWithinSandboxRoots canonicalize non-existent leaves and symlink escapes', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-jj-sandbox-paths-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const repo = join(dir, 'repo');
+  const outside = join(dir, 'outside');
+  const repoPrefixSibling = join(dir, 'repo-ws');
+  mkdirSync(repo);
+  mkdirSync(outside);
+  mkdirSync(repoPrefixSibling);
+
+  const aliasToRepo = join(dir, 'repo-link');
+  symlinkSync(repo, aliasToRepo);
+  const escapeLinkInsideRepo = join(repo, 'escape');
+  symlinkSync(outside, escapeLinkInsideRepo);
+
+  // Non-existent nested leaf under a symlinked ancestor resolves onto the real directory.
+  assert.equal(
+    resolveSandboxTargetPath(join(aliasToRepo, 'nested', 'leaf')),
+    join(canonicalWorkspacePath(repo), 'nested', 'leaf'),
+  );
+
+  // Prefix collisions (/repo vs /repo-ws) and symlink escapes (/repo/escape/ws -> /outside/ws) are rejected.
+  const roots = [repo];
+  assert.equal(isPathWithinSandboxRoots(repo, roots), true);
+  assert.equal(isPathWithinSandboxRoots(join(aliasToRepo, 'sub', 'file.ts'), roots), true);
+  assert.equal(isPathWithinSandboxRoots(repoPrefixSibling, roots), false, 'sibling with shared prefix is outside');
+  assert.equal(
+    isPathWithinSandboxRoots(join(escapeLinkInsideRepo, 'new-ws'), roots),
+    false,
+    'symlink inside repo pointing outside does not bypass sandbox roots',
+  );
+
+  assert.deepEqual(sandboxWritableRoots({ mode: 'read-only', workspaceRoot: repo }), []);
+  assert.deepEqual(sandboxWritableRoots({ mode: 'danger-full-access', workspaceRoot: repo }), []);
+  const writable = sandboxWritableRoots({ mode: 'workspace-write', workspaceRoot: repo });
+  assert.equal(isPathWithinSandboxRoots(repo, writable), true);
+  assert.equal(isPathWithinSandboxRoots(join('/tmp', 'dsh-jj-temp-ws'), writable), true);
+  assert.equal(isPathWithinSandboxRoots(join(tmpdir(), 'dsh-jj-temp-ws'), writable), true);
+});
+
+test('decideJjToolSandbox enforces read-only and workspace-write boundaries', (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-jj-sandbox-decide-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const scopedTmp = join(base, 'scoped-tmp');
+  const repo = join(base, 'repo');
+  const outside = join(base, 'outside');
+  mkdirSync(scopedTmp);
+  mkdirSync(repo);
+  mkdirSync(outside);
+
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = scopedTmp;
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  });
+
+  // Absent policy and danger-full-access always allow.
+  assert.equal(decideJjToolSandbox({ toolName: 'jj_commit', cwd: outside }).kind, 'allow');
+  assert.equal(
+    decideJjToolSandbox({
+      toolName: 'jj_workspace_add',
+      policy: { mode: 'danger-full-access', workspaceRoot: repo },
+      cwd: repo,
+      targetPath: outside,
+    }).kind,
+    'allow',
+  );
+
+  // read-only: read tools and workspace-switch are allowed; mutate and workspace-create ask.
+  const readOnly = { mode: 'read-only', workspaceRoot: repo } as const;
+  for (const [toolName, toolClass] of Object.entries(JJ_TOOL_SANDBOX_CLASSES)) {
+    const decision = decideJjToolSandbox({
+      toolName,
+      policy: readOnly,
+      cwd: repo,
+      jjRepoPath: join(repo, '.jj', 'repo'),
+      targetPath: join(scopedTmp, 'ws'),
+    });
+    if (toolClass === 'read' || toolClass === 'workspace-switch') {
+      assert.equal(decision.kind, 'allow', `${toolName} should be allowed in read-only mode`);
+    } else {
+      assert.equal(decision.kind, 'ask', `${toolName} should ask in read-only mode`);
+      if (decision.kind === 'ask') {
+        assert.match(decision.reason, /read-only/);
+        assert.ok(decision.displayReason.en.includes(toolName));
+        assert.ok(decision.displayReason.zh.includes(toolName));
+      }
+    }
+  }
+
+  // workspace-write: repo and /tmp targets allow; outside targets/stores ask.
+  const workspaceWrite = { mode: 'workspace-write', workspaceRoot: repo } as const;
+  assert.equal(
+    decideJjToolSandbox({
+      toolName: 'jj_commit',
+      policy: workspaceWrite,
+      cwd: repo,
+      jjRepoPath: join(repo, '.jj', 'repo'),
+    }).kind,
+    'allow',
+  );
+  assert.equal(
+    decideJjToolSandbox({
+      toolName: 'jj_workspace_add',
+      policy: workspaceWrite,
+      cwd: repo,
+      jjRepoPath: join(repo, '.jj', 'repo'),
+      targetPath: join(scopedTmp, 'repo-session-a'),
+    }).kind,
+    'allow',
+    'creating a session workspace inside os.tmpdir() needs no approval',
+  );
+  const outsideAdd = decideJjToolSandbox({
+    toolName: 'jj_workspace_add',
+    policy: workspaceWrite,
+    cwd: repo,
+    jjRepoPath: join(repo, '.jj', 'repo'),
+    targetPath: join(outside, 'repo-session-a'),
+  });
+  assert.equal(outsideAdd.kind, 'ask');
+
+  const outsideEnter = decideJjToolSandbox({
+    toolName: 'jj_workspace_enter',
+    policy: workspaceWrite,
+    cwd: repo,
+    jjRepoPath: join(repo, '.jj', 'repo'),
+    targetPath: outside,
+  });
+  assert.equal(outsideEnter.kind, 'ask');
+  assert.equal(
+    decideJjToolSandbox({
+      toolName: 'jj_workspace_enter',
+      policy: workspaceWrite,
+      cwd: repo,
+      jjRepoPath: join(repo, '.jj', 'repo'),
+      targetPath: join(scopedTmp, 'repo-session-a'),
+    }).kind,
+    'allow',
+  );
+
+  // Linked workspace inside scopedTmp whose shared .jj/repo lives in `outside` (outside workspaceRoot): asks!
+  const linkedExternalStore = decideJjToolSandbox({
+    toolName: 'jj_commit',
+    policy: { mode: 'workspace-write', workspaceRoot: join(scopedTmp, 'linked') },
+    cwd: join(scopedTmp, 'linked'),
+    jjRepoPath: join(outside, '.jj', 'repo'),
+  });
+  assert.equal(linkedExternalStore.kind, 'ask');
 });

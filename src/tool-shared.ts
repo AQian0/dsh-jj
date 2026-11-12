@@ -20,6 +20,8 @@ export interface JjToolService {
   /** Per-session workspace ownership, owned by the service (see `WorkspaceOwnership`). */
   readonly workspaceOwnership: WorkspaceOwnership;
   detect(cwd: string, signal?: AbortSignal): Promise<VcsDescriptor>;
+  /** Synchronous cached descriptor lookup when backed by `JjService`. */
+  peek?(cwd: string): VcsDescriptor | undefined;
 }
 
 /** One live top-level session, as the host enumerates it for workspace-liveness checks. */
@@ -32,6 +34,16 @@ export interface JjLiveToolSession {
   readonly cwd: string;
 }
 
+/** Approval request forwarded when a direct tool call bypasses `ToolRuntime`'s waterfall. */
+export interface JjToolApprovalRequest {
+  readonly agent: unknown;
+  readonly toolName: string;
+  readonly callId: string;
+  readonly reason?: string;
+  readonly displayReason?: { readonly en: string; readonly [locale: string]: string };
+  readonly signal?: AbortSignal;
+}
+
 /** Structural view of the host context used by the tools entry. */
 export interface JjToolsHost {
   readonly tools: { register(definition: ToolDefinition): () => void };
@@ -42,6 +54,32 @@ export interface JjToolsHost {
     /** Move one session to another directory (`workingDirectory.set`); optional on older hosts. */
     set?(agent: unknown, path: string, signal?: AbortSignal): Promise<string>;
   };
+  /**
+   * Optional host file-sandbox policy resolver (`@deepseek-ai/dsh-sandbox-policy`).
+   *
+   * Read-only mode enforces `--ignore-working-copy` on read tools and prompts before
+   * mutating tools; workspace-write mode prompts before writing or switching outside
+   * `[workspaceRoot, /tmp, os.tmpdir()]`.
+   */
+  readonly sandboxPolicy?: {
+    resolve(request?: { readonly session?: unknown }):
+      | {
+          readonly mode?: unknown;
+          readonly workspaceRoot?: unknown;
+        }
+      | undefined;
+  };
+  /**
+   * Optional host user-approval service (`@deepseek-ai/dsh-user-approval`).
+   *
+   * `ToolRuntime` already routes `tools/pre-execute` `ask` decisions through `ctx.get('approval')`;
+   * this hook covers direct `ToolDefinition.execute` callers in tests and embedders.
+   */
+  readonly approval?: {
+    request(request: JjToolApprovalRequest): Promise<string>;
+  };
+  /** Optional Cordis waterfall listener registration (`tools/pre-execute`). */
+  readonly on?: (event: string, listener: (...args: unknown[]) => unknown) => unknown;
   /**
    * Live top-level sessions of this host, or `undefined` when it cannot enumerate them.
    *
@@ -95,11 +133,25 @@ export function jjRefusalText(descriptor: VcsDescriptor, cwd: string, jjCommand 
     .join('\n');
 }
 
-export { canonicalWorkspacePath, isRootWorkspace } from './policies.ts';
+export {
+  JJ_TOOL_SANDBOX_CLASSES,
+  canonicalWorkspacePath,
+  decideJjToolSandbox,
+  isPathWithinSandboxRoots,
+  isRootWorkspace,
+  resolveSandboxTargetPath,
+  sandboxWritableRoots,
+  type JjSandboxMode,
+  type JjSandboxPolicy,
+  type JjToolSandboxClass,
+  type JjToolSandboxDecision,
+  type JjToolSandboxFacts,
+} from './policies.ts';
 
 /** The caller identity and cancellation one tool call runs with (the `execute` `exec` argument). */
 export interface ToolExec {
   readonly agent?: unknown;
+  readonly callId?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -108,6 +160,10 @@ export interface ToolContext {
   readonly config: ResolvedJjConfig;
   readonly host: JjToolsHost;
   readonly cwdFor: (exec: ToolExec) => Promise<string>;
+  /** Executions already evaluated by the `tools/pre-execute` waterfall listener. */
+  readonly preCheckedExecs?: WeakSet<object>;
+  /** Bounded call-id fallback when an around-wrapper clones `exec`. */
+  readonly preCheckedCallIds?: Set<string>;
 }
 
 export async function requireWorkspace(

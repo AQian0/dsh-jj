@@ -15,8 +15,8 @@ import {
   resolveConfig,
   type JjPluginConfig,
 } from './config.ts';
-import { jjToolDefinitions } from './tool-definitions.ts';
-import type { JjLiveToolSession, JjToolService, JjToolsHost, ToolExec } from './tool-shared.ts';
+import { evaluateJjToolSandbox, jjToolDefinitions } from './tool-definitions.ts';
+import type { JjLiveToolSession, JjToolService, JjToolsHost, ToolContext, ToolExec } from './tool-shared.ts';
 
 /**
  * Build the live-session provider the workspace tools use for liveness decisions.
@@ -112,10 +112,76 @@ export function registerJjTools(
       );
     }
   };
-  const disposers = jjToolDefinitions({ service: options.service, config, host, cwdFor }).map((definition) =>
-    host.tools.register(definition),
-  );
+  const preCheckedExecs = new WeakSet<object>();
+  const preCheckedCallIds = new Set<string>();
+  const toolContext: ToolContext = {
+    service: options.service,
+    config,
+    host,
+    cwdFor,
+    preCheckedExecs,
+    preCheckedCallIds,
+  };
+  const definitions = jjToolDefinitions(toolContext);
+  const registeredNames = new Set(definitions.map((definition) => definition.name));
+  const disposers = definitions.map((definition) => host.tools.register(definition));
+
+  let preExecuteDispose: (() => void) | undefined;
+  if (typeof host.on === 'function') {
+    try {
+      const listenerDispose = host.on('tools/pre-execute', async (rawExec: unknown, rawNext: unknown) => {
+        const next =
+          typeof rawNext === 'function'
+            ? (rawNext as () => Promise<unknown>)
+            : () => Promise.resolve({ kind: 'allow' });
+        if (typeof rawExec !== 'object' || rawExec === null) return await next();
+        const execRecord = rawExec as {
+          readonly name?: unknown;
+          readonly arguments?: unknown;
+          readonly agent?: unknown;
+          readonly callId?: unknown;
+          readonly signal?: unknown;
+        };
+        const toolName = typeof execRecord.name === 'string' ? execRecord.name : '';
+        if (!registeredNames.has(toolName)) return await next();
+        const downstream = await next();
+        if (
+          typeof downstream === 'object' &&
+          downstream !== null &&
+          'kind' in downstream &&
+          (downstream as { kind?: unknown }).kind !== 'allow'
+        ) {
+          return downstream;
+        }
+        const exec: ToolExec = {
+          ...(execRecord.agent !== undefined ? { agent: execRecord.agent } : {}),
+          ...(typeof execRecord.callId === 'string' ? { callId: execRecord.callId } : {}),
+          ...(execRecord.signal instanceof AbortSignal ? { signal: execRecord.signal } : {}),
+        };
+        const decision = await evaluateJjToolSandbox(toolContext, toolName, execRecord.arguments, exec);
+        preCheckedExecs.add(rawExec);
+        if (typeof execRecord.callId === 'string' && execRecord.callId.length > 0) {
+          preCheckedCallIds.add(execRecord.callId);
+          if (preCheckedCallIds.size > 512) {
+            const oldest = preCheckedCallIds.values().next();
+            if (!oldest.done) preCheckedCallIds.delete(oldest.value);
+          }
+        }
+        if (decision.kind === 'ask') return decision;
+        return downstream ?? { kind: 'allow' };
+      });
+      if (typeof listenerDispose === 'function') preExecuteDispose = listenerDispose as () => void;
+    } catch {
+      // Hosts without a compatible waterfall API still enforce the gate inside `withSandboxGate`.
+    }
+  }
+
   return () => {
+    try {
+      preExecuteDispose?.();
+    } catch {
+      // Unregistration must not throw during teardown.
+    }
     for (const disposer of disposers) {
       try {
         disposer();
@@ -163,13 +229,30 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
   // this row silently ignores.
   assertScopedConfig(config, 'tools');
   const service = (ctx as unknown as { jj: JjToolService }).jj;
-  // Build an explicit host view: the tools need `workingDirectory.get` and the live
-  // session list for workspace-ownership decisions, and both are Cordis services the
-  // registered tool context must see as plain callbacks.
+  const get = (ctx as unknown as { get?: (name: string, strict?: boolean) => unknown }).get;
+  const readOptionalService = <T>(serviceName: string): T | undefined => {
+    if (typeof get !== 'function') return undefined;
+    try {
+      return get.call(ctx, serviceName) as T | undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const rawOn = (ctx as unknown as { on?: (event: string, listener: (...args: unknown[]) => unknown) => unknown }).on;
+  // Build an explicit host view: the tools need `workingDirectory.get`, `sandboxPolicy`,
+  // `approval`, and the live session list, and optional Cordis services must be read
+  // tolerantly without expanding `inject`.
   const view = ctx as unknown as JjToolsHost;
   const host: JjToolsHost = {
     tools: view.tools,
     ...(view.workingDirectory !== undefined ? { workingDirectory: view.workingDirectory } : {}),
+    ...(typeof rawOn === 'function' ? { on: rawOn.bind(ctx) } : {}),
+    get sandboxPolicy() {
+      return readOptionalService<JjToolsHost['sandboxPolicy']>('sandboxPolicy');
+    },
+    get approval() {
+      return readOptionalService<JjToolsHost['approval']>('approval');
+    },
     liveSessions: liveSessionsProvider(ctx),
   };
   const disposer = registerJjTools(host, { service, config });

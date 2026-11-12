@@ -10,7 +10,7 @@
  * @module dsh-jj/tool-definitions
  */
 import { existsSync, readdirSync } from 'node:fs';
-import { sep } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
   COMMIT_STYLE_CHOICES,
@@ -19,6 +19,7 @@ import {
   detectCommitStyle,
   resolveCommitStylePolicy,
 } from './commit-style.ts';
+import { sniffVcsSync } from './detect.ts';
 import { isRewritableChange } from './jj-templates.ts';
 import {
   CHANGE_PROPERTIES,
@@ -32,15 +33,172 @@ import {
 import type { VcsDescriptor } from './types.ts';
 import { cleanupForeignWorkspace, cleanupWorkspace } from './flows/cleanup.ts';
 import { readSessionHeartbeats } from './session-heartbeat.ts';
-import { requireWorkspace, type JjLiveToolSession, type ToolContext, type ToolExec } from './tool-shared.ts';
 import {
+  requireWorkspace,
+  type JjLiveToolSession,
+  type JjToolsHost,
+  type ToolContext,
+  type ToolExec,
+} from './tool-shared.ts';
+import {
+  JJ_TOOL_SANDBOX_CLASSES,
   agentSessionId,
   canonicalWorkspacePath,
+  decideJjToolSandbox,
+  isPathWithinSandboxRoots,
   isRootWorkspace,
   isStaleWorkingCopyFailure,
+  sandboxWritableRoots,
+  type JjSandboxPolicy,
+  type JjToolSandboxDecision,
   type OwnedWorkspace,
 } from './policies.ts';
 import type { JjOperations } from './service.ts';
+
+/** Resolve the effective DSH file-sandbox policy for the agent making a tool call. */
+function resolveAgentSandboxPolicy(host: JjToolsHost, agent: unknown): JjSandboxPolicy | undefined {
+  const resolvePolicy = host.sandboxPolicy?.resolve;
+  if (typeof resolvePolicy !== 'function') return undefined;
+  const session = typeof agent === 'object' && agent !== null ? (agent as { session?: unknown }).session : undefined;
+  const parse = (raw: unknown): JjSandboxPolicy | undefined => {
+    if (typeof raw !== 'object' || raw === null) return undefined;
+    const mode = (raw as { mode?: unknown }).mode;
+    if (mode !== 'read-only' && mode !== 'workspace-write' && mode !== 'danger-full-access') return undefined;
+    const workspaceRoot = (raw as { workspaceRoot?: unknown }).workspaceRoot;
+    return { mode, workspaceRoot: typeof workspaceRoot === 'string' ? workspaceRoot : '' };
+  };
+  try {
+    return parse(resolvePolicy.call(host.sandboxPolicy, session !== undefined ? { session } : {}));
+  } catch {
+    try {
+      return parse(resolvePolicy.call(host.sandboxPolicy, {}));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/** Whether a tool call is running under DSH's `read-only` sandbox policy. */
+function isReadOnlyExecution(host: JjToolsHost, exec: ToolExec): boolean {
+  return resolveAgentSandboxPolicy(host, exec.agent)?.mode === 'read-only';
+}
+
+/** Model-facing note when an approved workspace switch lands outside `workspace-write` roots. */
+function workspaceSandboxBoundaryNote(
+  host: JjToolsHost,
+  exec: ToolExec,
+  workspacePath: string,
+  entered: boolean,
+): string {
+  if (!entered) return '';
+  const policy = resolveAgentSandboxPolicy(host, exec.agent);
+  if (policy?.mode !== 'workspace-write') return '';
+  if (isPathWithinSandboxRoots(workspacePath, sandboxWritableRoots(policy))) return '';
+  const rootLabel = policy.workspaceRoot.trim().length > 0 ? policy.workspaceRoot : 'unset';
+  return `Note: ${workspacePath} is outside the workspace-write sandbox root (${rootLabel}), so confined file/shell edits there will request sandbox approval; place temporary workspaces under the system temp directory (for example /tmp/<repo>-<name>) to avoid repeated prompts.`;
+}
+
+/**
+ * Evaluate the sandbox gate for one `jj_*` tool call before any mutating `jj` process spawns.
+ *
+ * Shared by the `tools/pre-execute` waterfall listener (the `ToolRuntime` pipeline) and the
+ * direct-execution fallback wrapper (`withSandboxGate`), so both paths apply identical rules.
+ */
+export async function evaluateJjToolSandbox(
+  context: ToolContext,
+  toolName: string,
+  rawArgs: unknown,
+  exec: ToolExec,
+): Promise<JjToolSandboxDecision> {
+  const policy = resolveAgentSandboxPolicy(context.host, exec.agent);
+  if (policy === undefined || policy.mode === 'danger-full-access') return { kind: 'allow' };
+  const toolClass = JJ_TOOL_SANDBOX_CLASSES[toolName];
+  if (toolClass === undefined || toolClass === 'read') return { kind: 'allow' };
+
+  let cwd: string;
+  try {
+    cwd = await context.cwdFor(exec);
+  } catch {
+    // Let `execute` surface the canonical `cwdFor` failure instead of a false approval dialog.
+    return { kind: 'allow' };
+  }
+
+  const cached = context.service.peek?.(cwd);
+  const sniff = cached === undefined ? sniffVcsSync(cwd) : undefined;
+  const kind = cached?.kind ?? sniff?.kind;
+  const hasJjMarker = (cached?.jjRoot ?? sniff?.jjRoot) !== undefined;
+  if (kind !== 'jj-colocated' && kind !== 'jj-native' && !hasJjMarker) {
+    // Non-jj directories fail immediately in `requireWorkspace` without spawning mutating jj commands.
+    return { kind: 'allow' };
+  }
+  const jjRepoPath = cached?.jjRepoPath ?? sniff?.jjRepoPath;
+  const args = typeof rawArgs === 'object' && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {};
+
+  let targetPath: string | undefined;
+  if (toolName === 'jj_workspace_add') {
+    const rawPath = typeof args['path'] === 'string' ? args['path'].trim() : '';
+    if (rawPath.length === 0 || rawPath.startsWith('-')) return { kind: 'allow' };
+    targetPath = resolve(cwd, rawPath);
+  } else if (toolName === 'jj_workspace_restore') {
+    const requestedName = typeof args['name'] === 'string' ? args['name'].trim() : '';
+    if (requestedName.length === 0) return { kind: 'allow' };
+    const owned = context.service.workspaceOwnership
+      .list(jjRepoPath, exec.agent)
+      .find((entry) => entry.name === requestedName);
+    if (owned === undefined || owned.baseChangeId === undefined) return { kind: 'allow' };
+    targetPath = owned.root;
+  } else if (policy.mode === 'workspace-write' && toolName === 'jj_workspace_enter') {
+    const requested = typeof args['workspace'] === 'string' ? args['workspace'].trim() : '';
+    if (requested.length === 0) return { kind: 'allow' };
+    try {
+      const workspaces = await context.service.operations.workspaceList(cwd, exec.signal);
+      const requestedCanonical = canonicalWorkspacePath(requested);
+      const resolvedCanonical = canonicalWorkspacePath(resolve(cwd, requested));
+      const match =
+        workspaces.find((ws) => ws.name === requested) ??
+        workspaces.find((ws) => {
+          const root = canonicalWorkspacePath(ws.root);
+          return root === requestedCanonical || root === resolvedCanonical;
+        });
+      if (match === undefined) return { kind: 'allow' };
+      if (canonicalWorkspacePath(match.root) !== canonicalWorkspacePath(cwd)) {
+        targetPath = match.root;
+      }
+    } catch {
+      targetPath = undefined;
+    }
+  } else if (policy.mode === 'workspace-write' && toolName === 'jj_workspace_cleanup') {
+    const requested = typeof args['workspace'] === 'string' ? args['workspace'].trim() : '';
+    try {
+      const workspaces = await context.service.operations.workspaceList(cwd, exec.signal);
+      const currentRoot = canonicalWorkspacePath(cached?.root ?? sniff?.jjRoot ?? cwd);
+      const currentName = cached?.workspaceName ?? 'default';
+      const isCurrent =
+        requested.length === 0 ||
+        requested === currentName ||
+        canonicalWorkspacePath(requested) === currentRoot ||
+        canonicalWorkspacePath(resolve(cwd, requested)) === currentRoot;
+      if (isCurrent) {
+        const defaultWs = workspaces.find((ws) => ws.name === 'default');
+        if (defaultWs !== undefined) targetPath = defaultWs.root;
+      } else {
+        const requestedCanonical = canonicalWorkspacePath(requested);
+        const resolvedCanonical = canonicalWorkspacePath(resolve(cwd, requested));
+        const match =
+          workspaces.find((ws) => ws.name === requested) ??
+          workspaces.find((ws) => {
+            const root = canonicalWorkspacePath(ws.root);
+            return root === requestedCanonical || root === resolvedCanonical;
+          });
+        if (match !== undefined && existsSync(match.root)) targetPath = match.root;
+      }
+    } catch {
+      targetPath = undefined;
+    }
+  }
+
+  return decideJjToolSandbox({ toolName, policy, cwd, jjRepoPath, targetPath });
+}
 
 /**
  * Build every `jj_*` tool definition (contract §7.3).
@@ -184,7 +342,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       async execute(args, exec) {
         const { cwd, descriptor } = await openWorkspace(exec);
         const details = args.details === true;
-        const status = await operations.status(cwd, exec.signal, { details });
+        const status = await operations.status(cwd, exec.signal, {
+          details,
+          ignoreWorkingCopy: isReadOnlyExecution(context.host, exec),
+        });
         return {
           ...workspaceFields(descriptor),
           changeId: status.change.changeId,
@@ -235,7 +396,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const revset = args.revset ?? '@ | @-';
         const requested = args.limit ?? config.defaultLogLimit;
         const limit = Math.max(1, Math.min(requested, config.maxLogLimit));
-        const changes = await operations.log(cwd, revset, limit, exec.signal);
+        const changes = await operations.log(cwd, revset, limit, exec.signal, {
+          ignoreWorkingCopy: isReadOnlyExecution(context.host, exec),
+        });
         return {
           revset,
           truncated: changes.length >= limit,
@@ -281,7 +444,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const revset = args.revset ?? '@';
         const format = args.format ?? 'stat';
         const paths = args.paths ?? [];
-        const result = await operations.diff(cwd, revset, format, paths, exec.signal);
+        const result = await operations.diff(cwd, revset, format, paths, exec.signal, {
+          ignoreWorkingCopy: isReadOnlyExecution(context.host, exec),
+        });
         return {
           revset,
           format,
@@ -459,7 +624,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         // to collect `sampleLimit` non-empty descriptions; the tools row's maxLogLimit
         // (which also bounds jj_log) still caps this extra process output.
         const readLimit = Math.min(sampleLimit + 5, Math.max(sampleLimit, config.maxLogLimit));
-        const fetched = await operations.descriptionSamples(cwd, '::@', readLimit, exec.signal);
+        const fetched = await operations.descriptionSamples(cwd, '::@', readLimit, exec.signal, {
+          ignoreWorkingCopy: isReadOnlyExecution(context.host, exec),
+        });
         const descriptions = fetched
           .map((description) => description.trim())
           .filter((description) => description.length > 0)
@@ -799,7 +966,10 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           enterNote =
             ' The session could not be moved into the new workspace (the host exposes no workingDirectory.set); switch with the working_directory tool before editing files.';
         }
-        const note = [result.note, enterNote].filter((line) => line !== undefined && line.length > 0).join(' ');
+        const boundaryNote = workspaceSandboxBoundaryNote(context.host, exec, result.path, entered);
+        const note = [result.note, enterNote, boundaryNote]
+          .filter((line) => line !== undefined && line.length > 0)
+          .join(' ');
         return {
           path: result.path,
           name: result.name,
@@ -875,7 +1045,9 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         const { cwd, descriptor } = await openWorkspace(exec);
         const currentWorkspace = descriptor.workspaceName ?? 'default';
         if (args.detail === 'full') {
-          const states = await operations.workspaceStates(cwd, exec.signal);
+          const states = await operations.workspaceStates(cwd, exec.signal, {
+            ignoreWorkingCopy: isReadOnlyExecution(context.host, exec),
+          });
           const records = ownership.records(descriptor.jjRepoPath);
           const currentId = agentSessionId(exec.agent);
           const liveIds = liveSessionIds(descriptor, exec.agent);
@@ -958,7 +1130,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
         if (requested.length === 0) {
           throw new Error('jj_workspace_enter needs a workspace name or absolute path; call jj_workspace_list first.');
         }
-        const states = await operations.workspaceStates(cwd, exec.signal);
+        const readOnly = isReadOnlyExecution(context.host, exec);
+        const states = await operations.workspaceStates(cwd, exec.signal, { ignoreWorkingCopy: readOnly });
         const requestedPath = canonicalWorkspacePath(requested);
         const target =
           states.find((state) => state.name === requested) ??
@@ -973,7 +1146,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
             workspaceName: target.name,
             workspaceRoot: target.root,
             alreadyCurrent: true,
-            change: changeView(await operations.readAt(cwd, exec.signal)),
+            change: changeView(await operations.readAt(cwd, exec.signal, '@', { ignoreWorkingCopy: readOnly })),
           };
         }
         const targetDescriptor = await service.detect(target.root, exec.signal);
@@ -1000,7 +1173,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           workspaceName: target.name,
           workspaceRoot: target.root,
           alreadyCurrent: false,
-          change: changeView(await operations.readAt(target.root, exec.signal)),
+          change: changeView(await operations.readAt(target.root, exec.signal, '@', { ignoreWorkingCopy: readOnly })),
         };
       },
     }),
@@ -1098,6 +1271,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           enterNote =
             ' The session could not be moved into the rebuilt workspace (the host exposes no workingDirectory.set); switch with the working_directory tool before editing files.';
         }
+        const boundaryNote = workspaceSandboxBoundaryNote(context.host, exec, result.path, entered);
+        const note = [enterNote, boundaryNote].filter((line) => line.length > 0).join(' ');
         return {
           path: result.path,
           name: result.name,
@@ -1105,7 +1280,7 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
           commitId: result.change.commitId,
           baseChangeId,
           entered,
-          ...(enterNote.length > 0 ? { note: enterNote } : {}),
+          ...(note.length > 0 ? { note } : {}),
           nextActions: nextActions({
             tool: 'jj_status',
             reason: entered
@@ -1760,7 +1935,63 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
       },
     }),
   ];
-  return definitions.map((definition) => withStaleRecovery(definition, context, operations));
+  return definitions.map((definition) => withSandboxGate(withStaleRecovery(definition, context, operations), context));
+}
+
+/**
+ * Enforce the sandbox policy on direct `ToolDefinition.execute` calls that bypassed `tools/pre-execute`.
+ *
+ * When a call traversed `ToolRuntime`'s `tools/pre-execute` waterfall, `preCheckedExecs`
+ * (or `preCheckedCallIds` when an around-wrapper cloned `exec`) records that the sandbox
+ * gate already ran and any `ask` decision was already routed through `ApprovalService`.
+ * Direct callers (tests, embedders, or hosts without `tools/pre-execute`) run the same
+ * evaluation here and route `ask` decisions through `host.approval` when available.
+ */
+function withSandboxGate(definition: ToolDefinition, context: ToolContext): ToolDefinition {
+  return {
+    ...definition,
+    async execute(args, exec) {
+      const execObject = typeof exec === 'object' && exec !== null ? exec : undefined;
+      const callId =
+        execObject !== undefined && typeof (execObject as { callId?: unknown }).callId === 'string'
+          ? (execObject as { callId: string }).callId
+          : undefined;
+      const alreadyChecked =
+        (execObject !== undefined && context.preCheckedExecs?.has(execObject) === true) ||
+        (callId !== undefined && callId.length > 0 && context.preCheckedCallIds?.delete(callId) === true);
+      if (!alreadyChecked) {
+        const decision = await evaluateJjToolSandbox(context, definition.name, args, exec);
+        if (decision.kind === 'ask') {
+          const approval = context.host.approval;
+          if (approval === undefined) {
+            throw new Error(decision.reason);
+          }
+          if (exec.agent === undefined) {
+            throw new Error(
+              `tool "${definition.name}" requires approval, but the call has no agent to route it through (${decision.reason})`,
+            );
+          }
+          const outcome = await approval.request({
+            agent: exec.agent,
+            toolName: definition.name,
+            callId: callId !== undefined && callId.length > 0 ? callId : `direct:${definition.name}`,
+            reason: decision.reason,
+            displayReason: decision.displayReason,
+            ...(exec.signal !== undefined ? { signal: exec.signal } : {}),
+          });
+          if (outcome === 'rejected') throw new Error(`the user rejected tool "${definition.name}"`);
+          if (outcome === 'cancelled') throw new Error(`approval for tool "${definition.name}" was cancelled`);
+          if (outcome !== 'allowed-once') {
+            throw new Error(
+              `tool "${definition.name}" requires approval, but no approval channel is available (${decision.reason})`,
+            );
+          }
+        }
+      }
+      if (execObject !== undefined) context.preCheckedExecs?.add(execObject);
+      return await definition.execute(args, exec);
+    },
+  };
 }
 
 /**
@@ -1775,7 +2006,8 @@ export function jjToolDefinitions(context: ToolContext): ToolDefinition[] {
  * The stale refusal happens while jj loads/snapshots the working copy, before any
  * mutation, so retrying once is safe. A second refusal propagates unchanged, and a
  * failed recovery rethrows the original error. `jj_workspace_update_stale` is not
- * wrapped (its whole purpose is that recovery).
+ * wrapped (its whole purpose is that recovery), and unprompted `read`/`workspace-switch`
+ * calls in `read-only` sandbox mode never spawn `update-stale`.
  *
  * @param definition - the registered tool.
  * @param context - tool context (for the calling session's cwd).
@@ -1791,6 +2023,10 @@ function withStaleRecovery(definition: ToolDefinition, context: ToolContext, ope
         return await definition.execute(args, exec);
       } catch (error) {
         if (!isStaleWorkingCopyFailure(error)) throw error;
+        const toolClass = JJ_TOOL_SANDBOX_CLASSES[definition.name];
+        if (isReadOnlyExecution(context.host, exec) && (toolClass === 'read' || toolClass === 'workspace-switch')) {
+          throw error;
+        }
         try {
           const cwd = await context.cwdFor(exec);
           await operations.updateStale(cwd, exec.signal);

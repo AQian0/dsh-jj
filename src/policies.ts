@@ -11,7 +11,8 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   readWorkspaceRecord,
   readWorkspaceRecords,
@@ -150,7 +151,14 @@ export class WorkspaceOwnership {
    * @param root - workspace root as reported by jj.
    * @param baseChangeId - implicit base change recorded for `jj_workspace_restore`.
    */
-  remember(jjRepoPath: string | undefined, agent: unknown, name: string, root: string, baseChangeId?: string): void {
+  remember(
+    jjRepoPath: string | undefined,
+    agent: unknown,
+    name: string,
+    root: string,
+    baseChangeId?: string,
+    options?: { readonly persist?: boolean },
+  ): void {
     if (typeof agent !== 'object' || agent === null || name.length === 0 || root.length === 0) return;
     const identity = { name, root: canonicalWorkspacePath(root) };
     const sessionId = agentSessionId(agent);
@@ -166,7 +174,7 @@ export class WorkspaceOwnership {
     const owned = this.bySession.get(key) ?? [];
     const merged = this.upsert(owned, { ...identity, sessionId }, baseChangeId, now);
     this.bySession.set(key, owned);
-    if (jjRepoPath === undefined) return;
+    if (jjRepoPath === undefined || options?.persist === false) return;
     const durable = readWorkspaceRecord(jjRepoPath, name);
     const effectiveBase = merged.baseChangeId ?? durable?.baseChangeId;
     writeWorkspaceRecord(jjRepoPath, {
@@ -409,4 +417,208 @@ export function decideOrphanWorkspaceCleanup(
   if (!facts.workingCopy.empty) return 'dirty-working-copy';
   if (facts.workingCopy.conflict) return 'conflicted-working-copy';
   return undefined;
+}
+
+/** Host file-sandbox modes exposed by `@deepseek-ai/dsh-sandbox-policy`. */
+export type JjSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
+/** Structural snapshot of one session's resolved DSH sandbox policy. */
+export interface JjSandboxPolicy {
+  readonly mode: JjSandboxMode;
+  readonly workspaceRoot: string;
+}
+
+/** Sandbox enforcement category of each `jj_*` tool. */
+export type JjToolSandboxClass = 'read' | 'workspace-switch' | 'workspace-create' | 'mutate';
+
+/**
+ * Exhaustive sandbox classification of all 24 `jj_*` tools.
+ *
+ * - `read`: inspection only; runs with `--ignore-working-copy` in `read-only` mode so
+ *   zero working-copy snapshots or op-log writes happen.
+ * - `workspace-switch`: switches the in-memory session working directory; allowed in
+ *   `read-only` mode (using `--ignore-working-copy`), and asks in `workspace-write` mode
+ *   when switching outside the sandbox writable roots.
+ * - `workspace-create`: creates a new working copy on disk and writes `.jj/repo`; asks in
+ *   `read-only` mode, and asks in `workspace-write` mode when target, cwd, or `.jj/repo`
+ *   lies outside `[workspaceRoot, /tmp, os.tmpdir()]`.
+ * - `mutate`: mutates `.jj` or working-copy state; asks in `read-only` mode, and asks in
+ *   `workspace-write` mode when cwd, `.jj/repo`, or an affected target workspace lies
+ *   outside `[workspaceRoot, /tmp, os.tmpdir()]`.
+ */
+export const JJ_TOOL_SANDBOX_CLASSES: Readonly<Record<string, JjToolSandboxClass>> = Object.freeze({
+  jj_status: 'read',
+  jj_log: 'read',
+  jj_diff: 'read',
+  jj_commit_style: 'read',
+  jj_op_log: 'read',
+  jj_workspace_list: 'read',
+  jj_bookmark_list: 'read',
+  jj_workspace_enter: 'workspace-switch',
+  jj_workspace_add: 'workspace-create',
+  jj_workspace_restore: 'workspace-create',
+  jj_new: 'mutate',
+  jj_commit: 'mutate',
+  jj_describe: 'mutate',
+  jj_squash: 'mutate',
+  jj_amend: 'mutate',
+  jj_undo: 'mutate',
+  jj_bookmark_set: 'mutate',
+  jj_rebase: 'mutate',
+  jj_handoff: 'mutate',
+  jj_workspace_cleanup: 'mutate',
+  jj_abandon: 'mutate',
+  jj_fetch: 'mutate',
+  jj_workspace_update_stale: 'mutate',
+  jj_op_restore: 'mutate',
+});
+
+/**
+ * Canonicalize a target path even when its leaf directories do not exist yet.
+ *
+ * `jj_workspace_add` creates missing directories (for example `/tmp/repo-ws1` on macOS,
+ * where `/tmp` is a symlink to `/private/tmp`), and a path inside a workspace may also
+ * traverse a symlinked parent pointing outside the sandbox. Walking up to the nearest
+ * existing ancestor and resolving `realpathSync` there handles both cases cleanly.
+ */
+export function resolveSandboxTargetPath(path: string): string {
+  let cursor = resolve(path);
+  const trailing: string[] = [];
+  for (;;) {
+    try {
+      let resolved = realpathSync(cursor);
+      for (let index = trailing.length - 1; index >= 0; index -= 1) {
+        const segment = trailing[index];
+        if (segment !== undefined) resolved = join(resolved, segment);
+      }
+      return resolved;
+    } catch {
+      const parent = dirname(cursor);
+      if (parent === cursor) return resolve(path);
+      trailing.push(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/**
+ * Canonical directories writable without approval under a `workspace-write` policy.
+ *
+ * Matches DSH's `writableRoots(policy)` (`[policy.workspaceRoot, '/tmp', os.tmpdir()]`),
+ * while skipping an empty `workspaceRoot` so a malformed policy never resolves `''` to
+ * `process.cwd()`.
+ */
+export function sandboxWritableRoots(policy: JjSandboxPolicy): readonly string[] {
+  if (policy.mode !== 'workspace-write') return [];
+  const roots = new Set<string>();
+  for (const candidate of [policy.workspaceRoot, '/tmp', tmpdir()]) {
+    if (candidate.trim().length === 0) continue;
+    roots.add(resolveSandboxTargetPath(candidate));
+  }
+  return [...roots];
+}
+
+/** Whether `targetPath` is equal to or nested inside any directory in `roots`. */
+export function isPathWithinSandboxRoots(targetPath: string, roots: readonly string[]): boolean {
+  if (targetPath.trim().length === 0) return false;
+  const resolvedTarget = resolveSandboxTargetPath(targetPath);
+  for (const root of roots) {
+    if (root.trim().length === 0) continue;
+    const resolvedRoot = resolveSandboxTargetPath(root);
+    if (resolvedTarget === resolvedRoot) return true;
+    const prefix = resolvedRoot.endsWith(sep) ? resolvedRoot : `${resolvedRoot}${sep}`;
+    if (resolvedTarget.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+/** Inputs to {@link decideJjToolSandbox}. */
+export interface JjToolSandboxFacts {
+  readonly toolName: string;
+  readonly policy?: JjSandboxPolicy | undefined;
+  readonly cwd: string;
+  readonly jjRepoPath?: string | undefined;
+  readonly targetPath?: string | undefined;
+}
+
+/** Pre-execution sandbox gate decision compatible with DSH `PreToolDecision`. */
+export type JjToolSandboxDecision =
+  | { readonly kind: 'allow' }
+  | {
+      readonly kind: 'ask';
+      readonly reason: string;
+      readonly displayReason: { readonly en: string; readonly zh: string };
+    };
+
+/**
+ * Pure sandbox gate decision for one `jj_*` tool call.
+ *
+ * Keeps `jj_*` host-executed tools aligned with DSH's file/shell sandbox boundaries:
+ * - absent policy or `danger-full-access` allows every call;
+ * - `read-only` allows `read` and `workspace-switch` tools (their execution runs with
+ *   `--ignore-working-copy`) and asks approval before any `workspace-create` or `mutate`
+ *   tool;
+ * - `workspace-write` allows writes inside `[workspaceRoot, /tmp, os.tmpdir()]` without
+ *   prompting and asks approval when a target directory, current workspace, or shared
+ *   `.jj/repo` store lies outside those writable roots.
+ */
+export function decideJjToolSandbox(facts: JjToolSandboxFacts): JjToolSandboxDecision {
+  const { policy, toolName } = facts;
+  if (policy === undefined || policy.mode === 'danger-full-access') return { kind: 'allow' };
+  const toolClass = JJ_TOOL_SANDBOX_CLASSES[toolName];
+  if (toolClass === undefined || toolClass === 'read') return { kind: 'allow' };
+
+  if (policy.mode === 'read-only') {
+    if (toolClass === 'workspace-switch') return { kind: 'allow' };
+    return {
+      kind: 'ask',
+      reason: `${toolName} mutates Jujutsu (jj) repository or workspace state while sandbox mode is read-only.`,
+      displayReason: {
+        en: `Allow ${toolName} to modify the Jujutsu repository in read-only mode`,
+        zh: `允许 ${toolName} 在只读沙箱模式下修改 Jujutsu 仓库`,
+      },
+    };
+  }
+
+  const roots = sandboxWritableRoots(policy);
+  const workspaceLabel = policy.workspaceRoot.trim().length > 0 ? policy.workspaceRoot : 'unset';
+  if (toolClass === 'workspace-switch') {
+    if (facts.targetPath !== undefined && !isPathWithinSandboxRoots(facts.targetPath, roots)) {
+      return {
+        kind: 'ask',
+        reason: `${toolName} switches the session working directory to ${facts.targetPath}, outside the workspace-write sandbox roots (${workspaceLabel} and system temp directories).`,
+        displayReason: {
+          en: `Switch session working directory to ${facts.targetPath} (outside current workspace)`,
+          zh: `将当前会话工作目录切换到沙箱可写范围外的 ${facts.targetPath}`,
+        },
+      };
+    }
+    return { kind: 'allow' };
+  }
+
+  if (toolClass === 'workspace-create' && facts.targetPath !== undefined) {
+    if (!isPathWithinSandboxRoots(facts.targetPath, roots)) {
+      return {
+        kind: 'ask',
+        reason: `${toolName} creates a Jujutsu workspace at ${facts.targetPath}, outside the workspace-write sandbox roots (${workspaceLabel} and system temp directories; temporary workspaces under /tmp stay inside workspace-write).`,
+        displayReason: {
+          en: `Create Jujutsu workspace at ${facts.targetPath} (outside current workspace)`,
+          zh: `在沙箱可写范围外创建 Jujutsu 工作区：${facts.targetPath}`,
+        },
+      };
+    }
+  }
+
+  for (const candidate of [facts.targetPath, facts.cwd, facts.jjRepoPath]) {
+    if (candidate === undefined || isPathWithinSandboxRoots(candidate, roots)) continue;
+    return {
+      kind: 'ask',
+      reason: `${toolName} modifies Jujutsu state at ${candidate}, outside the workspace-write sandbox roots (${workspaceLabel} and system temp directories).`,
+      displayReason: {
+        en: `Allow ${toolName} to modify Jujutsu state at ${candidate} (outside current workspace)`,
+        zh: `允许 ${toolName} 修改当前沙箱可写范围外的 Jujutsu 状态：${candidate}`,
+      },
+    };
+  }
+  return { kind: 'allow' };
 }

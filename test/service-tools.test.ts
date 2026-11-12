@@ -7,16 +7,24 @@
  * assert that **no** jj path ever falls back to git.
  */
 import { test } from 'node:test';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { Context } from '@deepseek-ai/cordis';
+import ToolRuntime, { type JsonSchemaNode, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { resolveConfig } from '../src/config.ts';
 import { detectVcs } from '../src/detect.ts';
 import { createCommandRunJj, JjError } from '../src/jj-command.ts';
 import { JjOperations, TPL_CHANGE, TPL_STATUS, changeFromRecord, isRewritableChange } from '../src/service.ts';
 import { WorkspaceOwnership } from '../src/policies.ts';
 import { removeSessionHeartbeat, writeSessionHeartbeat } from '../src/session-heartbeat.ts';
-import { jjRefusalText, jjToolDefinitions, registerJjTools, type JjToolService } from '../src/tools.ts';
+import {
+  apply as applyTools,
+  jjRefusalText,
+  jjToolDefinitions,
+  registerJjTools,
+  type JjToolService,
+} from '../src/tools.ts';
 import type { JjLiveToolSession } from '../src/tool-shared.ts';
 import {
   assertToolchain,
@@ -29,7 +37,6 @@ import {
   realpath,
   type Fixture,
 } from './helpers/fixtures.ts';
-import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools';
 
 /** Canonical JSON value a tool output renderer accepts. */
 type JsonValueLike = Parameters<ToolDefinition['output']['render']>[1];
@@ -3119,5 +3126,308 @@ test('jj_workspace_enter switches into an existing workspace and validates its o
   await assert.rejects(
     () => definition.execute({ workspace: 'no-such-workspace' }, fakeExec()),
     /found no workspace named or located at/,
+  );
+});
+
+test('sandboxPolicy read-only: read tools never snapshot dirty working copies and mutating tools require approval', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-sandbox-readonly');
+  const roSibling = await operations.workspaceAdd(repo, join(fx.root, 'ro-ws'), 'ro-ws', [], undefined, undefined);
+  // Leave an unsnapshotted edit in the default workspace so any read without
+  // `--ignore-working-copy` would append a snapshot operation to `op log`.
+  await writeFixtureFile(fx, repo, 'dirty-readonly.txt', 'unsnapshotted\n');
+  const opsBefore = (await operations.opLog(repo, 20)).map((op) => op.id);
+
+  let currentCwd = repo;
+  let approvalMode: 'absent' | 'rejected' | 'allowed-once' = 'absent';
+  const approvalCalls: Array<{ toolName: string; reason?: string }> = [];
+
+  const ctx = new Context();
+  ctx.provide('systemPrompt', {
+    tools: () => () => {},
+    section: () => () => {},
+    context: () => {},
+    getContextOrder: () => 0,
+  });
+  ctx.provide('jj', toolService(fx, operations));
+  ctx.provide('workingDirectory', {
+    ensure: async () => currentCwd,
+    get: () => currentCwd,
+    set: async (_agent: unknown, path: string) => {
+      currentCwd = path;
+      return path;
+    },
+  });
+  ctx.provide('sandboxPolicy', {
+    resolve: () => ({ mode: 'read-only', workspaceRoot: repo }),
+  });
+  new ToolRuntime(ctx);
+  applyTools(ctx, {});
+
+  const agent = { id: 'ro-agent', session: { id: 'ro-session', header: { cwd: repo } } };
+  let nextSeq = 1;
+  const runTool = async (name: string, args: Record<string, unknown> = {}) => {
+    const callId = `ro-call-${nextSeq}` as Parameters<ToolRuntime['execute']>[0]['callId'];
+    nextSeq += 1;
+    return await ctx.tools.execute({
+      callId,
+      name,
+      arguments: args,
+      agent: agent as never,
+      signal: new AbortController().signal,
+    });
+  };
+
+  // All 7 read tools + jj_workspace_enter succeed with zero approvals and zero new op-log entries.
+  for (const [name, args] of [
+    ['jj_status', {}],
+    ['jj_status', { details: true }],
+    ['jj_log', { revset: '@ | @-' }],
+    ['jj_diff', { format: 'stat' }],
+    ['jj_commit_style', {}],
+    ['jj_op_log', { limit: 5 }],
+    ['jj_bookmark_list', {}],
+    ['jj_workspace_list', { detail: 'basic' }],
+    ['jj_workspace_list', { detail: 'full' }],
+    ['jj_workspace_enter', { workspace: 'ro-ws' }],
+    ['jj_workspace_enter', { workspace: 'default' }],
+  ] as const) {
+    const outcome = await runTool(name, args);
+    assert.equal(outcome.isError, false, `${name} should succeed in read-only mode`);
+  }
+  assert.equal(currentCwd, repo);
+  assert.equal(roSibling.name, 'ro-ws');
+  const opsAfterReads = (await operations.opLog(repo, 20)).map((op) => op.id);
+  assert.deepEqual(opsAfterReads, opsBefore, 'read-only tools must not create working-copy snapshot operations');
+
+  // Without ApprovalService mounted, mutating tools fail closed via PreToolDecision `ask` -> `deny`.
+  const deniedCommit = await runTool('jj_commit', { message: 'feat: blocked in read-only' });
+  assert.equal(deniedCommit.isError, true);
+  assert.match(JSON.stringify(deniedCommit.content), /read-only/);
+  assert.deepEqual(
+    (await operations.opLog(repo, 20)).map((op) => op.id),
+    opsBefore,
+    'denied jj_commit never ran jj',
+  );
+
+  // Mount ApprovalService: rejected calls prompt once and abort; allowed-once calls prompt once and run.
+  ctx.provide('approval', {
+    request: async (req: { toolName: string; reason?: string }) => {
+      approvalCalls.push({ toolName: req.toolName, ...(req.reason !== undefined ? { reason: req.reason } : {}) });
+      return approvalMode === 'allowed-once' ? 'allowed-once' : 'rejected';
+    },
+  });
+
+  approvalMode = 'rejected';
+  const rejectedUndo = await runTool('jj_undo', {});
+  assert.equal(rejectedUndo.isError, true);
+  assert.match(JSON.stringify(rejectedUndo.content), /rejected/);
+  assert.equal(approvalCalls.length, 1, 'prompted once through ToolRuntime without double-prompting in execute');
+  assert.equal(approvalCalls[0]?.toolName, 'jj_undo');
+
+  approvalMode = 'allowed-once';
+  const allowedCommit = await runTool('jj_commit', { message: 'feat: user approved in read-only' });
+  assert.equal(allowedCommit.isError, false, 'approved mutation runs cleanly');
+  assert.equal(approvalCalls.length, 2, 'prompted once for jj_commit');
+});
+
+test('sandboxPolicy workspace-write: os.tmpdir() isolation needs zero prompts while external paths require approval', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-sandbox-wswrite');
+  await operations.bookmarkSet(repo, 'main', '@-', false);
+  const scopedTmp = fx.path('scoped-tmp');
+  const externalParent = fx.path('external-parent');
+  const plainGit = await initGit(fx.run, fx.path('plain-git'));
+  mkdirSync(scopedTmp, { recursive: true });
+  mkdirSync(externalParent, { recursive: true });
+
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = scopedTmp;
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  });
+
+  let currentCwd = repo;
+  let approvalOutcome: 'allowed-once' | 'rejected' = 'rejected';
+  const approvalCalls: string[] = [];
+
+  const ctx = new Context();
+  ctx.provide('systemPrompt', {
+    tools: () => () => {},
+    section: () => () => {},
+    context: () => {},
+    getContextOrder: () => 0,
+  });
+  ctx.provide('jj', toolService(fx, operations));
+  ctx.provide('workingDirectory', {
+    ensure: async () => currentCwd,
+    get: () => currentCwd,
+    set: async (_agent: unknown, path: string) => {
+      currentCwd = path;
+      return path;
+    },
+  });
+  ctx.provide('sandboxPolicy', {
+    resolve: () => ({ mode: 'workspace-write', workspaceRoot: repo }),
+  });
+  ctx.provide('approval', {
+    request: async (req: { toolName: string }) => {
+      approvalCalls.push(req.toolName);
+      return approvalOutcome;
+    },
+  });
+  new ToolRuntime(ctx);
+  applyTools(ctx, {});
+
+  const agent = { id: 'ws-agent', session: { id: 'ws-session', header: { cwd: repo } } };
+  let nextSeq = 1;
+  const runTool = async (name: string, args: Record<string, unknown> = {}) => {
+    const callId = `ws-call-${nextSeq}` as Parameters<ToolRuntime['execute']>[0]['callId'];
+    nextSeq += 1;
+    return await ctx.tools.execute({
+      callId,
+      name,
+      arguments: args,
+      agent: agent as never,
+      signal: new AbortController().signal,
+    });
+  };
+
+  // 1. Full multi-session lifecycle inside os.tmpdir() (`scopedTmp`): ZERO approval prompts!
+  const tmpWsPath = join(scopedTmp, 'repo-session-a');
+  const addTmp = await runTool('jj_workspace_add', { path: tmpWsPath, name: 'session-a' });
+  assert.equal(addTmp.isError, false);
+  assert.equal(approvalCalls.length, 0, 'os.tmpdir() workspace creation needs zero approvals');
+  assert.doesNotMatch(JSON.stringify(addTmp.content), /outside the workspace-write sandbox root/);
+
+  await writeFixtureFile(fx, currentCwd, 'isolated.txt', 'isolated work\n');
+  const commitTmp = await runTool('jj_commit', { message: 'feat: isolated commit' });
+  assert.equal(commitTmp.isError, false);
+  const handoffTmp = await runTool('jj_handoff', { destination: 'main', fetch: false });
+  assert.equal(handoffTmp.isError, false);
+  const cleanupTmp = await runTool('jj_workspace_cleanup', {});
+  assert.equal(cleanupTmp.isError, false);
+  assert.equal(realpath(currentCwd), realpath(repo));
+  assert.equal(approvalCalls.length, 0, 'entire tmp workspace lifecycle completed with zero approvals');
+
+  // 2. External sibling directory (`externalParent`): asks approval before creating or entering!
+  const externalWsPath = join(externalParent, 'repo-external');
+  approvalOutcome = 'rejected';
+  const rejectedExternal = await runTool('jj_workspace_add', { path: externalWsPath, name: 'ext-ws' });
+  assert.equal(rejectedExternal.isError, true);
+  assert.equal(existsSync(externalWsPath), false, 'rejected external workspace was never created on disk');
+  assert.deepEqual(approvalCalls, ['jj_workspace_add']);
+
+  approvalOutcome = 'allowed-once';
+  const approvedExternal = await runTool('jj_workspace_add', { path: externalWsPath, name: 'ext-ws' });
+  assert.equal(approvedExternal.isError, false);
+  assert.deepEqual(approvalCalls, ['jj_workspace_add', 'jj_workspace_add']);
+  assert.match(
+    JSON.stringify(approvedExternal.content),
+    /outside the workspace-write sandbox root/,
+    'approved external workspace surfaces a model-visible boundary note',
+  );
+
+  // Switch back to repo (`workspaceRoot`: allowed without prompt), then re-enter `ext-ws` (outside: prompts!).
+  const enterRepo = await runTool('jj_workspace_enter', { workspace: 'default' });
+  assert.equal(enterRepo.isError, false);
+  assert.equal(approvalCalls.length, 2, 'entering default inside workspaceRoot needs no prompt');
+
+  approvalOutcome = 'rejected';
+  const enterExternalRejected = await runTool('jj_workspace_enter', { workspace: 'ext-ws' });
+  assert.equal(enterExternalRejected.isError, true);
+  assert.equal(approvalCalls.length, 3, 'entering external workspace prompts in workspace-write mode');
+  assert.equal(realpath(currentCwd), realpath(repo));
+
+  // 3. Plain Git directory outside workspaceRoot still surfaces jjRefusalText without a spurious prompt.
+  currentCwd = plainGit;
+  const plainGitCall = await runTool('jj_commit', { message: 'feat: wrong vcs' });
+  assert.equal(plainGitCall.isError, true);
+  assert.equal(approvalCalls.length, 3, 'non-jj directory fails in requireWorkspace without prompting');
+  assert.match(JSON.stringify(plainGitCall.content), /No Jujutsu \(jj\) workspace was found/);
+});
+
+test('direct ToolDefinition.execute fallback enforces sandbox approval when tools/pre-execute is absent', async (t) => {
+  const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-direct-sandbox-gate');
+  fx.cwd = repo;
+  let outcome: 'rejected' | 'cancelled' | 'allowed-once' = 'rejected';
+  let prompted = 0;
+  const service = toolService(fx, operations);
+  const definitions = definitionsByName(
+    jjToolDefinitions({
+      service,
+      config: resolveConfig({}),
+      host: {
+        tools: { register: () => () => {} },
+        sandboxPolicy: { resolve: () => ({ mode: 'read-only', workspaceRoot: repo }) },
+        approval: {
+          request: async () => {
+            prompted += 1;
+            return outcome;
+          },
+        },
+      },
+      cwdFor: async () => repo,
+    }),
+  );
+  const describeDef = definitions.get('jj_describe')!;
+  await assert.rejects(() => describeDef.execute({ message: 'x' }, fakeExec()), /no agent to route it through/);
+  assert.equal(prompted, 0);
+
+  await assert.rejects(
+    () => describeDef.execute({ message: 'x' }, fakeExec({ id: 'direct-agent' })),
+    /the user rejected tool "jj_describe"/,
+  );
+  assert.equal(prompted, 1);
+
+  outcome = 'cancelled';
+  await assert.rejects(
+    () => describeDef.execute({ message: 'x' }, fakeExec({ id: 'direct-agent' })),
+    /approval for tool "jj_describe" was cancelled/,
+  );
+  assert.equal(prompted, 2);
+
+  outcome = 'allowed-once';
+  const result = (await describeDef.execute(
+    { message: 'feat: direct approved' },
+    fakeExec({ id: 'direct-agent' }),
+  )) as { description: string };
+  assert.equal(result.description, 'feat: direct approved');
+  assert.equal(prompted, 3);
+
+  // Stale-recovery never spawns `workspace update-stale` for read tools in read-only mode.
+  const staleArgvs: string[][] = [];
+  const staleOps = new JjOperations({
+    runJj: async (opts) => {
+      staleArgvs.push([...opts.argv]);
+      return {
+        exitCode: 1,
+        signal: null,
+        stdout: '',
+        stderr: 'Error: The working copy is stale (not updated since operation abc); run `jj workspace update-stale`',
+        truncated: false,
+        killedByTimeout: false,
+      };
+    },
+  });
+  const roDefs = definitionsByName(
+    jjToolDefinitions({
+      service: {
+        operations: staleOps,
+        workspaceOwnership: new WorkspaceOwnership(),
+        detect: (cwd, sig) => detectVcs(cwd, fx.run, sig),
+      },
+      config: resolveConfig({}),
+      host: {
+        tools: { register: () => () => {} },
+        sandboxPolicy: { resolve: () => ({ mode: 'read-only', workspaceRoot: repo }) },
+      },
+      cwdFor: async () => repo,
+    }),
+  );
+  await assert.rejects(() => roDefs.get('jj_status')!.execute({}, fakeExec({ id: 'ro-stale' })), /stale/i);
+  assert.equal(
+    staleArgvs.some((argv) => argv.includes('update-stale')),
+    false,
+    'read-only read tools must never run workspace update-stale',
   );
 });
