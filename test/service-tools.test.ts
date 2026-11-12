@@ -7,7 +7,8 @@
  * assert that **no** jj path ever falls back to git.
  */
 import { test } from 'node:test';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -3234,10 +3235,15 @@ test('sandboxPolicy workspace-write: os.tmpdir() isolation needs zero prompts wh
   const { fx, repo, operations } = await makeAmendFixture(t, 'dsh-jj-sandbox-wswrite');
   await operations.bookmarkSet(repo, 'main', '@-', false);
   const scopedTmp = fx.path('scoped-tmp');
-  const externalParent = fx.path('external-parent');
-  const plainGit = await initGit(fx.run, fx.path('plain-git'));
+  // Place `externalParent` outside `/tmp` as well as `scopedTmp` (on Linux `fx` lives under `/tmp`,
+  // which is always in `workspace-write` writable roots).
+  const nonTmpParent = existsSync('/var/tmp') ? '/var/tmp' : homedir();
+  const externalParent = mkdtempSync(join(nonTmpParent, 'dsh-jj-sandbox-ext-'));
+  t.after(() => rmSync(externalParent, { recursive: true, force: true }));
+  const plainGitDir = join(externalParent, 'plain-git');
+  mkdirSync(plainGitDir, { recursive: true });
+  const plainGit = await initGit(fx.run, plainGitDir);
   mkdirSync(scopedTmp, { recursive: true });
-  mkdirSync(externalParent, { recursive: true });
 
   const previousTmp = process.env.TMPDIR;
   process.env.TMPDIR = scopedTmp;

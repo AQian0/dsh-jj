@@ -7,8 +7,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   JJ_TOOL_SANDBOX_CLASSES,
@@ -268,7 +268,10 @@ test('resolveSandboxTargetPath and isPathWithinSandboxRoots canonicalize non-exi
 });
 
 test('decideJjToolSandbox enforces read-only and workspace-write boundaries', (t) => {
-  const base = mkdtempSync(join(tmpdir(), 'dsh-jj-sandbox-decide-'));
+  // Use `/var/tmp` (not `os.tmpdir()`) so `outside` is not under `/tmp` on Linux,
+  // where `os.tmpdir()` defaults to `/tmp` and `/tmp` is always a writable root.
+  const parentTmp = existsSync('/var/tmp') ? '/var/tmp' : homedir();
+  const base = mkdtempSync(join(parentTmp, 'dsh-jj-sandbox-decide-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const scopedTmp = join(base, 'scoped-tmp');
   const repo = join(base, 'repo');
