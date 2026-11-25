@@ -164,9 +164,12 @@ Web 端每轮结束后的「已编辑 N 个文件 +X −Y」卡片（右侧栏�
 
 Web/Desktop 端提供一个只读的 Jujutsu 面板，入口是右侧栏的 Jujutsu tab（可在侧栏的「添加」里打开）。它不写仓库：不 commit、不 rebase、不清 workspace，也不触发工作副本快照。
 
-- 数据来自两个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview` 与 `/api/jj.refresh`）：前者返回工作区身份、`@` 的 change/commit/描述/空/冲突、待集成栈（`::@ ~ ::immutable_heads()`，最多 20 条）、兄弟 workspace 的 `@`、bookmark 与最近 10 条 operation；后者只清缓存并重读。GET 走 5 秒缓存与在飞去重，**全部读取**（包括 `@`、兄弟 workspace 状态、栈的 `jj log`、bookmark 与 operation log）均强制 `--ignore-working-copy`，打开或刷新面板不会触发工作副本快照；存在已注册会话时路由只响应活跃会话目录及其同仓库兄弟 jj workspace（越界路径返回 `403`，不探测无关目录）。
+- 数据来自三个认证路由（`ctx.connection.fetch` 上的 `/api/jj.overview`、`/api/jj.refresh` 与 `/api/jj.revision`）：
+  - `GET /api/jj.overview` 返回工作区身份、`@` 的变更元数据与改动文件统计（仅在 `@` 非空时读取）、提交图（待集成可变栈 + 最近不可变祖先 + 本地书签目标，最多 30 条）、兄弟 workspace（附只读多会话活跃/空闲/孤儿状态）、本地书签（含远端同步状态与目标提交摘要，过滤 `@git`）与仅远端书签，以及最近 25 条 operation；
+  - `GET /api/jj.revision` 按需懒加载单条修订的完整多行描述/元数据/改动文件，以及带 `file` 参数时的有界统一 diff（按 400 行截断）；`rev` 仅接受 `@` 或 change/commit ID，拒绝任意 revset 或选项注入；
+  - `POST /api/jj.refresh` 清理该目录的 overview 与 revision 缓存并重读。GET 走 5 秒缓存与在飞去重，**全部读取**均强制 `--ignore-working-copy`（读取心跳时 `purgeExpired: false`），绝不触发工作副本快照或写盘；存在已注册会话时三个路由统一校验活跃会话目录及其同仓库兄弟 jj workspace（越界路径返回 `403`）。
 - 面板读取失败（jj 缺失、目录不是 jj workspace、元数据损坏）时返回 `enabled: true` + `reason`，界面上是一句说明，不会报错也不会影响会话。
-- 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。面板正文按「工作副本 → 栈 → 工作区 → 书签 → 操作日志」分区渲染，并用会话作用域的 slot props（`sessionId` + `useSessions`）取得当前目录。
+- 浏览器半侧作为本包的客户端 bundle 发布（`package.json` 的 `dsh.client` + `exports["./client"]`），由 DSH 的客户端模块加载器按需加载；`dsh.client.inject` 只声明它依赖的客户端插件（locale、sidebar-right），不新增任何运行时依赖。面板遵循 DSH 右侧栏视觉规范（38px 顶部栏、工作副本状态条、四段式视图切换「提交 / 书签 / 工作区 / 日志」及钻取式变更详情与就地统一 diff），通过 `sessionId` + `useSessions` 跟踪当前目录，并在 `useSessionStatus` 感知到回合结束时自动静默刷新。
 - 面板文案统一走 DSH 的 client locale（`jjPanel` 命名空间，注册 `zh` / `en` 字典）：guide 入口、右侧栏 tab 标题、正文与四个工具行共用同一份词典，tab 标题 slot 也绑定该命名空间，因此切换语言时 tab 与正文保持同一种语言。jj 的 operation 描述、commit 描述、workspace 名与路径属于数据，保持 jj 或用户写入时的原文；Host 返回的诊断也只在本地化的「原因」标签后作为原文展示。zh 词典里的 change / commit / stale 等标签已统一为「变更 / 提交 / 过期」，非空工作副本显示「有改动」而不是「干净」。
 - `uiPanel: off` 完全关闭面板：路由只回 `enabled: false` 且不读仓库，客户端也不会挂载 tab。headless profile 没有 `connection` 服务，路由根本不会注册。
 - 同一份客户端 bundle 还为四个工具注册了 `tool.call.toolview` 行（key 就是 wire 工具名）。行的形态与 DSH 内置工具行一致：24px 折叠行 + 前置图标 + hover 箭头，点击展开详情，不再画独立卡片（工具调用夹在流式「思考步骤」里，卡片会打断行节奏）；折叠行复用 `@deepseek-ai/dsh-client-ui-primitives` 的 `DisclosureRow` 与图标，宿主缺少该模块时退化为同高度的纯文本行。`jj_status` 摘要 change 短 id、描述与空/冲突标记，展开后显示完整 change/commit id、改动统计与 workspace 路径；`jj_log` 摘要 revset 与命中条数，展开后列出命中的 change（超出 6 条只计数）；`jj_workspace_list` 摘要工作区数量，展开后列出名称与路径并标出当前 workspace；`jj_handoff` 摘要目标与集成状态，展开后显示冲突数与 `nextActions` 的第一条理由。行只做摘要和只读展开，不做写操作入口，完整 JSON 仍在通用调用视图里；参数或结果不是合法 JSON 时退化为只有标题的行，不会抛错。

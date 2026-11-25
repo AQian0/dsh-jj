@@ -803,15 +803,24 @@ test('the client bundle is a classic script that registers a lazy sidebar tab', 
   // The body renders its page shell even before any data arrives (no session cwd here),
   // and its chrome follows the registered Chinese dictionary.
   const body = slots[0]?.component as (props: Record<string, unknown>) => FakeElement;
-  const tree = body({ sessionId: 'session-1', useSessions: () => undefined, t: zhT });
+  const tree = body({
+    sessionId: 'session-1',
+    useSessions: () => undefined,
+    useSessionStatus: () => false,
+    t: zhT,
+  });
   assert.equal(tree.props['className'], 'dshjj');
   assert.ok(Array.isArray(tree.props['children']) && (tree.props['children'] as unknown[]).length > 0);
   const treeText = JSON.stringify(tree.props);
   assert.match(treeText, /Jujutsu 状态/, 'the body header uses the localized title');
   assert.match(treeText, /刷新/, 'the refresh control is localized');
-  const title = slots[1]?.component as (props: Record<string, unknown>) => unknown;
-  assert.equal(title({ t: zhT }), 'Jujutsu 状态');
-  assert.equal(title({ t: (key: string) => key }), 'title', 'an unbound title still renders its key');
+  const title = slots[1]?.component as (props: Record<string, unknown>) => FakeElement;
+  const zhTitleEl = title({ t: zhT });
+  assert.equal(zhTitleEl.props['className'], 'dshjj-tab-title');
+  assert.match(JSON.stringify(zhTitleEl), /svg/, 'the tab title chip includes a monochrome Jujutsu glyph');
+  assert.match(JSON.stringify(zhTitleEl), /Jujutsu 状态/, 'the tab title chip renders the localized title');
+  const rawTitleEl = title({ t: (key: string) => key });
+  assert.match(JSON.stringify(rawTitleEl), /"title"/, 'an unbound title still renders its key');
 
   // Every tool view renders one compact disclosure row (the same shape as DSH's own
   // tool rows), never a standalone bordered card: these rows sit inside the streaming
@@ -1061,6 +1070,7 @@ test('the runtime entry registers the panel routes once the connection service e
   };
   const overviewPath = '/api/jj.overview';
   const refreshPath = '/api/jj.refresh';
+  const revisionPath = '/api/jj.revision';
 
   // Available before apply: the routes register synchronously.
   const early = routesOf();
@@ -1070,7 +1080,7 @@ test('the runtime entry registers the panel routes once the connection service e
   runtimeEntry.apply(earlyCtx, {});
   assert.deepEqual(
     early.routes.map((route) => route.path),
-    [overviewPath, refreshPath],
+    [overviewPath, refreshPath, revisionPath],
   );
 
   // Provided later (the real boot order): a child fiber through `ctx.inject` must
@@ -1084,7 +1094,7 @@ test('the runtime entry registers the panel routes once the connection service e
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(
     late.routes.map((route) => route.path),
-    [overviewPath, refreshPath],
+    [overviewPath, refreshPath, revisionPath],
     'the routes register when the connection service is provided later',
   );
 
@@ -1107,10 +1117,15 @@ test('the runtime entry registers the panel routes once the connection service e
   scopedCtx.set('sessions', { list: () => [session] });
   runtimeEntry.apply(scopedCtx, {});
   const scopedOverview = scoped.routes.find((route) => route.path === overviewPath)!;
+  const scopedRevision = scoped.routes.find((route) => route.path === revisionPath)!;
   const blocked = await scopedOverview.fetch(
     new Request(`http://localhost/api/jj.overview?cwd=${encodeURIComponent(unrelated)}`),
   );
   assert.equal(blocked.status, 403, 'unrelated host directories must be rejected when sessions are known');
+  const blockedRev = await scopedRevision.fetch(
+    new Request(`http://localhost/api/jj.revision?cwd=${encodeURIComponent(unrelated)}&rev=@`),
+  );
+  assert.equal(blockedRev.status, 403, 'revision inspection must enforce the same session directory scope');
   const siblingResp = await scopedOverview.fetch(
     new Request(`http://localhost/api/jj.overview?cwd=${encodeURIComponent(sibling)}`),
   );
