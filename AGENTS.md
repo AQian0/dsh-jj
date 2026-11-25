@@ -28,7 +28,7 @@
 | `vp check --deny-warnings` / `vp check --fix` | Oxfmt + Oxlint 检查（警告即失败）/ 自动修复（对应 `vp run check` / `check:fix`） |
 | `vp fmt` / `vp fmt --check`                   | Oxfmt 格式化 / 只检查                                                            |
 
-CI（`.github/workflows/ci.yml` / `release.yml`）均使用 `voidzero-dev/setup-vp`（固定 commit SHA）安装 `vp` 与 Node 24，执行 `vp install --frozen-lockfile` → `vp run test` → `vp pm pack --json -- --dry-run --ignore-scripts` 校验；`release.yml` 通过 npm OIDC 发布，并校验 jj 二进制 SHA-256。
+CI（`.github/workflows/ci.yml` / `release.yml`）均使用 `voidzero-dev/setup-vp`（固定 commit SHA）安装 `vp` 与 Node 24，执行 `vp install --frozen-lockfile` → `vp run test` → `vp pm pack --json -- --dry-run --ignore-scripts` 校验；`release.yml` 通过 npm OIDC 发布，并校验 jj 二进制 SHA-256；`stale.yml` 每日定时通过固定 commit SHA 的 `actions/stale` 标记并关闭长期无活动的 issue（不处理 PR）。
 
 ## 仓库结构
 

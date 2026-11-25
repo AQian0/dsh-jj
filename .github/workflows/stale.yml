@@ -1,0 +1,56 @@
+name: stale
+
+# 每日定时标记并关闭长期无活动的 issue（不处理 PR），也支持手动 workflow_dispatch 触发
+# （可勾选 debug-only 仅干跑预演，不修改线上 issue）。
+
+on:
+  schedule:
+    # 每天 01:30 UTC（09:30 CST）运行，避开整点高峰
+    - cron: '30 1 * * *'
+  workflow_dispatch:
+    inputs:
+      debug-only:
+        description: 'Dry-run without modifying any issues'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: write # 读写 actions/stale 断点状态缓存
+  issues: write # 标记、评论与关闭过期 issue
+
+concurrency:
+  group: stale
+  cancel-in-progress: false
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mark and close stale issues
+        # Actions are pinned to commit SHAs (verified against the `v11` / `v11.0.0`
+        # tags via `git ls-remote`); keep the `# v11 (vX.Y.Z)` comment in sync
+        # when upgrading.
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11 (v11.0.0)
+        with:
+          stale-issue-message: >-
+            This issue has been automatically marked as stale because it has not had recent activity.
+            It will be closed if no further activity occurs within 14 days.
+            （此 issue 长期未有活动，已自动标记为 stale；若 14 天内无新进展将自动关闭，随时可回复重新激活。）
+          close-issue-message: >-
+            This issue has been automatically closed due to inactivity. Feel free to reopen it if still relevant.
+            （此 issue 因长期无活动已自动关闭；如仍需跟进，欢迎随时重新打开。）
+          days-before-issue-stale: 60
+          days-before-issue-close: 14
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          stale-issue-label: 'stale'
+          close-issue-reason: 'not_planned'
+          exempt-issue-labels: 'pinned,security,help wanted,good first issue'
+          exempt-all-issue-milestones: true
+          remove-issue-stale-when-updated: true
+          remove-pr-stale-when-updated: false
+          operations-per-run: 30
+          ascending: true
+          debug-only: ${{ inputs.debug-only == true }}
