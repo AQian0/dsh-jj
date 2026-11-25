@@ -1,545 +1,95 @@
 # AGENTS.md
 
-面向在本仓库工作的 AI 代理(以及人类协作者)的开发说明。用户文档在 [README.md](./README.md);
-本文件只讲环境、架构、约定、验证与提交流程。内容以代码和 `pnpm test` 为准,发现过期请直接修正。
-本仓库自身是 **jj-colocated** 工作区,版本控制一律用 jj。
+面向本仓库 AI 代理与开发者的开发说明。用户文档见 [README.md](./README.md)；内容以代码和 `pnpm test` 为准。
+本仓库自身是 **jj-colocated** 工作区，版本控制一律使用 jj。
 
 ## 项目速览
 
-- `@aqian0/dsh-jj`:为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供一等 Jujutsu (jj) 支持的插件包。
-- 四个可独立加载的 bundle 入口(声明在 `cordis.patch.yml`,加载顺序即行的顺序):
-  - `dsh-jj`(Cordis 名 `jj`):`ctx.jj` 服务、仓库检测、会话级「优先用 jj」与多会话/收尾 rebase 上下文;
-  - `dsh-jj/tools`(`jj-tools`):24 个 `jj_*` 模型工具;
-  - `dsh-jj/guard`(`jj-guard`):git/jj 命令混淆防护;
-  - `dsh-jj/changes`(`jj-changes`):用 jj 工作副本快照实现每轮「已编辑 N 个文件」变更卡片,并通过 bundle patch
-    禁用 DSH 内置的 Git-only `workspace-changes` 行、在隔离 service scope 里复用它的记录器。
-- 纯 TypeScript + ESM,**零运行时依赖**:DSH 包全部通过 `peerDependencies` 由宿主提供(版本见 `package.json`);
-  `@deepseek-ai/dsh-workspace-changes` 是 changes 行的运行期 peer(宿主 deliverables bundle 提供)。
-- 开发工具链只在 `devDependencies` 里(`vite-plus` / `typescript` / `@types/node` + 测试专用的
-  `@deepseek-ai/dsh-session-projection`);构建仍只用 `tsc`,测试仍只用 `node --test`。
+- `@aqian0/dsh-jj`：为 DeepSeek Harness 提供一等 Jujutsu (jj) 支持的插件包，纯 TypeScript + ESM，**零运行时依赖**。
+- 四个 bundle 入口（顺序定义在 `cordis.patch.yml`）：
+  - `dsh-jj`（`jj-runtime`）：`ctx.jj` 服务、仓库检测、会话上下文、心跳同步与只读面板 Host 路由；
+  - `dsh-jj/tools`（`jj-tools`）：24 个 `jj_*` 模型工具；
+  - `dsh-jj/guard`（`jj-guard`）：git/jj 命令混淆守卫；
+  - `dsh-jj/changes`（`jj-changes`）：基于 jj 快照的变更卡片，禁用内置 Git-only `workspace-changes` 并在隔离 scope 复用其记录器。
 
-## 环境与准备
+## 环境与命令
 
-- Node.js 24.11+:`vite-plus@1.4.0` 的 engines 要求;测试直接由 Node 内置类型擦除运行 `.ts`;CI 固定 Node 24。
-- pnpm 12.16.1:`package.json` 的 `packageManager` 固定该版本,`pnpm-lock.yaml` 已提交,是工具链与公开 peer
-  依赖的唯一解析来源。
-- 首次准备:仓库根执行 `pnpm install`(仅首次需要网络,之后离线)。pnpm 会按 `peerDependencies` 自动安装公开的
-  DSH 包——所有依赖(含 `tsc`)都从本地 `node_modules` 解析,不需要手工 `npm install` 或单独安装编译器。
-- 真实 `jj`(CI 固定 0.47.1)和 `git` 必须在 `PATH`:测试用真实仓库夹具,不 mock 二进制行为。
-- `devDependencies` 只放工具链:`vite-plus@1.4.0`(提供 `vp` CLI / Oxfmt / Oxlint)、`typescript@7.0.2`
-  (原生编译器:`tsc` 来自按平台解析的 optionalDependency `@typescript/typescript-<platform>`,lockfile 记录
-  全部平台、安装只取当前平台;经典 JS API 已移除,本仓库只用 `tsc` CLI)、`@types/node@26.6.5`,以及测试专用的
-  `@deepseek-ai/dsh-session-projection`(只有 `test/guard-cwd.test.ts`
-  用它构建真实的 `WorkingDirectoryService` 栈;本插件不是它的 peer)。该测试依赖必须与安装树里
-  `@deepseek-ai/dsh-working-directory` 声明的 exact peer 保持一致:上游 `0.2.1-rcN` 升级时同步改这个
-  devDependency,再重跑 `pnpm install` 更新 lockfile,并确认 `pnpm peers check` 没有新告警。
-- 依赖变更保持克制:运行时依赖仍为零,不新增运行时依赖;lockfile 随任何依赖变更一起提交,测试不得访问网络。
-  `@deepseek-ai/dsh-workspace-changes` 与其它 DSH peer 一样用 caret 范围(宿主按运行时版本匹配),它只被
-  `src/changes.ts` 以 `import()` 动态引用,headless profile 没有该包时 changes 行降级为一条 warning,不阻断启动。
-- 查 DSH API:类型与实现位于本仓库 `node_modules/@deepseek-ai/*`(`lib/` + `lib/types/*.d.ts`),由 `pnpm install`
-  解析到本地;桌面版 app bundle 内的副本不直接可读。
+- **工具链版本**：Node.js 24.11+（CI 固定 Node 24）、`pnpm@12.16.1`、`jj` 0.47.1 + `git`（均需在 `PATH`，测试使用真实仓库夹具）、`vite-plus@1.4.0`、`typescript@7.0.2`、`@types/node@26.6.5`。
+- **测试专用 devDependency**：`@deepseek-ai/dsh-session-projection` 仅供 `test/guard-cwd.test.ts` 构造 `WorkingDirectoryService`，须与安装树中 `@deepseek-ai/dsh-working-directory` 的 exact peer 同步升级，更新后跑 `pnpm install` 并确认 `pnpm peers check` 无新告警。
+- **首次准备**：仓库根执行 `pnpm install`（`pnpm-lock.yaml` 已提交）；查询 DSH API 直接读本地 `node_modules/@deepseek-ai/*`。
+- **构建/测试分工**：构建用 `tsc`（主包 `tsconfig.json` + 客户端 `tsconfig.client.json`），测试用 `node --test`（Node 原生类型擦除）；`vite-plus` 仅负责 Oxfmt 与 Oxlint（配置见 `vite.config.ts`）。
 
-## 常用命令
+| 命令                                        | 作用                                                                           |
+| ------------------------------------------- | ------------------------------------------------------------------------------ |
+| `pnpm test`                                 | 提交前完整门禁：`pnpm run check` → `pnpm run typecheck` → `pnpm run test:unit` |
+| `pnpm run build`                            | 编译 `src/` → `lib/`（含 `panel-client.js`，不入库）                           |
+| `pnpm run typecheck`                        | `tsc -p tsconfig.test.json`（覆盖 `src/`、`test/`、`vite.config.ts`）          |
+| `pnpm run check` / `pnpm run check:fix`     | `vp check --deny-warnings`（Oxfmt + Oxlint，警告即失败）/ 自动修复             |
+| `pnpm run format` / `pnpm run format:check` | Oxfmt 格式化 / 只检查                                                          |
+| `pnpm run test:unit` / `test:coverage`      | 运行真实夹具单元测试 / 覆盖率报告                                              |
 
-| 命令                                        | 作用                                                                                                                                                     |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test`                                 | 提交前必须全绿:`pnpm run check`(`vp check --deny-warnings`:Oxfmt + Oxlint)→ `pnpm run typecheck` → `pnpm run test:unit`(`build.test.ts` 负责构建 `lib/`) |
-| `pnpm run build`                            | `tsc -p tsconfig.json`:`src/` → `lib/`(构建产物,不入库)                                                                                                  |
-| `pnpm run typecheck`                        | 对 `src/` + `test/` + `vite.config.ts` 做类型检查(`tsconfig.test.json`,`noEmit`)                                                                         |
-| `pnpm run check`                            | 静态门禁:`vp check --deny-warnings`(Oxfmt 格式检查 + Oxlint,警告也失败)                                                                                  |
-| `pnpm run check:fix`                        | 同 `check`,并自动修复能修的格式/lint 问题                                                                                                                |
-| `pnpm run lint` / `pnpm run lint:fix`       | 只跑 Oxlint / 自动修复                                                                                                                                   |
-| `pnpm run format` / `pnpm run format:check` | 用 Oxfmt 格式化 / 只检查(提交前跑 `format`)                                                                                                              |
-| `pnpm run test:unit`                        | 只跑测试(`node --test`);仍要求真实 jj/git,`build.test.ts` 会先构建 `lib/`                                                                                |
-| `pnpm run test:coverage`                    | 用 Node 内置覆盖率跑全部测试(`--test-coverage-include='src/**/*.ts'`,排除 `lib/`);当前 line ≈96%                                                         |
-| `pnpm run prepack`                          | 由 `pnpm pack` / `npm publish` 自动触发的发布前构建(即 `pnpm run build`)                                                                                 |
+CI（`.github/workflows/ci.yml` / `release.yml`）均执行 `pnpm install --frozen-lockfile` → `pnpm test` → `pnpm pack --dry-run` 校验；`release.yml` 通过 npm OIDC 发布，actions 固定 commit SHA 且校验 jj 二进制 SHA-256。
 
-测试仍是 `node --test`、构建仍是 `tsc`:测试需要真实 jj/git 仓库夹具与 Node 的类型擦除,包本身零运行时依赖,
-产物就是 `tsc` 的 `lib/`,因此刻意不启用 `vp test`(Vitest)与 `vp build`(tsdown);`vite.config.ts` 只配置
-`fmt` / `lint` 两件事。
+## 仓库结构
 
-push / PR CI(`.github/workflows/ci.yml`)先用 `pnpm/action-setup`(固定 commit SHA)安装 `packageManager` 指定的
-pnpm,`setup-node` 开启 pnpm 缓存,`pnpm install --frozen-lockfile` 后跑 `pnpm test`,再用
-`pnpm pack --dry-run --ignore-scripts --json` 做发布 tarball 的 smoke check。
-`release.yml` 在发布前复用同一门禁,再显式 `pnpm run build`、用同一 `pnpm pack` 命令校验发布内容,最后用
-npm 可信发布(GitHub OIDC)发布,并用 `npm view` 判断该版本是否已发布。
-`npm` 只出现在发布链路,本地一切命令都用 pnpm / `vp`。两个 workflow 的 jj 安装会校验资产 SHA-256,actions
-固定到 commit SHA(注释写明来源与升级方式)。锁文件固定上游解析结果;升级上游时同步 `devDependencies` 里的
-`@deepseek-ai/dsh-session-projection` 并重跑 `pnpm install`(更新 lockfile),确认 `pnpm peers check` 无新告警。
+| 路径                                                                       | 职责                                                                                                |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `src/index.ts`、`src/service.ts`、`src/jj-*.ts`                            | 运行时入口、`JjService` 缓存/生命周期、`JjOperations`、模板解析与子进程适配                         |
+| `src/tools.ts`、`src/tool-*.ts`、`src/flows/cleanup.ts`                    | 24 个 `jj_*` 工具定义、共享 schema/文案、审批接线与 cleanup 流程                                    |
+| `src/guard.ts`、`src/git-*.ts`、`src/jj-rules.ts`、`src/capabilities.ts`   | shell 分词/展开、git/jj 规则表、能力矩阵与同步守卫                                                  |
+| `src/changes*.ts`                                                          | jj 快照读取、diff 解析、会话状态机、与内置 recorder 合并服务及入口装配                              |
+| `src/detect.ts`、`src/config.ts`、`src/types.ts`                           | 仓库嗅探与 CLI 探测、联合/分片配置 schema 与归属校验、共享类型                                      |
+| `src/policies.ts`、`src/session-heartbeat.ts`、`src/workspace-registry.ts` | 工作区所有权与持久化、cleanup/孤儿策略、沙箱分类与路径边界、跨进程心跳                              |
+| `src/commit-style.ts`、`src/multi-session.ts`、`src/prompt-context.ts`     | 提交风格与修正折叠指引、多会话检测与收尾指引、会话 prompt 拼装                                      |
+| `src/panel-host.ts`、`src/panel-client.ts`                                 | 只读 Web 面板 Host 路由与经典脚本客户端（独立 `tsconfig.client.json`）                              |
+| `test/**/*.test.ts`、`test/helpers/`                                       | 按模块划分的单元测试与真实 jj/git 仓库夹具（`test/build.test.ts` 守卫打包、导出、纯模块与工具链）   |
+| `cordis.patch.yml`、`**/locale/*.json`                                     | bundle patch（4 入口 + 禁用内置 `workspace-changes` + `agent-instructions`）与各入口 `en`/`zh` meta |
 
-## 仓库布局
+## 架构与核心约束
 
-| 路径                                                           | 内容                                                                                                                                                                                                          |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`                                                 | 运行时入口:`JjService` 注册 + 全局 prompt context + 会话心跳生命周期同步 + 面板路由目录范围;`assembleBaseLayer` 供测试                                                                                        |
-| `src/service.ts`                                               | `JjOperations`(一次一个 jj 子命令 + handoff 流程,注入 runner);barrel re-export `jj-templates` / `jj-service`                                                                                                  |
-| `src/jj-templates.ts`                                          | 纯模块:jj 模板常量、change 记录类型与 JSON 解析(无 I/O、无 subprocess)                                                                                                                                        |
-| `src/jj-service.ts`                                            | `JjService`:Cordis 服务、TTL 缓存/`peek`/`warm`/dispose、lifetime 信号合并                                                                                                                                    |
-| `src/tools.ts`                                                 | barrel re-export `tool-schemas` / `tool-shared` / `tool-definitions` / `tool-entry`                                                                                                                           |
-| `src/tool-schemas.ts`                                          | 共享输出 schema 与 change view(纯数据/视图)                                                                                                                                                                   |
-| `src/tool-shared.ts`                                           | 拒绝文案、workspace 工具函数与 `ToolContext` / `JjToolService` 类型;`JjToolsHost` 的 `liveSessions` / `workingDirectory.get` / `sandboxPolicy` / `approval` 可选钩子                                          |
-| `src/tool-definitions.ts`                                      | `jjToolDefinitions` 与 24 个 `defineTool`(含 session workspace 所有权、cleanup/handoff 的 liveness 策略、统一 stale 重试与 `sandboxPolicy` 门禁)                                                              |
-| `src/tool-entry.ts`                                            | `registerJjTools` / `apply` / `name` / `inject` 与 `cwdFor`;用 `ctx.get('agents')` + `workingDirectory.get` 构造 liveSessions,接入 `tools/pre-execute` 审批瀑布流                                             |
-| `src/detect.ts`                                                | 仓库识别:同步文件系统 sniff + CLI 权威探测                                                                                                                                                                    |
-| `src/policies.ts`                                              | 纯模块:持久化工作区所有权注册表(按 session id)、根 workspace 判定、当前/孤儿 cleanup 决策、stale 错误识别、24 工具沙箱分类与路径边界判定;工具/flow/guard 共用同一份规则                                       |
-| `src/session-heartbeat.ts`                                     | 纯模块:跨进程会话心跳（`<jjRepoPath>/dsh-jj/sessions/*.json`），多会话检测与 workspace 存活判断的第二个来源;支持同进程 id 集合排除与只读免清理                                                                |
-| `src/workspace-registry.ts`                                    | 纯模块:`jj_workspace_add` 的 workspace 记录(name/root/sessionId/baseChangeId)持久化到 `<jjRepoPath>/dsh-jj/workspaces/`,tmp+rename、fail-open                                                                 |
-| `src/flows/cleanup.ts`                                         | 具名流程:当前 workspace 的注销(切换目录、forget、default 空 @ 线性化)与外来的孤儿 workspace 注销(不移动会话、不删目录),含 stale 恢复与有限空 @ prune                                                          |
-| `src/panel-host.ts`                                            | 只读面板 Host 半侧:`/api/jj.overview` + `/api/jj.refresh` + `/api/jj.revision` 聚合快照与按需详情/diff(全链路 `--ignore-working-copy` + `purgeExpired: false` + `isAllowedCwd`)、5s 缓存、失败降级;绝不写仓库 |
-| `src/panel-client.ts`                                          | 只读面板浏览器半侧:经典 script + `__ModuleLoader__.load` 包裹,注册右侧栏 tab 与 locale;唯一客户端入口                                                                                                         |
-| `src/capabilities.ts`                                          | 纯模块:jj 子命令 → 处置（tool / shell / blocked）的能力矩阵；`test/capabilities.test.ts` 断言覆盖 guard 表与已注册工具                                                                                        |
-| `src/git-command.ts`                                           | barrel re-export `git-tokenize` / `git-equivalence` / `git-rules` / `jj-rules`                                                                                                                                |
-| `src/git-tokenize.ts`                                          | shell 分词/运算符/重定向/heredoc/命令替换扫描(纯函数)                                                                                                                                                         |
-| `src/git-equivalence.ts`                                       | git 安全分类与等价命令表类型/规则(纯数据)                                                                                                                                                                     |
-| `src/git-rules.ts`                                             | git 子命令规则表与 `classifyGitInvocation`(纯函数)                                                                                                                                                            |
-| `src/jj-rules.ts`                                              | jj 子命令 scope 表与 `classifyJjInvocation`(纯函数)                                                                                                                                                           |
-| `src/guard.ts`                                                 | git 混淆 guard:warm-up 预计算 + 同步决策 + 文案                                                                                                                                                               |
-| `src/jj-command.ts`                                            | jj/git 子进程适配、非交互 env、错误归类                                                                                                                                                                       |
-| `src/config.ts`                                                | schemastery `Config`、`JjPluginConfig`、`resolveConfig`、启动校验                                                                                                                                             |
-| `src/commit-style.ts`                                          | 提交描述风格策略(继承历史 / 询问用户 / 预设与自定义)、拆分提交与修正折叠指引(纯模块,无 I/O)                                                                                                                   |
-| `src/types.ts`                                                 | 共享类型与词汇(纯声明)                                                                                                                                                                                        |
-| `src/prompt-context.ts`                                        | 会话开始时注入「优先用 jj」、提交描述/拆分提交/修正折叠与多会话/收尾 rebase 的模型可见上下文                                                                                                                  |
-| `src/multi-session.ts`                                         | 多会话检测(同一 jj 仓库里的顶层会话、workspace 是否共享)与模型可见的 workspace 隔离 / 收尾 rebase 指引(纯模块,无 subprocess)                                                                                  |
-| `test/**/*.test.ts`                                            | `node:test` 测试;`test/helpers/` 是真实仓库夹具与 runner                                                                                                                                                      |
-| `test/multi-session.test.ts`                                   | 多会话检测模式、指引文案与 prompt token 预算的单元测试                                                                                                                                                        |
-| `test/policies.test.ts`                                        | 所有权(含跨重启持久化与只读内存态)、cleanup/孤儿决策表、stale 识别、24 工具沙箱分类漂移与符号链接路径边界                                                                                                     |
-| `test/session-heartbeat.test.ts`                               | 心跳文件布局、过期、`excludeSessionIds` 同进程去重、删除、只读不清理与 fail-open                                                                                                                              |
-| `test/workspace-registry.test.ts`                              | workspace 记录的往返、文件名清洗、损坏跳过与目录不可用时的 fail-open                                                                                                                                          |
-| `test/service-tools.test.ts`                                   | `jj_*` 工具与操作层端到端(真实 jj 仓库):handoff/cleanup、跨 workspace 防护与恢复、孤儿注销、default 线性化、stale 重试、`sandboxPolicy` 审批与 `read-only` 零快照等                                           |
-| `test/service.test.ts`                                         | `JjService` 的 TTL 缓存 / warm / peek / dispose 生命周期测试                                                                                                                                                  |
-| `test/changes-diff.test.ts`                                    | `changes-diff` 解析单元测试(literal jj 输出 + 真实夹具 + 拒绝快照警告解析)                                                                                                                                    |
-| `test/changes-jj.test.ts`                                      | `changes-jj` 读取器测试(真实 jj-native/colocated 夹具 + fake runner 失败形态)                                                                                                                                 |
-| `test/changes-recorder.test.ts`                                | `changes-recorder` 状态机测试(fake reader:轮次、失败、上限、binary、oversized、拒绝快照的新文件、forget/dispose)                                                                                              |
-| `test/changes-service.test.ts`                                 | `changes-service` 合并/路由测试(fake recorder + upstream)                                                                                                                                                     |
-| `test/changes-entry.test.ts`                                   | `jj-changes` 入口端到端测试(真实 Cordis + 真实 jj/git 夹具:jj-native 卡片、colocated 合并、纯 Git 回退、三种模式)                                                                                             |
-| `test/jj-command.test.ts`                                      | 子进程适配层(fake `ctx.subprocess`:超时/取消/截断/错误归类)测试                                                                                                                                               |
-| `tsconfig.client.json`                                         | 单独编译 `src/panel-client.ts`:ES2022 + Bundler + legacy 模块检测,保证产物是无 import/export 的经典脚本                                                                                                       |
-| `vite.config.ts`                                               | Vite+ 工具链配置:Oxfmt(`printWidth: 120` / `singleQuote`)与 Oxlint(`unicorn` / `typescript` / `oxc` / `import`),格式与 lint 规则的唯一来源                                                                    |
-| `pnpm-workspace.yaml`                                          | 单包 pnpm 设置:把 `vite` 别名到 `vite-plus` 自带 core、把 `vitest` 钉到自带运行器,并放行对应 peer 版本(别名版本与 `vite-plus` devDependency 同步,`build.test.ts` 会校验)                                      |
-| `pnpm-lock.yaml`                                               | 提交的锁文件:工具链与公开 peer 依赖的唯一解析来源,由 `pnpm install` 生成/更新                                                                                                                                 |
-| `.github/workflows/`                                           | CI:`ci.yml`(push / PR:`pnpm install --frozen-lockfile` + `pnpm test` + `pnpm pack` smoke check)、`release.yml`(tag 触发:同一门禁 + `pnpm run build` + `pnpm pack` 校验后 npm OIDC 发布)                       |
-| `locale/`、`tools/locale/`、`guard/locale/`、`changes/locale/` | 四个入口各自的本地化 meta(`en.json` / `zh.json`)                                                                                                                                                              |
-| `cordis.patch.yml`                                             | bundle patch:四行 `insert`、禁用内置 `workspace-changes` 的 `disabled: true` 行、`agent-instructions` 配置覆盖                                                                                                |
-| `lib/`                                                         | `tsc` 产物,被忽略、不提交;发布包由 `package.json.files` 决定                                                                                                                                                  |
+1. **入口契约**：四个入口各导出 `name` / `inject` / `apply` / `Config`。根入口 `src/index.ts` 只导出白名单（契约值、`JjService`、`assembleBaseLayer` 与少量类型），其余实现走公开子路径，`test/build.test.ts` 强校验。
+2. **服务分层**：`index.ts` 提供 `ctx.jj`；tools/guard 通过 `inject: ['tools', 'jj' (, 'workingDirectory')]` 消费，changes 通过 `inject: ['subprocess', 'fs', 'jj']` 消费。勿随意改动 `inject`。
+3. **纯模块边界**：`detect`、`git-*`、`jj-rules`、`types`、`commit-style`、`multi-session`、`jj-templates`、`policies`、`session-heartbeat`、`workspace-registry`、`capabilities`、`changes-types`/`paths`/`diff`/`jj`/`recorder`/`service` 禁止在运行时 import `@deepseek-ai/*`（允许 `import type`）。DSH 运行时 import 仅限 `config` / `jj-service` / `tool-definitions` / `jj-command` / `changes`（`build.test.ts` 拒绝静态、动态 `import()` 与 `require`）。
+4. **子进程与非交互**：禁止直接 spawn；所有 jj/git 调用走注入的 `RunJj` / `RunCommand`，统一经 `jjNonInteractiveEnv` 设 `ui.color=never` 并屏蔽编辑器/交互提示。
+5. **检测语义与拒绝文案**：`detectVcs` 始终返回 `VcsDescriptor`（问题经 `notices` + `verified: false` 上报，不抛业务异常）；CLI 权威为 `jj --ignore-working-copy workspace list`。模型可见拒绝文案集中在 `tool-shared.ts` / `guard.ts`，任何路径不得静默回退 git。
+6. **同步 guard**：`ctx.tools.guard` 为同步接口，经 `tools/pre-execute` warm-up 预填缓存，失败一律 fail-open。默认策略 `warn`，hard-deny 不可通过配置放开。命令分类按 shell 语义递归展开常见 wrapper 与静态目录切换，无法解析时 fail-open 并一次性告警。
+7. **配置唯一事实来源**：`src/config.ts` 的 `Config` 是键集合、类型与默认值的唯一声明；`ROW_CONFIG_KEYS` 是归属唯一来源（模块加载时校验完整覆盖）。四个入口均用 `configSchemaFor(owner)` + `assertScopedConfig(config, owner)` 在构造期拒绝放错行或未知的键（含显式写成默认值的键）。
+8. **Bundle patch 与 peer 兼容**：`cordis.patch.yml` 非 `insert` 行整体替换目标 `config`，必须重述保留键；`disabled: true` 用于禁用内置 `workspace-changes`（上游缺失时只 warn，不阻断启动）。`@deepseek-ai/dsh-*` peer 必须写 caret 范围（`build.test.ts` 强校验），禁止精确钉版。
+9. **多会话检测与心跳**：仅将正在执行回合的顶层会话（`agents.roots()` + `turnBoundary.openTurnStartSeq !== null`；子代理除外）视为并行，全程 fail-open。跨进程心跳写 `<jjRepoPath>/dsh-jj/sessions/*.json`（TTL 15 分钟，`turn/end` 置 `active: false`，离开仓库/销毁删除，`read-only` 禁止写或清理）；读取时用 `excludeSessionIds` 排除同进程所有已观测会话。隔离指引固定为先提交自身路径、再不带 `parents` 调 `jj_workspace_add`（优先 `/tmp/<repo>-<name>`），绝不推荐 `parents: ["@"]`。
+10. **收尾自动化（`handoff` / `cleanup` / `restore`）**：
+    - `JjOperations.handoff()` 统一编排 fetch → 目标解析 → `roots(::@ ~ ::target)` → `jj rebase -s` → base/冲突复核，并在外层包整流程 stale 自动恢复。
+    - Rebase 前 fail-closed 校验：目标须与 `@` 共享非 root 基线、栈内无共享 bookmark、拒绝解析回 `@`、落后目标时不谎报成功；根 workspace 按 `.jj/repo` 目录布局判定并强制校验栈底 `firstChange`；`dryRun` 跳过 fetch 且不改写历史；冲突 bookmark 一律 `bookmarkSkipped`。
+    - 跨 workspace 边界：用 `working_copies() & (<first>::)` 检测外来工作副本，活跃/脏/冲突拒绝，无主且空的 rebase 后自动 `update-stale`（结果 `foreignWorkingCopies`）。
+    - `workspace_add` 记录持久化于 `<jjRepoPath>/dsh-jj/workspaces/`（按 session id 归属）。`cleanup` 只注销本会话创建或记录中的干净孤儿 workspace（不删目录），切回 default 前条件满足时把 default 空 `@` rebase 到栈顶；shell 侧越权 `jj workspace forget` 与任何 `jj workspace remove` 由 guard hard-deny。
+    - `workspace_restore` 仅按记录的 `baseChangeId` 重建已注销且目录为空的 workspace。`workspaceAdd` 按 revision 校验禁止把 `@` 带入新链。
+11. **变更卡片（`jj-changes`）**：`src/changes.ts` 通过 `ctx.isolate('workspaceChanges')` 隔离运行内置实现并在父 scope provide 合并服务（`workspaceChanges: off` 仍 provide 只读空服务，避免 deliverables 永久 pending）。每轮在 turn 边界快照 `@`，`readDiff` 传 `--ignore-working-copy`；解析 stderr 的 `Refused to snapshot some files:` 标为 `oversized`；`tools/pre-execute` 等 `settled()`、`agent/turn-stopping` 等 `stopping()`；任意失败 fail-open 退回内置结果。
+12. **修正折叠（`jj_amend`）**：可改写窗口唯一判定在 `jj-templates.ts` 的 `isRewritableChange`（`!immutable && remoteBookmarks.length === 0`，过滤 `@git` 镜像）。`amend()` 与 `jj_squash` 执行前均校验 `into::@` / `((from)|(into))::@` 内无已发布提交，拒绝 merge/空源/冲突源，绝不传 `--ignore-immutable`。
+13. **空提交防护**：执行前拒绝空 `@` 上的 `jj_commit`、`jj_new`（无显式 parents）及指向 `@` 的 `workspaceAdd` parent；`handoff` 对 rebase 后变空的提交仅在 `emptyChanges` 上报不自动删除；唯一自动 abandon 例外是 `cleanup` 后残留的空、无冲突、无后代、未发布工作副本。
+14. **只读面板（`panel-host` / `panel-client`）**：
+    - Host 侧全部读取传 `--ignore-working-copy`、`purgeExpired: false`，经 `isAllowedCwd` 限制会话目录及同仓库兄弟 workspace（越界 403），GET 走 5s 缓存与在飞去重，异常降级为带 `reason` 的 200 响应。
+    - Client 侧为无打包器的经典 script（`tsconfig.client.json` + `moduleDetection: legacy`，不含运行时 `import`/`export`），整文件包进 IIFE 防止 HMR/升级重复注入重声明（`build.test.ts` 用 `node:vm` 连续执行两次验证），经 `window.__ModuleLoader__.load` 注册。UI 只用 DSH 设计令牌与 `jjPanel` locale，`tool.call.toolview` 键必须为 wire 工具名，所有注册与 JSON 解析失败均降级不抛出。
+15. **工具契约与沙箱门禁**：
+    - 每个工具输出带共享 `nextActions`（≤3 条真实 `jj_*` 工具，`args` 仅基本类型），不写散文版下一步；`jj_status` 默认不跑 `jj status`（`details: true` 才读 diff）；`jj_bookmark_list` 默认隐藏 `@git`。
+    - `policies.ts` 的 `JJ_TOOL_SANDBOX_CLASSES` 覆盖全部 24 工具（`test/policies.test.ts` 校验不漂移），经 `tools/pre-execute` 审批瀑布流与 `withSandboxGate` 兜底去重对齐 `sandboxPolicy` / `approval`（缺审批服务 fail-closed）；路径边界向上 `realpathSync` 校验防符号链接逃逸；`read-only` 下只读与切换工具强制 `ignoreWorkingCopy: true`、`persist: false` 且跳过 `update-stale`。
 
-## 架构与硬性规则
+## 代码约定与打包守卫
 
-1. **入口契约**:每个入口导出 `name` / `inject` / `apply` / `Config`;`build.test.ts` 会校验这些值与 `inject` 列表。
-   根入口(`src/index.ts`)**只**导出这四个契约值、`JjService`、`assembleBaseLayer` 与少量公共类型;其它组件的
-   实现一律走子路径(`./service`、`./jj-command`、`./tools`、`./guard`、`./changes`、`./detect`、
-   `./git-command`、`./commit-style`、`./multi-session`、`./prompt-context`)。`build.test.ts` 断言根导出集合
-   恰好是白名单,防止运行时入口重新变成所有组件的门面。
-2. **分层**:`index.ts` 拥有 `ctx.jj`;tools/guard 通过 `inject: ['tools', 'jj'(, 'workingDirectory')]` 消费,
-   changes 通过 `inject: ['subprocess', 'fs', 'jj']` 消费(runtime 行提供 jj 命令名与进程限额,也保证 bundle 行
-   顺序)。删改 `inject` 会破坏其他行加载。
-3. **纯模块**:`detect.ts`、`git-command.ts`(barrel)、`git-tokenize.ts`、`git-equivalence.ts`、
-   `git-rules.ts`、`jj-rules.ts`、`types.ts`、`commit-style.ts`、`multi-session.ts`、`jj-templates.ts`、`policies.ts`、
-   `session-heartbeat.ts`、`workspace-registry.ts`、`changes-types.ts`、`changes-paths.ts`、`changes-diff.ts`、`changes-jj.ts`、`changes-recorder.ts`、
-   `changes-service.ts` 不得在运行时 import 任何 `@deepseek-ai/*`(由 `build.test.ts` 强制;类型导入可以)。
-   DSH 运行时 import 仅限:`config.ts`(schemastery)、`jj-service.ts`(cordis)、`tool-definitions.ts`
-   (dsh-tools)、`jj-command.ts`(dsh-subprocess)、`changes.ts`(schemastery + 动态 `import()` 内置
-   `@deepseek-ai/dsh-workspace-changes`;cordis 只做类型导入)。`build.test.ts` 会拒绝静态、副作用、动态
-   `import()` 与 `require` 四种形态中的任何一种。
-4. **不直接 spawn**:所有 jj/git 调用都走注入的 `RunJj` / `RunCommand`(统一超时、宽限、输出截断、env 清洗)。
-   这是可测试性的基础,也保证 guard/service 行为一致。
-5. **检测语义**:`detectVcs` 永远返回 `VcsDescriptor`,仓库问题通过 `notices` + `verified === false` 上报,
-   不抛业务异常;CLI 权威是 `jj --ignore-working-copy workspace list`,不是 `jj root`。
-6. **guard 必须同步**:工具守卫是同步接口,子进程探测不能在其中发生,因此由 `tools/pre-execute` warm-up 预计算,
-   `ctx.tools.guard` 只读缓存;任何环节失败都 fail-open(不阻塞调用)。默认策略是 `warn`(放行并给模型提示),
-   `deny` 可通过配置开启;hard-deny(如 scope creep、越权 workspace 操作)不可通过配置放开。命令分类必须按
-   shell 语义解析而不是只看 `argv[0]`:jj 的 `-R/--repository` 是 clap `global = true` 选项(可写在 subcommand
-   之后),shell wrapper(`bash -c`、`command`/`env`/`nohup`/`timeout`/`sudo` 等前缀、`VAR=` 赋值、`exec -a`、
-   `env -S`、`bash -c --`)要递归展开(深度上限 6),可静态解析的目录切换(`cd -P/--`、`pushd`、git 累积 `-C`)
-   要跟随;无法安全解析时 fail-open 但必须一次性告警,不得静默丢弃整条命令。jj 的 canonical 拼写
-   (`jj operation restore` 等)与 alias 同表;mutating git 的 `--dry-run`/`-n` 语义按各 subcommand 区分
-   (`git fetch -n` 是 `--no-tags`,不是 dry-run)。
-7. **非交互**:jj 调用统一经 `jjNonInteractiveEnv` 等封装,设置 `ui.color=never` 并屏蔽编辑器/prompt
-   (测试 V2/V4 覆盖)。新增 jj 命令不要绕过这层。
-8. **拒绝文案**:「非 jj 仓库 / jj 缺失 / 元数据损坏」的模型可见文案集中在 `tool-shared.ts` 的 `jjRefusalText`;
-   guard 拒绝文案在 `guard.ts` 的 `build*` 函数。任何路径都不得静默回退到 git。
-9. **配置一致**:`src/config.ts` 的 `Config` 是默认值与键集合的唯一来源;`ResolvedJjConfig` /
-   `JjPluginConfig` 由 schemastery `Schemastery.TypeT` / `Partial<...>` 派生,`resolveConfig` 用 `Config({})`
-   的默认值 + 调用方覆盖,`assertServiceableConfig` 只做构造期业务校验——新增键只需改 `Config` 一处。
-   **归属表 `ROW_CONFIG_KEYS` 是唯一事实来源**:每个入口行用 `configSchemaFor(owner)` 得到只含自己键的
-   scoped schema(行级 `Config` 就是它),`CONFIG_OWNERSHIP` / `CONFIG_SHARED_OWNERSHIP` / `configKeyOwners` /
-   README 表格都由它派生;模块加载时校验「schema 每个键恰好有一个归属行」,漏登记直接抛错。
-   四个入口 `apply` 都在构造期调用 `assertScopedConfig(config, owner)`:**放错行**或**拼错/未知**的键会被
-   直接拒绝并说明它属于哪一行(不再只 `warn`、不再静默忽略)。scoped schema 只为本行键填默认值,因此
-   「显式写成默认值的键」也能识别(旧的 `undefined`/默认值启发式已删除)。
-   `jj-changes` 行的键(workspaceChanges 模式与变更卡片上限)同样在 `Config` 里,归属 `changes`;新增这类键
-   改 `Config` + `ROW_CONFIG_KEYS` + README「配置」的 changes 小节。
-10. **bundle patch 语义**:`cordis.patch.yml` 里非 `insert` 行会**整体替换**目标行 config:只写改动项会清掉其余键,
-    必须重述所有要保留的键(如 `maxBytes: 65536`),并在 `build.test.ts` 里补对应断言。非 `insert` 行也可以用
-    `disabled: true` 按 id 禁用**其它 bundle 的**行——changes 行就是这样禁用 Web app 的 Git-only
-    `workspace-changes` 行(`build.test.ts` 断言该行存在且被禁用);未来上游若删掉该行,禁用 patch 只 warn,
-    `src/changes.ts` 发现已有 provider 时也只 warn 不顶替,profile 仍能启动。
-11. **版本兼容**:DSH peer 依赖(`@deepseek-ai/dsh-*`)必须写成 caret 范围(如 `^0.2.1-rc.2`),
-    不要钉死精确版本——宿主在安装和 profile 启动时用运行时版本(`dsh --version`)与该范围做 SemVer 匹配
-    (预发布也参与),精确钉版会把本版适配版本之后的每个补丁版都判定为不兼容。`build.test.ts` 强制这一点。
-12. **多会话检测 fail-open**:多会话指引只比较 `ctx.agents.roots()` 里的顶层会话(子代理不算并行会话,也不写顶层心跳)与
-    `workingDirectory` 给出的会话目录,再用同步的 `peek` / sniff 解析 jj workspace 身份,不新增 DSH peer 依赖;
-    **跨进程**:顶层会话在非 `read-only` 沙箱下组装提示词时把心跳写到 `<jjRepoPath>/dsh-jj/sessions/<id>.json`
-    (`session-heartbeat.ts`,TTL 15 分钟、fail-open、损坏即忽略),并在 `session/event` 的 `turn/end` 把心跳重写为
-    `active: false`、在 `working-directory/change` 跨出仓库或 `session/disposed` 时立即删除心跳;
-    `liveRootSessions(cwd, session)` 与 `workspaceIsLive` 用 `excludeSessionIds` 把**同进程全部已观测顶层会话**
-    从磁盘心跳里排除(以内存态 `turnBoundary` 与实时 cwd 为唯一权威,防止旧心跳把已空闲的同进程对端二次计为活跃);
-    `read-only` 沙箱模式下禁止写心跳和清理过期文件。跨机器或心跳不可用时仍需 `multiSessionGuidance: always`。
-    **存活不等于并发**:宿主在回合结束后仍保留 Agent,所以对端只有在 `sessionProjections.stateOf(session,
-    'turnBoundary').openTurnStartSeq !== null`(正在执行回合)时才可能算并行;已知空闲(`active: false`)的对端
-    必须被 `parallelPeerCwds` 过滤掉,否则单会话也会被误判而新建 jj workspace。活动状态服务 / 投影缺失或抛错时
-    该对端按「可能存在并行」的保守行为处理(fail-open),agents / workingDirectory 缺失或抛错时按「没有其他会话」
-    处理(`auto` 不注入),任何一条路径都不得阻断 prompt 组装。
-    隔离建议固定为「先只提交自己的路径、再**不带 `parents`** 调用 `jj_workspace_add`,路径优先选系统临时目录如
-    `/tmp/<repo>-<name>`(既在仓库外又在 `workspace-write` 可写根内,不触发沙箱审批)」:不带 parents 时 jj 以
-    当前 `@` 的父提交为起点,正好带上刚提交的那一步;传 `parents: ["@"]` 会把空的工作副本提交变成新 workspace
-    提交链里的空提交、最终进入收尾/推送历史。不要在指引或工具描述里重新推荐 `parents ["@"]`。
-    **持久所有权与跨 workspace 收尾**:workspace 记录由 `workspace-registry.ts` 持久化到
-    `<jjRepoPath>/dsh-jj/workspaces/`(tmp+rename、fail-open),`WorkspaceOwnership` 按 session id 懒加载
-    (无 session id 退回进程内);`jj_workspace_list detail:"full"` 暴露 owner/orphaned,
-    `jj_workspace_cleanup { workspace }` 注销「有记录、owner 不活跃、无人占用、干净」的孤儿。`jj_handoff` 在
-    source rebase 前用 `working_copies() & (<first>::)` 检测外来工作副本:活跃/有内容/冲突 fail-closed,无主且空的
-    才继续并在 rebase 后 `update-stale`(结果 `foreignWorkingCopies`);`dryRun` 只报告。
-13. **收尾自动化(`jj_handoff` / `jj_workspace_cleanup`)**:
-    - `service.ts` 的 `handoff()` 是收尾的唯一入口:fetch(无远端不算错)→ 目标解析(显式 `destination` →
-      配置 `rebaseTarget` → `trunk()` → 本地 `main` → `master`,跳过 root commit;显式目标解析到 root 是
-      模型错误,必须报错而不是静默换目标;全失败才报「问用户」)→ `roots(::@ ~ ::target)` 探测整段栈 →
-      `jj rebase -s` → 复核 base 并返回冲突数据。不要把这些步骤拆回 prompt;`needsCommit` 时先让模型
-      `jj_commit`,不要代为描述。
-    - rebase 后要检查 `stack` 里残留的空 change(`empty && !currentWorkingCopy`):结果里的 `emptyChanges`
-      必须列出 change id / 描述 / 是否当前工作副本,但不自动 abandon(可能是别的 workspace 的空工作副本),也不在
-      `nextActions` 里给 `jj_abandon`(归属无法判定);本会话自己的、rebase 后才变空的已描述 change 只由模型按
-      指引用 `jj_abandon` 丢弃。
-    - **`dryRun` 只做计划**:dryRun **跳过** fetch(`fetch.status: 'skipped'`),在
-      `assertStackNotShared` / `assertDestinationCoversBase` 两个 fail-closed 校验之后、`rebase()` 之前返回:
-      `rebased:false`、`onTarget:false`、`conflicts` 是栈里**已有**的冲突、`bookmarkSkipped` 说明 bookmark 未移动。
-      dryRun 不得改写任何 change id,`nextActions` 第一项是带 `dryRun:false` 的同参数 `jj_handoff`。
-    - **stale 恢复必须包住整个流程**:stale 时连目标/栈的 `jj log` 读取都会失败,所以 `handoff()` 用
-      「`handoffFlow()` 抛 stale → `jj workspace update-stale` → 重跑一次 `handoffFlow()`」实现;不要只在
-      rebase 调用外加 retry,也不要把 stale 读取错误吞成「找不到目标」。
-    - `firstChange` 必须是本 workspace 在目标之上那段栈的**栈底**(在 `roots(::@ ~ ::target)` 里):传 `@`
-      或中间 change 会只移动一部分却返回 `rebased/onTarget` 成功,必须报错并给出候选。根(default)workspace
-      的判定用**布局**而不是名字(`<root>/.jj/repo` 是目录 ⇒ 根 workspace,linked workspace 是 pointer 文件),
-      这样 `jj workspace rename` 之后仍然要求 `firstChange`。
-    - 目标解析/失败信息必须自带下一步(本地 bookmark 列表、`firstChange` 候选),不要返回裸 jj revset 错误;
-      已集成路径同样要处理请求的 bookmark(移动或 `bookmarkSkipped`),不能静默丢弃。
-    - **handoff 的安全不变量**(rebase 前 fail-closed 校验,失败即 `JJ_BAD_INPUT`、绝不执行 rebase):
-      destination 必须覆盖本 workspace 的基线(`(::@ & ::target) ~ root()` 非空)——只共享 empty root 的
-      无关 revision 会被拒绝,显式 `firstChange` 也不能绕过;`first::@` 与 `::bookmarks()` 的交集必须为空
-      (唯一例外是本次 `bookmark` 参数请求移动、且它指向栈底之上的 bookmark),避免把共享 trunk 历史卷进
-      source rebase;destination 解析回 `@` 本身直接拒绝。`roots(::@ ~ ::target)` 为空时是 workspace **落后**
-      于 destination,返回 `rebased:false, alreadyIntegrated:false, onTarget:false`(不 rebase、不谎报成功)。
-      bookmark 已存在时只有指向被 rebase 的栈内才移动,否则 `bookmarkSkipped`;冲突 bookmark(`conflicted`,
-      `json(self).target` 是 `[add, remove, add…]` 合并形式,缺席的一侧是 `null`)一律 `bookmarkSkipped`,不替人选边,
-      `bookmarkList` 的 `target` 取第一个存在的 add 侧,绝不能把 `null` 变成字面 revset `"null"`;bookmark 名在 rebase 前校验,
-      rebase 后的 bookmark 失败收敛为 `bookmarkSkipped`(保留已成功的 rebase 结果)。
-    - **跨 workspace 的 rebase 边界**:`handoffFlow` 在 fail-closed 校验后、`dryRun`/`rebase` 前用
-      `working_copies() & (<first>::)` 检测会被一并移动的外来工作副本并写入必填的 `foreignWorkingCopies`。工具层
-      注入 `reviewForeignWorkingCopies`:活跃占用或有内容/冲突 → 拒绝并列出 workspace;本会话自己的记录 → 允许;
-      无主且空 → 允许并作为 `recoverWorkspaceRoots`。service 默认策略只按内容/冲突拒绝、空副本继续;rebase 后
-      对 recover roots 逐个 `updateStale`(fail-open 写回 `recovered`/`recoveryError`);`dryRun` 只报告。
-    - `jj_workspace_cleanup` 的前提是**本会话所有权**:只有通过 `jj_workspace_add` 工具创建(记在
-      `ctx.jj` 的 `WorkspaceOwnership` 注册表,记录在 `<jjRepoPath>/dsh-jj/workspaces/`,按 DSH session id
-      持久化;见规则 12)、当前 workspace 不是 `default`、working copy 无未提交改动/冲突的 workspace 才能注销;
-      注销前必须先 `workingDirectory.set` 把会话切回默认 workspace。目录文件永不删除。判定与编排在
-      `policies.ts` 的 `decideWorkspaceCleanup` 与 `flows/cleanup.ts`:读取工作副本遇到 stale 会先
-      `update-stale` 再重试,不再因为一次快照失败就放弃清理。
-      **回 default 与孤儿注销**:决策通过后、切换目录前,若 default 的 `@` 为空/无冲突/未发布/无后代、当前 `@-`
-      是唯一无冲突的真实栈顶、default 无活跃会话,则把它 rebase 到栈顶(`defaultWorkingCopy`),避免空兄弟分叉,
-      失败只记 `reason`。`jj_workspace_cleanup { workspace }` 从当前 workspace 注销一条"有记录、owner 不活跃、
-      无人占用、干净(或目录已消失)"的外来 workspace;决策在 `decideOrphanWorkspaceCleanup`,不移动 cwd、不删目录;
-      活信息来自 `JjToolsHost.liveSessions` 与心跳,fail-open 按无主处理;记录已不在注册表时删陈旧记录并返回
-      `alreadyForgotten`。
-      这是对旧「清理只能交给用户」规则的**唯一例外**,shell 里的 `jj workspace forget <other>` 仍由 guard 拒绝
-      (`buildJjWorkspaceForgetRefusal`;jj 接受多个名字,`targetWorkspaces` 里任一不是当前 workspace 即拒绝)。
-      `jj workspace remove` 会把 workspace(stale 的也一样)连目录一起删除、被忽略文件无法恢复,
-      `jj-rules.ts` 把它归为 `destructive`,任何目标、任何 `guardJjRepositoryWide` 模式都由
-      `buildJjWorkspaceRemoveRefusal` hard-deny。注销后还要用 `changeExists()` 检查被遗忘 workspace 的空工作副本
-      是否仍可见(jj 只在「空 + 无描述 + 无后代」时才丢弃它);若仍可见且同时满足空、无冲突、无任何后代、未发布,
-      才可自动 `abandon` 并返回 `prunedEmptyChangeId`(见规则 16),否则在结果 `message` 里说明它仍在共享历史、
-      可能显示为空提交;`workspaceForget` 对 stale 的默认 workspace(兄弟 workspace 的 handoff 改写了它检出的
-      change)必须 `update-stale` 后重试一次,清理不得因此失败。
-    - `JjOperations.workspaceAdd` 必须显式传 `--name`(缺省名用 `basename`)并按名字/规范路径解析返回的
-      workspace,不要用 `workspaces[last]` 猜:否则在 macOS symlink 路径下会把别的 workspace 记成本会话所有。
-      `workspace list` 模板对 `name`/`root` 都用 `json(...)`(名字可含空格/制表符);比较名字时用解码后的裸名。
-    - `jj_workspace_restore` 只重建**本进程通过 `jj_workspace_add` 创建**的工作区:注册表记录的基础提交
-      (`baseChangeId`,仅在未传显式 parents 时记录)必须仍存在;名字仍注册时拒绝(用 `jj_workspace_enter` /
-      `jj_workspace_update_stale`),目录非空时拒绝且绝不删除文件;重建方式就是用记录的 base 再跑一次
-      `workspaceAdd`,成功后重新登记所有权。清理/恢复都不改写别人的提交。
-    - `workspaceAdd` 的 parents 必须**按 revision 解析**而不是按字符串匹配:`(parent) & @` 非空即表示该 parent
-      指向当前工作副本——`@` 为空时丢弃这个 parent 并在结果 `note` 里说明,`@` 有未提交内容或多 parent 混用时
-      抛 `JJ_BAD_INPUT`,绝不把工作副本提交塞进新 workspace 的链(从 `jj_status` 复制 change id 也不能绕过)。
-    - 其它收尾输入的不变量:`jj new` 的位置参数前必须加 `--`;`describeChange` 只接受唯一 revision
-      (0 个/多个都报错,绝不批量改描述);`jj op log` 的 `time` 取 `json(self).time.start`(jj 的
-      `time` 是 `{start,end}` 对象),不是 `String(object)`;`Cannot access` 只有指向 `.jj`/`.git` 元数据时
-      才归为 `JJ_REPO_BROKEN`。
-    - 变更这套行为必须同步 `test/service-tools.test.ts`(handoff / cleanup 端到端,含 stale、firstChange
-      校验、ambiguous roots、无关 destination、behind、bookmark 所有权、cleanup 所有权、cleanup stale 恢复与保留
-      提示、handoff 空 change 上报)、
-      `test/multi-session.test.ts`(收尾清单文案)、`test/guard.test.ts`(forget / remove 拒绝文案)与 README「任务收尾」。
-14. **变更记录(`jj-changes` / 变更卡片)**:
-    - bundle patch 禁用内置 `workspace-changes` 行并插入 `jj-changes`;`src/changes.ts` 的 `apply` 先
-      `ctx.isolate('workspaceChanges')` 在隔离 scope 里跑内置 `apply`(拿到只读的 builtin service),再在父
-      scope `ctx.provide('workspaceChanges', 合并服务)`。不要改成两个 provider 同时 provide(同一 scope 重复会抛错
-      并可能拖垮 profile),也不要直接改内置包的内部状态。
-    - 记录路径固定为「turn 开始读 `@` commit id(允许 jj 快照)→ turn 结束再读一次 → `jj diff --from A --to B`
-      解析」。turn 结束的 `readCommit` 必须在 `readDiff` 之前;`--ignore-working-copy` 只用于 `readDiff`。
-    - `readCommit` 同时解析快照命令 stderr 里的 `Refused to snapshot some files:` 警告:超过
-      `snapshot.max-new-file-size`(默认 1 MiB)的新文件不会被快照进 `@`,commit id 也可能不变。轮结束时新出现的
-      拒绝路径要以 `oversized: true`(0 行数、无对比内容)并入摘要,轮开始就已被拒绝的路径必须排除,「只有超大
-      文件」的回合也要记录。解析在 `changes-diff.ts`(纯函数),`changes-jj.ts` 按命令 cwd 把路径解析为绝对路径。
-    - 一切失败 fail-open:reader 返回 `undefined`、recorder 不写事件、合并服务退回内置 summary,任何路径都不得
-      抛进宿主或阻断 turn。合并按绝对路径去重、jj 数据优先,`total` 在超出两边 `maxFiles` 时是近似值(已在
-      `changes-service.ts` JSDoc 说明)。
-    - 顶层会话才记录(与内置 recorder 一致);cwd 取 `working-directory/change` 事件维护的有效目录,而不是
-      `session.header.cwd`;`agent/turn-stopping` 必须 `await recorder.stopping(...)`(否则 `turn/end` 先提交,
-      卡片数据晚到)。`turn/start` 的基线快照是异步的:必须在 `tools/pre-execute` 里先
-      `await recorder.settled(session.id)` 再放行工具写入,否则慢快照会把本轮第一个改动吞进 baseline(与内置
-      recorder 的 `settled()` 语义对齐)。
-    - 合并视图对**任一** recorder 的 `workspace/changes` seq 都要生效:Host 的 deliverables 只保留一轮中最后
-      一个事件的 seq(真实顺序是内置先 append、jj 后 append),所以 own seq 命中时也必须合并 newest upstream,
-      不能短路返回 jj-only;summary 与 diff 必须共用同一次合并解析,保证文件顺序/索引一致。
-    - `workspaceChanges: off` 关闭 jj 记录与卡片数据,但仍 `provide` 一个只读空服务(`summary`/`diff` 均返回
-      `undefined`),否则 deliverables 行(其 `inject` 含 `workspaceChanges`)会永久 pending,连带丢失
-      `/api/present.*`、`/api/changes.*` 路由与文件引用提示词;已有其它 provider 时仍只 warn、不顶替。
-    - 测试:`test/changes-diff.test.ts`(解析)、`test/changes-jj.test.ts`(真实 jj 读取)、
-      `test/changes-recorder.test.ts`(状态机)、`test/changes-service.test.ts`(合并/路由)与
-      `test/changes-entry.test.ts`(真实 Cordis 端到端:jj-native、colocated 合并、纯 Git 回退、三种模式)。
-    - 修改 changes 的 `Config` 键、行名或 bundle 插入位置时,同步 `test/build.test.ts`(
-      四个 entry、`REQUIRED_EXPORTS`、patch 断言)、`package.json` 的 `exports`/`files`、`changes/locale/*.json`
-      与 README「变更卡片」「配置」。
+- TypeScript strict + `erasableSyntaxOnly` + `verbatimModuleSyntax`：禁用 `enum`/`namespace`/参数属性，类型导入用 `import type`，相对导入带 `.ts` 扩展名。
+- 格式与 lint 统一由 `vite.config.ts` 管理（`printWidth: 120`、`singleQuote`、2 空格、LF）。改动后运行 `pnpm run format` 与 `pnpm test`，禁止用注释绕过 lint 告警。源码与测试注释用英文，用户文档用中文。
+- 测试夹具用 `mktemp` 隔离并显式传 `cwd`，自检 jj root 指向夹具目录，避免误操作真实仓库。
+- **新增公开子路径**时同步三处：`src/<name>.ts`、`package.json` 的 `exports`/`files` 与 `tsconfig.test.json` 的 `paths`（`./client` 为经典脚本不进 `paths`）；缺 `paths` 会在干净 checkout 的 typecheck 报 TS2307。
+- **新增工具或配置键**时同步：`policies.ts`（沙箱分类）/ `config.ts`（`Config` + `ROW_CONFIG_KEYS`）→ 对应测试 → `README.md` 与 `locale/*.json`。
 
-15. **修正折叠(`jj_amend` / 修正窗口)**:
-    - 窗口判定只有一处:`jj-templates.ts` 的 `isRewritableChange` = `!immutable && remoteBookmarks.length === 0`。
-      只看 `immutable()` 不够——jj 默认 `immutable_heads()` 不覆盖已推送的 tracked bookmark,改写它会让本地与远端
-      分叉;只看 remote bookmark 也不够(trunk / tag 可能没有 remote bookmark)。模板里的 `remote_bookmarks` 必须
-      过滤 `@git`(colocated 仓库的本地镜像),否则任何带本地 bookmark 的提交都会被误判为已发布。
-    - `JjOperations.amend()` 是唯一的折叠入口:先解析目标/源各为唯一 revision、目标必须是源的祖先,再检查改写范围
-      `into::@`(**不是** `into::from`——`jj squash --into` 会把后代一直 rebase 到工作副本)内没有已发布提交,最后
-      拒绝 merge 目标、空源与冲突源。任何校验失败都是 `JJ_BAD_INPUT`,执行前绝不落一次 squash。目标描述默认用
-      `--use-destination-message` 保留(永不打开编辑器),需要时用 `message` 改写;stale 时 `updateStale()` 后重跑一次
-      (与 handoff 相同),不要只在外层重试。
-    - `jj_amend` 工具只做参数映射与 `nextActions`;`jj_commit` 在提交仍可改写时返回
-      `jj_amend { into: <committed change id> }` 这个 nextAction,把规则放在「刚提交完」这个决策点上。`jj_squash` 执行前同样校验发布边界 `((from)|(into))::@`(与 amend 一致),
-      并把 jj 的 immutable 拒绝映射成 `JJ_BAD_INPUT`——两条改写路径的安全等级不允许不同。
-    - 指引在 `commit-style.ts` 的 `CORRECTION_GUIDANCE`(与 `SPLIT_COMMITS_GUIDANCE` 分开),受 `preferAmendCorrections`
-      (默认 true,runtime 行)控制;`false` 只关指引,不禁用工具。默认不要改成「所有后续改动都追加提交」或
-      「自动改写」——修正只由用户指令触发。
-    - 测试在 `test/service-tools.test.ts`(工作区/已提交修正、`paths`、`message`、trunk 与 tracked bookmark 两种
-      发布边界、非祖先/merge/空源/冲突源、`jj_amend` 输出 schema 自校验)、`test/commit-style.test.ts`、
-      `test/prompt-context.test.ts` 与 `test/config.test.ts`;改窗口判定或文案时同步 README「修正近期提交」「工具一览」
-      与 `locale/*.json`、`tools/locale/*.json`。
-16. **空提交防护(多会话/多工作区收尾的单链空提交)**:
-    - 单链里的空提交有两个插件侧来源:把当前 `@` 当作新 workspace 的 parent(见规则 12/13),以及在空 `@` 上
-      `jj_commit` / `jj_new`。两处都必须在**执行前**防护,不能事后补警告或自动 undo(撤销是破坏性改写)。
-    - `JjOperations.commit()` 先用 `readAt(cwd)` 读取 `@`:空且非 conflict 时抛 `JJ_BAD_INPUT`(冲突的空合并
-      change 保持原路径,它需要先解决冲突);`paths` 一个都没匹配上时 jj 仍会创建空提交,只能在成功结果里返回
-      警告并提示用 `jj_abandon` 清理(现有测试锁定 warning-only 形状)。`newChange()` 在无 parents 且 `@` 已空时同样
-      拒绝;显式 parents 的 `jj_new` 保持可用(用于在别的 revision 上开栈)。
-    - `jj_handoff` 对 rebase 后才变空的 change 只报告不自动删除(见规则 13);清理由模型调用 `jj_abandon`
-      (显式 revset、拒绝 `@` 与已发布提交)。
-    - **唯一的自动 abandon 例外**在 cleanup 注销之后:被遗忘 workspace 的工作副本 change 仍可见、且空、无冲突、
-      无任何后代(revset `(<id>):: ~ (<id>)` 为空)、未发布时才 `abandon`(结果 `prunedEmptyChangeId`);否则只
-      报告。绝不碰其它提交,不要扩大成普适的自动清理。
-    - 修改这些守卫/文案时同步 `test/service-tools.test.ts`(commit/new 空提交拒绝、workspaceAdd parent
-      丢弃/拒绝、handoff 空 change 上报、cleanup 保留/prune、cleanup stale 恢复)、`test/multi-session.test.ts`
-      (隔离与收尾文案、prompt token 预算)与 README「多会话协作」「任务收尾」「已知限制」。
+## 版本控制与发布
 
-17. **可视化面板(`panel-host` / `panel-client`)**:
-    - Host 半侧只读:`buildJjOverview` 聚合 `detect`/`workspaceStates`/`readAt`/`readPanelLog`/`readPanelDiffFiles`(仅 `@` 非空)/`bookmarkList(allRemotes)`/`opLog`(25 条),并用只读 `readWorkspaceRecords` + `readSessionHeartbeats(..., { purgeExpired: false })` 标注托管与活跃/空闲/孤儿工作区;`buildJjRevisionDetail` / `buildJjFileDiff` 服务按需的 `GET /api/jj.revision?cwd=…&rev=…[&file=…]`(严格白名单校验 `rev`、复用 `changes-diff.ts` 的 `parseGitFormatDiff` 并按 400 行截断)。
-      **每一项读取**都显式传 `--ignore-working-copy`(决不允许打开/刷新/查看 diff 触发快照或增长 op log);路由经
-      `ctx.connection.fetch.register`(与 deliverables 同一 seam),注册时接入 `isAllowedCwd`(当存在已注册会话时,
-      只放行活跃会话目录、配置的 `defaultCwd` 及其同仓库兄弟 jj workspace,其它路径返回 `403`,禁止探测任意宿主目录),
-      GET 有 5s 缓存 + 在飞去重,`POST /api/jj.refresh` 同步清理 overview 与 revision 缓存;异常一律降级为带 `reason`
-      的 200 快照,不得向 Host 抛 500;`uiPanel: off` 时不读仓库,headless(无 `connection`)时根本不注册。
-    - 浏览器半侧是**经典 script**:`window.__ModuleLoader__.load({ id: <包名>, factory })`,id 必须等于
-      `package.json` 的包名;`package.json` 需要 `dsh.client = { platform: 'web', inject: [客户端包...] }`
-      与 `exports["./client"]`。**不引入打包器**:`src/panel-client.ts` 不写任何运行时 `import`/`export`,
-      由 `tsconfig.client.json`(`module: ES2022` + `moduleResolution: Bundler` + `moduleDetection: legacy`,
-      主 tsconfig 明确 exclude 它)单独编译成 `lib/panel-client.js`,这样 `tsc` 不会追加 `export {}` 把它变成 ESM。
-      整个文件体必须包在一个 IIFE 里:经典 script 共享页面的全局词法作用域,宿主在 rev 变化(HMR/升级)时会再注入
-      一次 `<script>`,顶层 `const`/`let` 会抛 "already declared" 导致 "loaded without registering";
-      `build.test.ts` 用 `node:vm` 同一上下文执行两次并断言不泄漏全局。
-    - UI 遵循 DSH 官方风格:只用 `--dsw-alias-*`/`--ds-font-family-code`/`--dsw-radius-*` 设计令牌、scoped CSS + 唯一
-      类前缀、38px 顶部栏、hover 仅在 `@media (hover: hover)`、`aria-*` 状态跟随、主题只靠令牌;侧栏面板使用精简内联
-      单色 SVG 图标与自持 DSH 规范控件(不强依赖内部 primitives 包),`tool.call.toolview` 折叠行保留懒解析
-      `@deepseek-ai/dsh-client-ui-primitives` 的 `DisclosureRow` 与同高度降级路径。
-    - 正文是会话作用域的 slot 组件:从 props 取 `sessionId`、`useSessions`(选择 `byId[sessionId].cwd`)与可选
-      `useSessionStatus`(回合结束 `running: true -> false` 时自动刷新),再 `fetch('api/jj.overview?cwd=…')` 与按需
-      `fetch('api/jj.revision?…')`;没有 cwd 时只显示加载态。所有网络与渲染失败都降级为一句说明,不得抛出。
-    - 工具行注册在 `tool.call.toolview`,**key 必须是 wire 工具名**(写错就静默落到通用行);组件读
-      `phase`/`block`/`t`/`useDisclosure`,参数从 `block.call.argsRaw` 解析、结果从 `block.content` 的第一段
-      text 解析,两者都可能不是 JSON,必须降级为空摘要而不是抛错。渲染形态必须与 DSH 内置工具行一致
-      (`@deepseek-ai/dsh-client-ui-primitives` 的 `DisclosureRow` + 图标:24px 折叠行、hover 箭头、点击展开),
-      不要画带边框的独立卡片——工具调用夹在流式思考步骤里,卡片会打断行节奏;宿主缺少 primitives 或
-      `useDisclosure` 时退化为同高度纯文本行 / 本地展开状态,不得抛错。行只做摘要与只读展开,不做写操作入口。
-    - `apply` 的每个注册都要 try/catch 并可降级:宿主缺少 sidebar-right/locale 时只登记能登记的部分,
-      客户端 bundle 激活失败会拖垮整个页面。改面板时同步 `test/build.test.ts`(bundle 形态与 loader id、
-      body 冒烟渲染)、`test/panel-host.test.ts` 与 README「可视化面板」。
+- 工作副本 `@` 即提交：`jj commit -m "…"`（或 `jj describe` + `jj new`），提交后执行 `jj bookmark set main -r @-`。**禁止 git 写操作**。
+- 提交信息采用 Conventional Commits + 中文简述（类型：`feat` / `fix` / `refactor` / `docs` / `style` / `test` / `chore` / `ci` / `build`）。未获明确要求不要 push。
+- `lib/`、`node_modules/`、`scratch/`、`*.tgz` 均已忽略；**`pnpm-lock.yaml` 必须提交**。
+- 发版步骤：改 `package.json` 版本 → `jj commit -m "chore(release): vX.Y.Z"` → `jj bookmark set main -r @-` → `jj tag set -r @- vX.Y.Z` → `jj git push --bookmark main` 与 `jj git push --tag vX.Y.Z`（触发 `release.yml`）。
 
-18. **工具结果契约(`nextActions`)**:
-    - 每个工具的 output schema 都带共享的 `NEXT_ACTIONS_SCHEMA`(`tool-schemas.ts`):可选数组,元素是
-      `{ tool, args?, reason }`;**最多 3 条**,`tool` 必须是真实注册的 `jj_*` 工具,`args` 只放
-      `string | number | boolean`(schema 派生的 JSON 类型不允许 `unknown`),`reason` 一句话说明为什么。
-    - 用 `nextActions` 表达「下一步」;结果里不再有 `nextStep`/`nextSteps` 这类散文(需要的数据用结构化字段,
-      如 handoff 的 `emptyChanges` / `cleanup`),新增字段一律是结构化数据。
-      动作要具体、可执行:冲突→`jj_status {details:true}`、未提交→`jj_commit`、收尾→`jj_handoff`、
-      自己的临时 workspace→`jj_workspace_cleanup`、丢弃后→`jj_log`。
-    - `jj_status` 默认走便宜的 `operations.status(cwd, signal, {details:false})`(不跑 `jj status`、模板不含
-      `self.diff()`);只有 `details: true` 才返回 `changedPaths`/`diffStat`/`statusText`。`jj_op_log` 的条数
-      上限来自 `defaultLogLimit`/`maxLogLimit` 而不是写死 20/100;`jj_bookmark_list` 默认隐藏 colocated 的
-      `@git` 镜像(`includeGitMirror: true` 才显示),与规则 15 的发布边界判定同一原则。
-    - 测试:`test/service-tools.test.ts` 覆盖「nextActions 指向已注册工具、≤3、reason 非空」「status 便宜路径
-      不 spawn `jj status` 且不含 self.diff()」「op_log 限额」「bookmark @git 过滤」。
+## 提交前检查
 
-19. **工具层沙箱与审批门禁(`sandboxPolicy` / `approval`)**:
-    - `jj_*` 工具通过宿主侧 `ctx.subprocess` 直接运行 jj CLI,绕过了文件工具与 shell 的 OS 沙箱,因此必须在工具层
-      显式对齐会话的 `sandboxPolicy`(`read-only` / `workspace-write` / `danger-full-access`)与 `approval` 服务。
-    - 分类与纯决策集中在 `policies.ts`:`JJ_TOOL_SANDBOX_CLASSES` 覆盖全部 24 个工具(`read` / `repo-write` /
-      `workspace-create` / `workspace-switch`,`test/policies.test.ts` 强制与 `jjToolDefinitions` 一一对应),
-      `resolveSandboxTargetPath` 向上回溯最近已存在祖先做 `realpathSync` 再拼接未创建尾段(防止未创建子目录绕过
-      符号链接逃逸检查),`decideJjToolSandbox` 按 `[workspaceRoot, /tmp, os.tmpdir(), ...writableRoots]` 判定放行或 `ask`。
-    - 审批接线走双保险且去重:`registerJjTools` 在 `tools/pre-execute` 瀑布流返回 `{ kind: 'ask', reason, displayReason }`
-      走 `ToolRuntime` 标准审批 UI,并把已放行调用登记进 `preCheckedCallIds`/`preCheckedExecs`;未挂瀑布流的直调场景由
-      `withSandboxGate` 调用 `host.approval.request(...)` 兜底(缺少 `approval` 服务时 fail-closed 抛 `JJ_SANDBOX_DENIED`);
-      非 jj 目录的确定性拒绝不弹审批窗。
-    - `read-only` 模式下:`read` 与 `workspace-switch` 工具必须传 `ignoreWorkingCopy: true`、跳过自动 `update-stale`、
-      不写磁盘持久化记录(`persist: false`),确保工作树脏时也零快照写盘;写操作一律先 `ask`。`workspace-write` 模式下
-      向可写根之外新建/重建/切换工作区先 `ask`,放行后在结果 `note` 提示后续文件编辑与 shell 仍受原可写边界约束。
-
-## 代码约定
-
-- 任何改动都必须让 `pnpm test` 全绿(`vp check --deny-warnings` → `tsc` 类型检查 → `node --test`);改行为先补测试。
-- TypeScript strict,`noUnusedLocals` / `noUnusedParameters` / `verbatimModuleSyntax` / `isolatedModules` /
-  **`erasableSyntaxOnly`** 全开:不要用 `enum`、`namespace`、构造函数参数属性等不可擦除语法;类型导入用 `import type`。
-- 相对导入带 `.ts` 扩展名(`rewriteRelativeImportExtensions` 在构建时改写为 `.js`)。
-- 格式与 lint 由 Vite+ 统一,`vite.config.ts` 是唯一配置:Oxfmt(`printWidth: 120`、`singleQuote`、分号;缩进/换行
-  由 `.editorconfig` 决定:2 空格、LF、结尾换行)与 Oxlint(默认 correctness 规则 + `unicorn` / `typescript` /
-  `oxc` / `import` 插件)。不要手工对齐、排序或逐行修补格式——改完运行 `pnpm run format`(只检查用
-  `pnpm run format:check`),提交前跑 `pnpm run lint`。门禁 `vp check --deny-warnings` 会把 lint warning 也当
-  失败,不要用注释静默关规则来绕过门禁。模块头用 JSDoc `@module`,导出的 API 写 JSDoc。
-  源码与测试注释用英文,README 等用户文档用中文。
-- 源码注释中的 `design contract §…` 指历史设计文档(不在本仓库):以现有实现和测试对齐,不要臆造契约条款。
-- 测试:`node:test` + `node:assert/strict`,一个测试文件对应一个模块;夹具用 `mktemp` 隔离、显式 `cwd`、
-  并自检 jj root 指向夹具目录(防止在真实仓库里建/改夹具——曾发生过共享 workspace 被误操作的事故);
-  不要 mock 仓库行为;改行为先补测试。
-- `test/build.test.ts` 额外守护:产物清单从 `src/*.ts` 推导(含 `lib/types/*.d.ts`)、`package.json` 的
-  `main`/`types`/`exports`/`files` 目标必须存在且**每个静态 exports 目标都被 `files` 覆盖**(tarball 不再包含
-  无法从 `node_modules` 加载的 `src/**/*.ts`)、四个入口各自的 locale 与 `<entry>/icon` 导出、四个 entry 的
-  `name`/`inject`/`Config` 形状、bundle patch 里四行入口各自只出现一次且「禁用内置 `workspace-changes`」只有
-  一处、没有 `disabled: false` 重新启用行、纯模块的 DSH 运行时 import(静态/副作用/dynamic `import()`/`require`
-  全部拒绝)、手写 `.ts` 禁止 tab/行尾空白/CRLF(>120 列仅提示)、`tsconfig.test.json` 的 `paths` 覆盖测试里出现的
-  每一个 `@aqian0/dsh-jj/*` 自引用(且每个映射指向存在的 `src/*.ts`),以及 pnpm + Vite+ 工具链接线
-  (`packageManager`、`devDependencies`、`vp` 脚本、`pnpm-lock.yaml` / `pnpm-workspace.yaml` / `vite.config.ts`
-  存在,`vite` 别名版本与 `vite-plus` 一致)。新增源模块或改打包/工具链配置时先让这些断言通过。
-
-  自引用映射是必须的:`pnpm test` 先跑 `tsc -p tsconfig.test.json` 再构建 `lib/`,`paths` 缺项时 tsc 会沿
-  `package.json` 的 `exports` 去找 `lib/types/*.d.ts`——本地残留的旧 `lib/` 会掩盖问题,干净 checkout(CI)直接
-  TS2307。所以**新增公开子路径时**,`package.json` 的 `exports`、`src/<name>.ts` 与 `tsconfig.test.json` 的
-  `paths` 三处要一起改;`./client` 是经典 script(无 ESM 导出)不进 `paths`。
-
-## 常见任务
-
-**新增一个 `jj_*` 工具**
-
-1. `service.ts` 的 `JjOperations` 加方法(复用 runner、超时/截断/非交互);
-2. `policies.ts` 的 `JJ_TOOL_SANDBOX_CLASSES` 登记该工具的沙箱分类(`read` / `repo-write` / `workspace-create` /
-   `workspace-switch`),若为 `read` 且在 `read-only` 下放行则确保支持 `ignoreWorkingCopy: true`;
-3. `tool-definitions.ts` 用 `defineTool` 定义:名称 `jj_*`、description 首句点明 this is jj / not git、参数 schema、
-   输出 schema + `render`,非 jj 目录经 `requireWorkspace` / `jjRefusalText`(`tool-shared.ts`)拒绝;
-4. `test/policies.test.ts` 与 `test/service-tools.test.ts` 补分类、定义、schema 校验、端到端与「只走 jj、不走 git」用例;
-5. 同步 README「工具一览」,以及 `prompt-context.ts` 中的命令列表(如相关)。
-
-**新增配置键**:`config.ts` 的 `Config` schema(默认值/类型由此自动派生,`resolveConfig` 与两个类型无需手改)→ README「配置」表 → 按影响补 guard/detect/service 测试。
-
-**修改提交描述策略**:`commit-style.ts` 纯函数(分类 / 检测 / 策略 / 文案)→ `config.ts` 的 `Config` schema →
-`prompt-context.ts` 与 `tools.ts`(`jj_commit_style`、`jj_commit`)注入 → `test/commit-style.test.ts` 与
-`test/service-tools.test.ts`;默认保持 `auto`(继承历史、无法确定时询问用户),不要改成静默固定风格,
-也不要让默认 `preferSplitCommits` 退化回「只改当前工作区」。提交策略以 `ctx.jj`(runtime 行)的配置为
-唯一来源:`jj_commit_style` 读 `service.operations.config`,不要改回读 tools 行配置,否则 prompt 与工具
-会给出互相矛盾的风格。修正折叠与描述风格是两条独立策略:指引在 `CORRECTION_GUIDANCE` 与
-`preferAmendCorrections`,动作为 `JjOperations.amend()` 与 `jj_amend`,窗口判定在 `isRewritableChange`;
-「刚提交完」这个决策点由 `jj_commit` 返回的 `jj_amend` nextAction 承担(不再有 `commitCorrectionHint`);
-改其中任何一处都要同时看本文件规则 15 的测试清单。
-
-**修改 guard 行为**:命令分类表在 `git-rules.ts` / `jj-rules.ts`(解析原语在 `git-tokenize.ts`,均保持纯函数)→
-`guard.ts` 文案与策略 → `test/guard*.test.ts` 与 `test/git-command.test.ts`;
-不要把默认从 `warn` 改成 `deny`,也不要放开 hard-deny。
-
-**修改多会话并行 / 收尾 rebase 指引**
-
-1. `multi-session.ts`:检测(`ctx.agents.roots()` 顶层会话 + `turnBoundary` 活动状态 + workingDirectory,纯模块、fail-open)与模型可见文案
-   (共用工作副本先隔离到仓库外的独立 workspace、同仓库不同 workspace 不要改写别人的提交、收尾清单);
-   收尾清单现在要求模型**调用一次 `jj_handoff`**,而不是手工串 `jj git fetch` / 选目标 / `jj_rebase` / 复核,
-   并说明它会拒绝改写活跃/有内容的其它 workspace、会自动恢复被顺带移动的空工作副本;
-   目标解析、source 模式整栈 rebase、stale 恢复、冲突上报都在 `service.ts` 的 `handoff()` 里实现
-   (jj 的默认 `revisions`/`-r` 只移动指定提交,不会带走后代,所以整栈必须 `-s`);
-   **shell 里的 `jj workspace forget` 仍不可要求模型执行**:只有 `jj_workspace_cleanup` 工具可以注销
-   本会话通过 `jj_workspace_add` 创建的临时 workspace(它还会把 default 的空 `@` 接到刚完成栈顶);中断会话
-   留下的记录由 `jj_workspace_list detail:"full"` 标成 `orphaned`,`jj_workspace_cleanup { workspace }` 可回收,
-   其它情况清理交给用户(报告 `jj workspace list` 的名字/路径);
-   并行会话一旦被检测到,收尾清单要在同一会话后续轮次继续注入(`parallelSeen` latch),子代理不注入;
-   隔离段必须写成「先提交自己的路径,再**不带 parents** 调用 `jj_workspace_add`」,并解释 `parents ["@"]` 会把
-   空工作副本提交带进新链;`jj_workspace_add` 的 parent 守卫与 `jj_commit` / `jj_new` 空提交守卫见规则 13/16;
-2. `prompt-context.ts`:把这一段拼进 jj 会话上下文,受 `multiSessionGuidance` / `rebaseTarget` 控制;
-3. `config.ts` 的 `Config` schema:`multiSessionGuidance`(`auto` / `always` / `off`,默认 `auto`)与 `rebaseTarget`
-   (默认 `trunk()`,不得为空);
-4. `index.ts`:在 `apply` 里把存活会话列表(含 `sessionProjections` 的 `turnBoundary` 活动状态)与 workingDirectory
-   接给指引;已知空闲的对端必须在 `parallelPeerCwds` 里被过滤,检测 fail-open,不可阻断启动;
-5. `service.ts` / `tools.ts`:收尾自动化(`handoff()`、`jj_handoff`、`jj_workspace_cleanup`)、跨 workspace
-   的 `foreignWorkingCopies` 检测/恢复、统一 stale 重试,以及 guard 的 `jj workspace forget <other>` /
-   `jj workspace remove` 拒绝文案(`buildJjWorkspaceForgetRefusal` / `buildJjWorkspaceRemoveRefusal`)要保持一致;
-6. 测试:`test/multi-session.test.ts` 覆盖检测/模式/文案与 token 预算,`test/service-tools.test.ts` 覆盖 handoff /
-   cleanup 端到端(含 no-remote、already-integrated、needsCommit、conflicts、bookmark、默认 workspace 的
-   `firstChange` 约束、跨 workspace 拒绝/恢复、cleanup 所有权/孤儿/default 线性化/stale 恢复),同步
-   `test/policies.test.ts`、`test/workspace-registry.test.ts`、`test/prompt-context.test.ts`、
-   `test/guard.test.ts` 与 `test/build.test.ts` 的纯模块列表;
-7. 同步 README「使用 / 配置 / 工具一览 / 已知限制」与 `locale/*.json` 的 meta.description;默认保持 `auto`
-   (跨进程需用户显式配置 `always`),不要让多会话检测变成隐式依赖。
-
-**修改变更记录 / 变更卡片(`jj-changes`)**
-
-1. 数据链路:`changes-jj.ts`(注入 `RunJj` 读 commit id 与 diff)→ `changes-diff.ts`(纯解析)→
-   `changes-recorder.ts`(每会话串行状态机,写 `workspace/changes` 事件)→ `changes-service.ts`(与内置
-   recorder 的摘要按绝对路径合并/路由)→ `changes.ts`(Cordis 装配、隔离内置 provider、事件分发、合并服务)。
-2. 保持 fail-open:reader/recorder 的失败都要吞掉并 warn,不得让宿主看到未处理的 rejection;新增 jj 命令必须走
-   `createRunJj` 注入的 runner 和 `--ignore-working-copy` 约定(只有 turn 边界快照除外)。
-3. 改展示语义时同步 `changes-paths.ts`(与内置 recorder 的 path/display 规则一致)和 README「变更卡片」。
-4. 测试与断言见上一层规则 14;`test/changes-entry.test.ts` 是唯一的真实 Cordis 端到端证据(用进程内 fake
-   subprocess service,不新增测试依赖)。
-
-**修改检测**:sniff 与 CLI 权威两条路径都要覆盖;夹具需包含 colocated / jj-native / 损坏元数据 /
-git 嵌套 / 共享 workspace 等场景;同步 README「已知限制」。
-
-## 版本控制与提交(jj)
-
-- 工作副本 `@` 本身就是提交:`jj status` / `jj diff` 检查 → `jj describe -m "…"` → `jj new`,
-  或一步 `jj commit -m "…"`。
-- **不要用 git 写操作**(`git commit` / `reset` / `checkout` 等):git 写入不进 jj operation log,`jj undo` 退不回来。
-  只读 git 命令可以用于排查。
-- 本仓库约定 `main` bookmark 始终指向最新提交:提交后执行 `jj bookmark set main -r @-`。
-- 提交信息:Conventional Commits + 中文简述,例如 `docs(readme): 简化安装说明`、`fix(detect): …`、
-  `refactor(bundle): …`、`ci(release): …`。已用类型:feat / fix / refactor / docs / chore / ci / build / test。
-- 未经用户明确要求不要 push;推送用 `jj git push --bookmark main`。
-- `.gitignore` 由 jj/git 共用(没有 `.jjignore`);`lib/`、`node_modules/`、`scratch/`、`*.tgz`、`package-lock.json`、
-  `yarn.lock`、`.npmrc` 均已忽略。**`pnpm-lock.yaml` 必须提交**,依赖变更时一起更新。
-- 发布:插件版本号只在 `package.json`。发版步骤(jj 0.47):
-  1. `jj commit -m "chore(release): vX.Y.Z"`(或 `jj describe -m …` 后 `jj new`)提交版本号改动,再 `jj bookmark set main -r @-`;
-  2. `jj tag set -r @- vX.Y.Z` 创建 tag,`jj tag list` 确认(移动已存在的 tag 需加 `--allow-move`);
-  3. `jj git push --bookmark main` 推送提交,`jj git push --tag vX.Y.Z` 推送 tag(触发 `release.yml`);
-  4. 观察 `release.yml`:校验 tag 与 `package.json` 版本一致 → 跑同一门禁 `pnpm test` → 显式 `pnpm run build` →
-     `pnpm pack --dry-run --ignore-scripts --json` 校验发布内容 → npm OIDC 发布 → GitHub Release;
-     失败可用 `workflow_dispatch` 传入同一 tag 重跑。
-- 工具链 pin 集中在 `package.json`(`packageManager: pnpm@12.16.1` 与 `devDependencies`)、`pnpm-lock.yaml`、
-  `.github/workflows/ci.yml` / `release.yml` 与本文件「环境与准备」:Node 24(CI;`vite-plus` 要求 24.11+)、
-  jj 0.47.1、`vite-plus` 1.4.0、`typescript` 7.0.2、`@types/node` 26.6.5;测试专用的
-  `@deepseek-ai/dsh-session-projection` 跟随安装树里 `dsh-working-directory` 的 exact peer。升级时同步修改,
-  lockfile 用 `pnpm install` 重算;不要手改插件版本号以外的 workflow 版本。
-
-## 提交前检查清单
-
-- [ ] `pnpm test` 全绿(`vp check --deny-warnings` → `tsc` 类型检查 → `node --test`)
-- [ ] 改动已格式化:`pnpm run format` 后再用 `pnpm run format:check` 复核;没有手写对齐或排序
-- [ ] `jj diff` 只含预期改动;没有把 `lib/`、`node_modules/` 或临时夹具带进来;`pnpm-lock.yaml` 的改动与依赖变更对应
-- [ ] 用户可见变化已同步 `README.md`(功能/安装/工具表/配置表/已知限制)与对应 `locale/*.json`
-- [ ] 没有新增运行时依赖,`devDependencies` 只放工具链;依赖变更已更新 `pnpm-lock.yaml`
-- [ ] 没有绕过 guard、`jjNonInteractiveEnv` 或 runner 抽象
+- [ ] `pnpm test` 全绿（`vp check --deny-warnings` → `typecheck` → `test:unit`）
+- [ ] `jj diff` 仅含预期改动，未混入构建产物或临时文件
+- [ ] 用户可见变更已同步 `README.md` 与对应 `locale/*.json`
+- [ ] 未新增运行时依赖，依赖变更已更新 `pnpm-lock.yaml`
