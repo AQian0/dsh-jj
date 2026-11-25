@@ -11,7 +11,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { TestContext } from 'node:test';
+import type { TestContext } from 'vite-plus/test';
 import type { GuardExecutionLike, ToolGuardHost } from '../../src/guard.ts';
 import type { RunCommand, RunResult } from '../../src/types.ts';
 import { createRun, type TestEnv } from './run.ts';
@@ -219,7 +219,7 @@ export function realpath(path: string): string {
  */
 export function makeFixture(t: TestContext, label = 'dsh-jj'): Fixture {
   const root = makeTempRoot(label);
-  t.after(() => root.cleanup());
+  t.onTestFinished(() => root.cleanup());
   const run = createFixtureRunner(root.dir);
   return {
     root: root.dir,

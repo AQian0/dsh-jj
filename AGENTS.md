@@ -14,19 +14,19 @@
 
 ## 环境与命令
 
-- **工具链版本**：通过全局 `vp`（Vite+）统一管理环境与依赖（底层锁文件由 `packageManager: pnpm@12.16.1` 驱动）：Node.js 24.11+（CI 固定 Node 24）、`jj` 0.47.1 + `git`（均需在 `PATH`，测试使用真实仓库夹具）、`vite-plus@1.4.0`、`typescript@7.0.2`、`@types/node@26.6.5`。
+- **工具链版本**：通过全局 `vp`（Vite+）统一管理环境与依赖（底层锁文件由 `packageManager: pnpm@12.16.1` 驱动）：Node.js 24.11+（CI 固定 Node 24）、`jj` 0.47.1 + `git`（均需在 `PATH`，测试使用真实仓库夹具）、`vite-plus@1.4.0`、`@vitest/coverage-v8@5.0.5`、`typescript@7.0.2`、`@types/node@26.6.5`。
 - **测试专用 devDependency**：`@deepseek-ai/dsh-session-projection` 仅供 `test/guard-cwd.test.ts` 构造 `WorkingDirectoryService`，须与安装树中 `@deepseek-ai/dsh-working-directory` 的 exact peer 同步升级，更新后跑 `vp install` 刷新 `pnpm-lock.yaml`。
 - **首次准备**：仓库根执行 `vp install`（`pnpm-lock.yaml` 已提交）；查询 DSH API 直接读本地 `node_modules/@deepseek-ai/*`。
-- **构建/测试分工**：构建用 `tsc`（主包 `tsconfig.json` + 客户端 `tsconfig.client.json`），测试用 `node --test`（Node 原生类型擦除）；因此跑自定义脚本必须用 `vp run test` / `vp run build`（不要直接跑 `vp test` / `vp build`，它们是 Vite+ 内置的 Vitest/Vite 命令）。Oxfmt 与 Oxlint 配置见 `vite.config.ts`。
+- **构建/测试分工**：构建用 `tsc`（主包 `tsconfig.json` + 客户端 `tsconfig.client.json`，调用 `vp run build`）；格式化（Oxfmt）、lint（Oxlint）与单元测试/覆盖率（Vitest + v8）统一由 `vite.config.ts` 配置并经 `vp` 执行。
 
 | 命令                                          | 作用                                                                             |
 | --------------------------------------------- | -------------------------------------------------------------------------------- |
-| `vp run test`                                 | 提交前完整门禁：`vp run check` → `vp run typecheck` → `vp run test:unit`         |
+| `vp run test`                                 | 提交前完整门禁：`vp run check` → `vp run typecheck` → `vp test`                  |
+| `vp test` / `vp test --coverage`              | 运行真实夹具单元测试（Vitest）/ 生成 v8 覆盖率报告                               |
 | `vp run build`                                | 编译 `src/` → `lib/`（含 `panel-client.js`，不入库）                             |
 | `vp run typecheck`                            | `tsc -p tsconfig.test.json`（覆盖 `src/`、`test/`、`vite.config.ts`）            |
 | `vp check --deny-warnings` / `vp check --fix` | Oxfmt + Oxlint 检查（警告即失败）/ 自动修复（对应 `vp run check` / `check:fix`） |
 | `vp fmt` / `vp fmt --check`                   | Oxfmt 格式化 / 只检查                                                            |
-| `vp run test:unit` / `test:coverage`          | 运行真实夹具单元测试 / 覆盖率报告                                                |
 
 CI（`.github/workflows/ci.yml` / `release.yml`）均使用 `voidzero-dev/setup-vp`（固定 commit SHA）安装 `vp` 与 Node 24，执行 `vp install --frozen-lockfile` → `vp run test` → `vp pm pack --json -- --dry-run --ignore-scripts` 校验；`release.yml` 通过 npm OIDC 发布，并校验 jj 二进制 SHA-256。
 
@@ -84,12 +84,12 @@ CI（`.github/workflows/ci.yml` / `release.yml`）均使用 `voidzero-dev/setup-
 
 - 工作副本 `@` 即提交：`jj commit -m "…"`（或 `jj describe` + `jj new`），提交后执行 `jj bookmark set main -r @-`。**禁止 git 写操作**。
 - 提交信息采用 Conventional Commits + 中文简述（类型：`feat` / `fix` / `refactor` / `docs` / `style` / `test` / `chore` / `ci` / `build`）。未获明确要求不要 push。
-- `lib/`、`node_modules/`、`scratch/`、`*.tgz` 均已忽略；**`pnpm-lock.yaml` 必须提交**。
+- `lib/`、`coverage/`、`node_modules/`、`scratch/`、`*.tgz` 均已忽略；**`pnpm-lock.yaml` 必须提交**。
 - 发版步骤：改 `package.json` 版本 → `jj commit -m "chore(release): vX.Y.Z"` → `jj bookmark set main -r @-` → `jj tag set -r @- vX.Y.Z` → `jj git push --bookmark main` 与 `jj git push --tag vX.Y.Z`（触发 `release.yml`）。
 
 ## 提交前检查
 
-- [ ] `vp run test` 全绿（`vp check --deny-warnings` → `typecheck` → `test:unit`）
+- [ ] `vp run test` 全绿（`vp check --deny-warnings` → `typecheck` → `vp test`）
 - [ ] `jj diff` 仅含预期改动，未混入构建产物或临时文件
 - [ ] 用户可见变更已同步 `README.md` 与对应 `locale/*.json`
 - [ ] 未新增运行时依赖，依赖变更已更新 `pnpm-lock.yaml`

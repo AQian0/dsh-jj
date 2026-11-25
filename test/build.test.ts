@@ -6,7 +6,7 @@
  * `Config`, and the built guard must still refuse a mutating Git command inside a
  * real jj workspace.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
@@ -22,14 +22,6 @@ import { createGuardContext, initJjColocated, makeFixture, mustRun } from './hel
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const execFileAsync = promisify(execFile);
 
-/** Dynamic import over a URL, typed loosely because the target is build output. */
-interface BuiltModule {
-  readonly name?: unknown;
-  readonly inject?: unknown;
-  readonly apply?: unknown;
-  readonly Config?: unknown;
-}
-
 /** Structural view of the `ctx.jj` service the runtime entry must register. */
 interface BuiltJjService {
   readonly peek: unknown;
@@ -41,7 +33,7 @@ interface BuiltJjService {
 /**
  * Compiler the build test must use.
  *
- * Prefer the workspace-local `tsc` so a direct `node --test test/build.test.ts`
+ * Prefer the workspace-local `tsc` so a direct `vp test test/build.test.ts`
  * produces the same emit as `vp run test`/CI (a different global compiler preserves
  * different string quotes and would make the committed lib/ look stale).
  */
@@ -406,7 +398,13 @@ test('pnpm and Vite+ are wired as the repository toolchain', () => {
     'package.json must pin the pnpm version used locally and in CI',
   );
   const devDependencies = manifest.devDependencies ?? {};
-  for (const name of ['vite-plus', 'typescript', '@types/node', '@deepseek-ai/dsh-session-projection']) {
+  for (const name of [
+    'vite-plus',
+    '@vitest/coverage-v8',
+    'typescript',
+    '@types/node',
+    '@deepseek-ai/dsh-session-projection',
+  ]) {
     assert.ok((devDependencies[name] ?? '').length > 0, `package.json devDependencies is missing ${name}`);
   }
 
@@ -421,6 +419,7 @@ test('pnpm and Vite+ are wired as the repository toolchain', () => {
     'typecheck',
     'test',
     'test:unit',
+    'test:coverage',
   ]) {
     assert.ok((scripts[name] ?? '').length > 0, `package.json scripts.${name} is missing`);
   }
@@ -429,7 +428,10 @@ test('pnpm and Vite+ are wired as the repository toolchain', () => {
   assert.equal(scripts['format:check'], 'vp fmt --check', 'CI must check formatting through the Vite+ CLI');
   assert.equal(scripts.lint, 'vp lint', 'linting must go through the Vite+ CLI');
   assert.equal(scripts.check, 'vp check --deny-warnings', 'the static gate must deny Oxlint warnings');
+  assert.equal(scripts['test:unit'], 'vp test', 'unit tests must run through Vite+ Vitest');
+  assert.equal(scripts['test:coverage'], 'vp test --coverage', 'coverage must run through Vite+ Vitest');
   assert.match(scripts.test ?? '', /vp run check/, 'the test gate must run the static checks');
+  assert.match(scripts.test ?? '', /vp test/, 'the test gate must run Vite+ Vitest');
 
   for (const file of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'vite.config.ts']) {
     assert.ok(existsSync(join(packageDir, file)), `${file} must exist at the repository root`);
@@ -445,6 +447,8 @@ test('pnpm and Vite+ are wired as the repository toolchain', () => {
   const viteConfig = readFileSync(join(packageDir, 'vite.config.ts'), 'utf8');
   assert.match(viteConfig, /fmt:\s*\{/, 'vite.config.ts must configure Oxfmt');
   assert.match(viteConfig, /lint:\s*\{/, 'vite.config.ts must configure Oxlint');
+  assert.match(viteConfig, /test:\s*\{/, 'vite.config.ts must configure Vitest');
+  assert.match(viteConfig, /coverage:\s*\{/, 'vite.config.ts must configure coverage');
 });
 
 test('all four entries import under plain Node with name/inject/apply/Config', async () => {
@@ -454,16 +458,42 @@ test('all four entries import under plain Node with name/inject/apply/Config', a
     ['./guard', 'jj-guard', ['tools', 'jj']],
     ['./changes', 'jj-changes', ['subprocess', 'fs', 'jj']],
   ];
-  for (const [specifier, expectedName, expectedInject] of entries) {
-    const module = (await import(pathToFileURL(join(packageDir, 'lib', entryFile(specifier))).href)) as BuiltModule;
+  // Run inside a real plain Node.js subprocess so Vitest's module runner cannot mask
+  // broken ESM specifiers or package.json exports in the built `lib/` output.
+  const urls = entries.map(([specifier]) => pathToFileURL(join(packageDir, 'lib', entryFile(specifier))).href);
+  const probe = `
+    const urls = JSON.parse(process.argv[1]);
+    const out = [];
+    for (const url of urls) {
+      const m = await import(url);
+      out.push({
+        name: m.name,
+        inject: Array.isArray(m.inject) ? [...m.inject] : [],
+        applyType: typeof m.apply,
+        hasConfig: m.Config !== undefined,
+      });
+    }
+    process.stdout.write(JSON.stringify(out));
+  `;
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    ['--input-type=module', '-e', probe, JSON.stringify(urls)],
+    { cwd: packageDir, timeout: 30_000 },
+  );
+  assert.equal(String(stderr).trim(), '', `plain Node import stderr: ${String(stderr)}`);
+  const loaded = JSON.parse(String(stdout)) as Array<{
+    name: unknown;
+    inject: string[];
+    applyType: string;
+    hasConfig: boolean;
+  }>;
+  assert.equal(loaded.length, entries.length);
+  for (const [index, [specifier, expectedName, expectedInject]] of entries.entries()) {
+    const module = loaded[index]!;
     assert.equal(module.name, expectedName, `${specifier} name`);
-    assert.deepEqual(
-      [...((module.inject as readonly string[] | undefined) ?? [])],
-      expectedInject,
-      `${specifier} inject`,
-    );
-    assert.equal(typeof module.apply, 'function', `${specifier} apply`);
-    assert.ok(module.Config !== undefined, `${specifier} must export Config`);
+    assert.deepEqual(module.inject, expectedInject, `${specifier} inject`);
+    assert.equal(module.applyType, 'function', `${specifier} apply`);
+    assert.equal(module.hasConfig, true, `${specifier} must export Config`);
   }
 });
 
@@ -1465,7 +1495,7 @@ function collectTypeScript(dir: string, found: string[] = []): string[] {
   return found;
 }
 
-test('hand-written TypeScript has no tabs, trailing whitespace, or CRLF line endings', (t) => {
+test('hand-written TypeScript has no tabs, trailing whitespace, or CRLF line endings', async (t) => {
   const problems: string[] = [];
   const longLines: string[] = [];
   const files = ['src', 'test'].flatMap((dir) => collectTypeScript(join(packageDir, dir)));
@@ -1484,7 +1514,7 @@ test('hand-written TypeScript has no tabs, trailing whitespace, or CRLF line end
   assert.deepEqual(problems, [], `style problems: ${problems.join(', ')}`);
   if (longLines.length > 0) {
     // Oxfmt wraps at 120 columns, so this is now a regression warning, not a style gate.
-    t.diagnostic(
+    await t.annotate(
       `${longLines.length} lines exceed 120 columns (warning only, not failing): ${longLines.slice(0, 5).join(', ')}`,
     );
   }

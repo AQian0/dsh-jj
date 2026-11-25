@@ -9,7 +9,7 @@
  * V4: probe argv used to carry `--no-pager --color=never` twice (once from the
  * runner, once from detect's global args).
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

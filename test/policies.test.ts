@@ -5,7 +5,7 @@
  * without a repository where possible: a decision table for every refusal, and a registry
  * whose lifetime is the session's.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -36,7 +36,7 @@ function descriptorAt(root: string, workspaceName?: string): VcsDescriptor {
 
 test('WorkspaceOwnership remembers the canonical root per session', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-jj-ownership-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   const real = join(dir, 'real');
   mkdirSync(real);
   const link = join(dir, 'link');
@@ -68,7 +68,7 @@ test('WorkspaceOwnership remembers the canonical root per session', (t) => {
 
 test('WorkspaceOwnership reloads durable records by session id after a restart', (t) => {
   const repo = mkdtempSync(join(tmpdir(), 'dsh-jj-ownership-durable-'));
-  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(repo, { recursive: true, force: true }));
   const root = join(repo, 'ws');
   mkdirSync(root);
 
@@ -103,7 +103,7 @@ test('agentSessionId reads the live Agent session and the plain-object fallback'
 
 test('isRootWorkspace uses the .jj/repo layout, not the workspace name', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-jj-root-layout-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   const root = join(dir, 'root');
   const linked = join(dir, 'linked');
   mkdirSync(join(root, '.jj', 'repo'), { recursive: true });
@@ -189,7 +189,7 @@ test('decideOrphanWorkspaceCleanup covers every refusal reason', () => {
 
 test('WorkspaceOwnership can keep memory-only entries when persist is false', (t) => {
   const repo = mkdtempSync(join(tmpdir(), 'dsh-jj-ownership-nopersist-'));
-  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(repo, { recursive: true, force: true }));
   const root = join(repo, 'ws');
   mkdirSync(root);
 
@@ -228,7 +228,7 @@ test('JJ_TOOL_SANDBOX_CLASSES covers every registered jj_* tool with no drift', 
 
 test('resolveSandboxTargetPath and isPathWithinSandboxRoots canonicalize non-existent leaves and symlink escapes', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-jj-sandbox-paths-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
 
   const repo = join(dir, 'repo');
   const outside = join(dir, 'outside');
@@ -272,7 +272,7 @@ test('decideJjToolSandbox enforces read-only and workspace-write boundaries', (t
   // where `os.tmpdir()` defaults to `/tmp` and `/tmp` is always a writable root.
   const parentTmp = existsSync('/var/tmp') ? '/var/tmp' : homedir();
   const base = mkdtempSync(join(parentTmp, 'dsh-jj-sandbox-decide-'));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(base, { recursive: true, force: true }));
   const scopedTmp = join(base, 'scoped-tmp');
   const repo = join(base, 'repo');
   const outside = join(base, 'outside');
@@ -282,7 +282,7 @@ test('decideJjToolSandbox enforces read-only and workspace-write boundaries', (t
 
   const previousTmp = process.env.TMPDIR;
   process.env.TMPDIR = scopedTmp;
-  t.after(() => {
+  t.onTestFinished(() => {
     if (previousTmp === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTmp;
   });

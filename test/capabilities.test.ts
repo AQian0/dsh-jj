@@ -6,7 +6,7 @@
  * adding a jj subcommand to the guard's scope tables without deciding whether a tool,
  * the shell, or a hard-deny owns it must fail here.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { JJ_CAPABILITY_MATRIX, JJ_KNOWN_SUBCOMMANDS, capabilityToolNames } from '../src/capabilities.ts';
 import { resolveConfig } from '../src/config.ts';

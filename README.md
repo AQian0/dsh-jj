@@ -128,7 +128,8 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 ```bash
 vp install          # 安装工具链与 peer 依赖
-vp run test         # 门禁：vp check --deny-warnings → tsc 类型检查 → node --test
+vp run test         # 门禁：vp check --deny-warnings → tsc 类型检查 → vp test（Vitest）
+vp test --coverage  # 运行单元测试并生成 v8 覆盖率报告
 vp run build        # 构建 lib/
 vp check --fix      # Oxfmt 格式化 + Oxlint 自动修复
 ```

@@ -14,7 +14,7 @@
  * (b) session in a jj repository + host startup directory elsewhere must be
  *     refused (was a silent miss).
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { Context } from '@deepseek-ai/cordis';
 import SessionProjectionService from '@deepseek-ai/dsh-session-projection';

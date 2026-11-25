@@ -4,7 +4,7 @@
  * The registry lives under the repository's jj metadata directory and must never throw:
  * a corrupt record or an unwritable directory only means "no durable ownership".
  */
-import { test, type TestContext } from 'node:test';
+import { test, type TestContext } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,7 +23,7 @@ import {
 /** A disposable metadata root. */
 function repoDir(t: TestContext): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-jj-workspace-registry-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 

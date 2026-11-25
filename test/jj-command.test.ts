@@ -8,7 +8,7 @@
  * deadline, termination when `done` rejects, synchronous spawn refusal, and
  * every `classifyJjFailure` / `jjErrorMessage` branch.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import type { Context } from '@deepseek-ai/cordis';
 import type {

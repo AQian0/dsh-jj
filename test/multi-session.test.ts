@@ -4,7 +4,7 @@
  * The pure layer is exercised without DSH: a fake synchronous workspace probe and
  * real temporary directories for the symlink/canonical-path case.
  */
-import { test, type TestContext } from 'node:test';
+import { test, type TestContext } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,7 +24,7 @@ import {
 /** Isolated temporary root with the cleanup hook (same policy as test/helpers/fixtures.ts). */
 function tempRoot(t: TestContext, label: string): string {
   const dir = mkdtempSync(join(tmpdir(), `${label}-`));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 

@@ -9,7 +9,7 @@
  * `subprocess` service is a recording double, so no host runtime is needed; the
  * head-operation test uses the real `jj` binary through `createCommandRunJj`.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -122,7 +122,7 @@ function delay(ms: number): Promise<'timeout'> {
 
 test('JjService: detect caches for detectCacheTtlMs, warm always refreshes, and peek is a miss before any probe', async (t) => {
   const temp = makeTempRoot('dsh-jj-service-cache');
-  t.after(() => temp.cleanup());
+  t.onTestFinished(() => temp.cleanup());
   const subprocess = immediateSubprocess('jj 0.47.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { detectCacheTtlMs: 40, timeoutMs: 5_000, graceMs: 50 });
@@ -154,7 +154,7 @@ test('JjService: detect caches for detectCacheTtlMs, warm always refreshes, and 
 
 test('JjService: dispose aborts in-flight jj work instead of waiting for the timeout', async (t) => {
   const temp = makeTempRoot('dsh-jj-service-dispose');
-  t.after(() => temp.cleanup());
+  t.onTestFinished(() => temp.cleanup());
   const subprocess = hangingSubprocess();
   const { ctx, dispose } = serviceContext(subprocess);
   // An unwired dispose would block on the fake spawn until this timeout elapses; the
@@ -322,7 +322,7 @@ test('tryReadAt still maps an unresolvable revset to the actionable fallback err
 
 test('JjService: concurrent detect/warm calls for one cwd share a single probe', async (t) => {
   const temp = makeTempRoot('dsh-jj-service-inflight');
-  t.after(() => temp.cleanup());
+  t.onTestFinished(() => temp.cleanup());
 
   // Baseline: one completed detection = one batch of probe spawns.
   const baselineSubprocess = immediateSubprocess('jj 0.47.0\n');
@@ -351,7 +351,7 @@ test('JjService: concurrent detect/warm calls for one cwd share a single probe',
 
 test('JjService: the detect cache is pruned to a bounded size', async (t) => {
   const temp = makeTempRoot('dsh-jj-service-prune');
-  t.after(() => temp.cleanup());
+  t.onTestFinished(() => temp.cleanup());
   const subprocess = immediateSubprocess('jj 0.47.0\n');
   const { ctx, dispose } = serviceContext(subprocess);
   const service = new JjService(ctx, { timeoutMs: 5_000, graceMs: 50 });
@@ -375,8 +375,8 @@ test('JjService: cache keys normalize a relative cwd against process.cwd()', asy
   // after a `chdir` hit the first directory's cached descriptor (cross-talk).
   const first = makeTempRoot('dsh-jj-service-relative-a');
   const second = makeTempRoot('dsh-jj-service-relative-b');
-  t.after(() => first.cleanup());
-  t.after(() => second.cleanup());
+  t.onTestFinished(() => first.cleanup());
+  t.onTestFinished(() => second.cleanup());
   mkdirSync(join(first.dir, 'repo'));
   mkdirSync(join(second.dir, 'repo'));
   const subprocess = immediateSubprocess('jj 0.47.0\n');

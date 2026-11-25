@@ -5,7 +5,7 @@
  * The module is pure, so these are plain unit tests over description samples and
  * config-shaped options; no repository fixture is needed.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import {
   COMMIT_STYLE_CHOICES,

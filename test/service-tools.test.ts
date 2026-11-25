@@ -6,7 +6,7 @@
  * `createCommandRunJj`), and the runner wrapper records argv so the suite can
  * assert that **no** jj path ever falls back to git.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import assert from 'node:assert/strict';
@@ -3239,7 +3239,7 @@ test('sandboxPolicy workspace-write: os.tmpdir() isolation needs zero prompts wh
   // which is always in `workspace-write` writable roots).
   const nonTmpParent = existsSync('/var/tmp') ? '/var/tmp' : homedir();
   const externalParent = mkdtempSync(join(nonTmpParent, 'dsh-jj-sandbox-ext-'));
-  t.after(() => rmSync(externalParent, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(externalParent, { recursive: true, force: true }));
   const plainGitDir = join(externalParent, 'plain-git');
   mkdirSync(plainGitDir, { recursive: true });
   const plainGit = await initGit(fx.run, plainGitDir);
@@ -3247,7 +3247,7 @@ test('sandboxPolicy workspace-write: os.tmpdir() isolation needs zero prompts wh
 
   const previousTmp = process.env.TMPDIR;
   process.env.TMPDIR = scopedTmp;
-  t.after(() => {
+  t.onTestFinished(() => {
     if (previousTmp === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTmp;
   });

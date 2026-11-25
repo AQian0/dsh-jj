@@ -2,7 +2,7 @@
  * Git invocation classification (design contract §8.2 / §8.3). Pure function:
  * no I/O, no subprocess.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import {
   classifyGitInvocation,

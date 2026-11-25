@@ -6,7 +6,7 @@
  * without a real jj process. Repository-format parsing is covered by the
  * changes-diff/changes-jj tests and the Host-entry integration test.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import type { WorkspaceDiffHunk } from '@deepseek-ai/dsh-workspace-changes/types';
 import { TurnChangesRecorder, type ChangesSessionLike } from '../src/changes-recorder.ts';

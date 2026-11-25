@@ -79,7 +79,7 @@ jobs:
 
       - name: Run the documented pre-commit gate
         # `vp run test` = `vp check --deny-warnings` (Oxfmt + Oxlint) + tsc
-        # type-check + `node --test` against the real jj/git binaries;
+        # type-check + `vp test` (Vitest) against the real jj/git binaries;
         # build.test.ts builds lib/ as part of the run.
         run: vp run test
 

@@ -1,7 +1,7 @@
 name: release
 
 # 推 v<version> tag 触发：校验 tag 与 package.json 版本一致、tag 提交在 main 上 →
-# 跑文档门禁 `vp run test`（vp check 的 Oxfmt/Oxlint + tsc 类型检查 + node --test，
+# 跑文档门禁 `vp run test`（vp check 的 Oxfmt/Oxlint + tsc 类型检查 + vp test，
 # build.test.ts 负责构建 lib/）→ 显式 `vp run build` → 校验 `vp pm pack` 内容 →
 # 用 npm 可信发布（GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成 →
 # 创建 GitHub Release（已存在则跳过，可用 workflow_dispatch 传已有 tag 重跑）。
@@ -119,7 +119,7 @@ jobs:
 
       - name: Run the documented test gate
         # `vp run test` = vp check（Oxfmt + Oxlint，warning 视为失败）+ tsc -p
-        # tsconfig.test.json + node --test；build.test.ts 会构建 lib/。
+        # tsconfig.test.json + vp test（Vitest）；build.test.ts 会构建 lib/。
         run: vp run test
 
       - name: Build the published output

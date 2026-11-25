@@ -8,7 +8,7 @@
  * of fake-runner tests pins the command shape, limit binding, and every
  * failure-to-`undefined` path without paying for another subprocess.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

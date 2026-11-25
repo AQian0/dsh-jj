@@ -9,7 +9,7 @@
  * helpers. They are the end-to-end evidence that a turn inside a jj workspace
  * produces the changed-files card data with correct line counts.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -634,7 +634,7 @@ test('plain Git repository: the built-in recorder still serves the summary', asy
 
 test('workspaceChanges: off keeps an inject: [workspaceChanges] row active', async (t) => {
   const fx = makeTempRoot('dsh-jj-changes-entry-off-inject');
-  t.after(() => fx.cleanup());
+  t.onTestFinished(() => fx.cleanup());
   const entry = await import('../src/changes.ts');
   const ctx = new Context();
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
@@ -699,7 +699,7 @@ test('workspaceChanges: off serves an empty service without recording', async (t
 
 test('workspaceChanges: off leaves an existing provider in place', async (t) => {
   const fx = makeTempRoot('dsh-jj-changes-entry-off-existing');
-  t.after(() => fx.cleanup());
+  t.onTestFinished(() => fx.cleanup());
   const entry = await import('../src/changes.ts');
   const ctx = new Context();
   /** Warnings this row reported (the default logger buffer drops warn-level records). */
@@ -725,7 +725,7 @@ test('workspaceChanges: off leaves an existing provider in place', async (t) => 
 
 test('workspaceChanges: builtin provides the unmodified built-in service', async (t) => {
   const fx = makeTempRoot('dsh-jj-changes-entry-builtin');
-  t.after(() => fx.cleanup());
+  t.onTestFinished(() => fx.cleanup());
   const entry = await import('../src/changes.ts');
   const ctx = new Context();
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));
@@ -737,7 +737,7 @@ test('workspaceChanges: builtin provides the unmodified built-in service', async
 
 test('an existing provider is left alone instead of failing the profile', async (t) => {
   const fx = makeTempRoot('dsh-jj-changes-entry-existing');
-  t.after(() => fx.cleanup());
+  t.onTestFinished(() => fx.cleanup());
   const entry = await import('../src/changes.ts');
   const ctx = new Context();
   provide(ctx, 'subprocess', createFakeSubprocess({ JJ_CONFIG: writeJjConfig(fx.dir) }));

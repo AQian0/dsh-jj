@@ -10,7 +10,7 @@
  * a callable `ctx.logger`, which is exactly the environment the misplacement
  * warnings must survive (audit A4-F1/F2/F6).
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { Context } from '@deepseek-ai/cordis';
 import {

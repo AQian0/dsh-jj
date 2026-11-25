@@ -4,7 +4,7 @@
  * The browser half is a separate bundle; these tests pin the contract it consumes, so a
  * client change cannot silently depend on data the Host stopped sending.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

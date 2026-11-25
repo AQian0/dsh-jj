@@ -102,13 +102,14 @@
     "check": "vp check --deny-warnings",
     "check:fix": "vp check --fix",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test:unit": "node --test \"test/**/*.test.ts\"",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='lib/**' \"test/**/*.test.ts\"",
-    "test": "vp run check && vp run typecheck && vp run test:unit"
+    "test:unit": "vp test",
+    "test:coverage": "vp test --coverage",
+    "test": "vp run check && vp run typecheck && vp test"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-session-projection": "0.2.1-rc.5",
     "@types/node": "26.6.5",
+    "@vitest/coverage-v8": "5.0.5",
     "typescript": "7.0.2",
     "vite-plus": "1.4.0"
   },

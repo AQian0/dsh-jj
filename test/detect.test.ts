@@ -4,7 +4,7 @@
  * Every fixture is a real `jj`/`git` repository; every descriptor comes from real
  * `jj workspace list` / `git rev-parse` output.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';

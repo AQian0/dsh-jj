@@ -1,7 +1,7 @@
 /**
  * Cross-process session heartbeats: file layout, expiry, validation and fail-open reads.
  */
-import { test, type TestContext } from 'node:test';
+import { test, type TestContext } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,7 +17,7 @@ import {
 /** A disposable repository metadata directory. */
 function repoDir(t: TestContext): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-jj-heartbeat-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 

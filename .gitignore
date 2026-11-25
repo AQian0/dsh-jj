@@ -8,10 +8,11 @@
 # 依赖（pnpm 管理：`pnpm install` 生成，不入库）
 node_modules/
 
-# 构建产物（不入库，与官方上游一致）：`pnpm run build` 生成 lib/。
+# 构建产物（不入库，与官方上游一致）：`vp run build` 生成 lib/。
 # DSH 安装 bundle 时不执行构建，所以本地安装 / npm 发布之前都需要
 # 先构建一次（npm 发布由 prepack 自动构建）。
 lib/
+coverage/
 *.tsbuildinfo
 
 # 过程性目录：实验脚本、夹具与日志

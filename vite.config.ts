@@ -1,11 +1,10 @@
 /**
  * Vite+ toolchain configuration.
  *
- * This package ships no Vite application: `vite-plus` supplies the local
- * formatter (Oxfmt) and linter (Oxlint), so the `fmt` and `lint` blocks below
- * are the single source of truth for code style and lint rules. Run them
- * through Vite+ (`vp fmt` / `vp lint` / `vp check` or `vp run ...`);
- * tests and the build stay on `node --test` and `tsc`.
+ * `vite-plus` supplies the local formatter (Oxfmt), linter (Oxlint), and test
+ * runner (Vitest + v8 coverage), so the `fmt`, `lint`, and `test` blocks below
+ * are the single source of truth. Run them through `vp fmt` / `vp lint` /
+ * `vp check` / `vp test` (or `vp run ...`); package builds stay on `tsc`.
  *
  * @module vite.config
  */
@@ -21,5 +20,18 @@ export default defineConfig({
   lint: {
     // Oxlint's native default set (unicorn/oxc/typescript) plus ESM import checks.
     plugins: ['unicorn', 'typescript', 'oxc', 'import'],
+  },
+  test: {
+    include: ['test/**/*.test.ts'],
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.ts'],
+      // `panel-client.ts` is compiled by tsconfig.client.json as a classic browser script
+      // and exercised via node:vm in build.test.ts; `changes-types.ts` is type-only.
+      exclude: ['src/panel-client.ts', 'src/changes-types.ts'],
+      reporter: ['text', 'html'],
+    },
   },
 });

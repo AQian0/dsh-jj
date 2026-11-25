@@ -5,7 +5,7 @@
  * `systemPrompt.context(...)` whose text provider reads `AssembleContext.agent`, exactly
  * like `@deepseek-ai/dsh-working-directory` does.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { installJjPromptContext, jjPreferenceContextText, JJ_CONTEXT_NAME } from '../src/prompt-context.ts';
 import type { VcsSniff } from '../src/types.ts';

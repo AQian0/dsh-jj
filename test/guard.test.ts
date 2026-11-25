@@ -5,7 +5,7 @@
  * so these tests use real jj/git fixtures plus a context double that reproduces
  * `ctx.tools.guard(...)` and the `tools/pre-execute` waterfall.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';

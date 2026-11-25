@@ -6,7 +6,7 @@
  * sorted, how totals are approximated, how comparisons are routed) without a
  * repository or a running Host.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import type {
   WorkspaceChangedFile,

@@ -5,7 +5,7 @@
  * installed binary). One additional test runs a real jj repository so the
  * literals cannot quietly drift from the real format.
  */
-import { test } from 'node:test';
+import { test } from 'vite-plus/test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -456,7 +456,7 @@ function jj(repo: string, env: NodeJS.ProcessEnv, argv: readonly string[]): stri
 
 test('parses a real jj Git-format diff for a mixed change', (t) => {
   const root = makeTempRoot('dsh-jj-changes-diff');
-  t.after(() => root.cleanup());
+  t.onTestFinished(() => root.cleanup());
   const repo = join(root.dir, 'repo');
   mkdirSync(repo);
   const env: NodeJS.ProcessEnv = { ...process.env, JJ_CONFIG: writeJjConfig(root.dir) };
