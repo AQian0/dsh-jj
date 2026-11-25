@@ -98,7 +98,6 @@
       retry: '重试',
       failedDetail: '原因',
       emptyHint: '这个会话的目录不在 jj 工作区里，或者 jj 服务不可用。',
-      readOnly: '只读面板 · 数据来自 jj --ignore-working-copy',
       statusCard: '工作副本',
       logCard: '提交历史',
       workspacesCard: '工作区清单',
@@ -207,7 +206,6 @@
       retry: 'Retry',
       failedDetail: 'reason',
       emptyHint: 'This session is not in a jj workspace, or the jj service is unavailable.',
-      readOnly: 'Read-only panel · data from jj --ignore-working-copy',
       statusCard: 'Working copy',
       logCard: 'History',
       workspacesCard: 'Workspaces',
@@ -644,7 +642,6 @@
 .dshjj-btn:focus-visible{outline:var(--dsw-focus-ring-width,1.5px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 @media(hover:hover){.dshjj-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .dshjj-note{color:var(--dsw-alias-label-tertiary);font-size:12px;margin:0;padding:8px 2px}
-.dshjj-foot{color:var(--dsw-alias-label-tertiary);font-size:11px;padding:4px 2px 0;margin-top:auto}
 .dshjj-skel-stack{display:flex;flex-direction:column;gap:8px;padding:4px 0}
 .dshjj-skel{height:14px;border-radius:var(--dsw-radius-xs,4px);background:var(--dsw-alias-bg-skeleton,var(--dsw-alias-card-fill));animation:dshjj-pulse 1.4s ease-in-out infinite}
 .dshjj-skel[data-lg=true]{height:42px;border-radius:var(--dsw-radius-sm,8px)}
@@ -2172,8 +2169,6 @@
           ),
         );
       }
-
-      bodyChildren.push(h('span', { className: 'dshjj-foot' }, t('readOnly')));
     }
 
     return h(
