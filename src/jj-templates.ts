@@ -145,6 +145,44 @@ export const TPL_BOOKMARK_LIST = 'json(self) ++ "\\n"';
  */
 export const TPL_DESCRIPTION = 'json(description) ++ "\\n"';
 
+/**
+ * `jj log` per-change template for the read-only Web panel.
+ *
+ * Keeps the core `TPL_LOG` fields while adding shortest unique change-id prefix,
+ * parent commit ids (for stack/ancestry derivation), author name and ISO timestamp
+ * so the panel can render an informative commit graph without spawning extra
+ * processes.
+ */
+export const TPL_PANEL_LOG =
+  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"shortest_change_id\\":" ++ json(change_id.shortest().prefix()) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"parents\\":" ++ json(parents.map(|p| p.commit_id())) ++ ",\\"description\\":" ++ json(description.first_line()) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"immutable\\":" ++ json(immutable) ++ ",\\"remote_bookmarks\\":" ++ json(remote_bookmarks.filter(|b| b.remote() != "git").map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.name()) ++ ",\\"author_email\\":" ++ json(author.email()) ++ ",\\"timestamp\\":" ++ json(author.timestamp()) ++ "}\\n"';
+
+/**
+ * Single-revision detail template for the Web panel inspector.
+ *
+ * Identical to {@link TPL_PANEL_LOG} except `description` carries the full
+ * multi-line commit message rather than `first_line()`.
+ */
+export const TPL_PANEL_REVISION_DETAIL =
+  '"{\\"change_id\\":" ++ json(change_id) ++ ",\\"shortest_change_id\\":" ++ json(change_id.shortest().prefix()) ++ ",\\"commit_id\\":" ++ json(commit_id) ++ ",\\"parents\\":" ++ json(parents.map(|p| p.commit_id())) ++ ",\\"description\\":" ++ json(description) ++ ",\\"empty\\":" ++ json(empty) ++ ",\\"conflict\\":" ++ json(conflict) ++ ",\\"current_working_copy\\":" ++ json(current_working_copy) ++ ",\\"bookmarks\\":" ++ json(local_bookmarks.map(|b| b.name())) ++ ",\\"immutable\\":" ++ json(immutable) ++ ",\\"remote_bookmarks\\":" ++ json(remote_bookmarks.filter(|b| b.remote() != "git").map(|b| b.name())) ++ ",\\"author\\":" ++ json(author.name()) ++ ",\\"author_email\\":" ++ json(author.email()) ++ ",\\"timestamp\\":" ++ json(author.timestamp()) ++ "}\\n"';
+
+/**
+ * Per-file diff stat template for one revision in the Web panel.
+ *
+ * Emits one JSON line per changed file with its workspace-relative path, jj diff
+ * status (`added`/`modified`/`removed`/`copied`/`renamed`), and added/removed line
+ * counts.
+ */
+export const TPL_PANEL_DIFF_FILES =
+  'self.diff().stat().files().map(|f| "{\\"path\\":" ++ json(f.path()) ++ ",\\"status\\":" ++ json(f.status()) ++ ",\\"added\\":" ++ json(f.lines_added()) ++ ",\\"removed\\":" ++ json(f.lines_removed()) ++ "}\\n").join("")';
+
+/**
+ * Conflicted target-path listing for one conflicted revision in the Web panel.
+ *
+ * Only invoked when a revision already reports `conflict: true`.
+ */
+export const TPL_PANEL_CONFLICT_FILES =
+  'self.diff().files().filter(|f| f.target().conflict()).map(|f| json(f.path()) ++ "\\n").join("")';
+
 /** Bounded text helper. */
 export function bound(text: string, limit: number): { text: string; truncated: boolean } {
   return text.length <= limit ? { text, truncated: false } : { text: text.slice(0, limit), truncated: true };
@@ -281,4 +319,155 @@ export function parseChangeLines(stdout: string, argv: readonly string[]): JjCha
     }
   }
   return changes;
+}
+
+/** Normalized file change status shown in the Web panel. */
+export type JjPanelDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied';
+
+/** One changed file of a revision as reported by {@link TPL_PANEL_DIFF_FILES}. */
+export interface JjPanelDiffFile {
+  readonly path: string;
+  readonly status: JjPanelDiffStatus;
+  readonly added: number;
+  readonly removed: number;
+  readonly conflict: boolean;
+}
+
+/** Enriched change record parsed from {@link TPL_PANEL_LOG} or {@link TPL_PANEL_REVISION_DETAIL}. */
+export interface JjPanelChangeRecord extends JjChange {
+  /** Shortest unique change-id prefix highlighted in jj-style listings. */
+  readonly shortestChangeId: string;
+  /** Parent commit ids in jj's parent order. */
+  readonly parents: readonly string[];
+  /** Author email address (empty when unset in commit metadata). */
+  readonly authorEmail: string;
+  /** RFC 3339 author timestamp as reported by jj. */
+  readonly timestamp: string;
+  /** Whether a correction may rewrite this change (`!immutable && remoteBookmarks.length === 0`). */
+  readonly rewritable: boolean;
+}
+
+/** Convert one parsed panel-log record into a {@link JjPanelChangeRecord}. */
+export function panelChangeFromRecord(record: Record<string, unknown>): JjPanelChangeRecord {
+  const base = changeFromRecord(record);
+  const authorName = typeof record['author'] === 'string' ? record['author'].trim() : '';
+  const authorEmail = typeof record['author_email'] === 'string' ? record['author_email'].trim() : '';
+  const parents = Array.isArray(record['parents'])
+    ? record['parents'].filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+    : [];
+  const rawShortest = typeof record['shortest_change_id'] === 'string' ? record['shortest_change_id'] : '';
+  const shortestChangeId =
+    rawShortest.length > 0 && base.changeId.startsWith(rawShortest) ? rawShortest : base.changeId.slice(0, 4);
+  const timestamp = typeof record['timestamp'] === 'string' ? record['timestamp'] : '';
+  return {
+    ...base,
+    author: authorName.length > 0 ? authorName : authorEmail,
+    authorEmail,
+    shortestChangeId,
+    parents,
+    timestamp,
+    rewritable: isRewritableChange(base),
+  };
+}
+
+/**
+ * Parse every non-empty line of a {@link TPL_PANEL_LOG} read into enriched panel records.
+ *
+ * @throws TemplateParseError on the first unparseable line.
+ */
+export function parsePanelChanges(stdout: string, argv: readonly string[]): JjPanelChangeRecord[] {
+  const changes: JjPanelChangeRecord[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line.trim().length === 0) continue;
+    try {
+      const record = asRecord(JSON.parse(line));
+      if (record !== undefined) changes.push(panelChangeFromRecord(record));
+    } catch {
+      throw new TemplateParseError(`\`jj ${argv.join(' ')}\` produced unparseable output: ${bound(stdout, 512).text}`, {
+        argv,
+        stderr: '',
+        stdout: bound(stdout, 512).text,
+      });
+    }
+  }
+  return changes;
+}
+
+/**
+ * Parse a single {@link TPL_PANEL_REVISION_DETAIL} record.
+ *
+ * @throws TemplateParseError when the output is empty or malformed.
+ */
+export function parsePanelRevisionDetail(stdout: string, argv: readonly string[]): JjPanelChangeRecord {
+  return panelChangeFromRecord(parseJsonLine(stdout, argv));
+}
+
+/** Normalize jj's `TreeDiffEntry.status()` strings into our panel status union. */
+function normalizePanelDiffStatus(raw: unknown): JjPanelDiffStatus {
+  switch (raw) {
+    case 'added':
+      return 'added';
+    case 'removed':
+    case 'deleted':
+      return 'deleted';
+    case 'renamed':
+      return 'renamed';
+    case 'copied':
+      return 'copied';
+    default:
+      return 'modified';
+  }
+}
+
+/** Parse {@link TPL_PANEL_CONFLICT_FILES} lines (fail-open per line). */
+export function parsePanelConflictPaths(stdout: string): Set<string> {
+  const paths = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    if (line.trim().length === 0) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed === 'string' && parsed.length > 0) paths.add(parsed);
+    } catch {
+      // Ignore malformed lines: conflict highlighting stays fail-open.
+    }
+  }
+  return paths;
+}
+
+/**
+ * Parse {@link TPL_PANEL_DIFF_FILES} output into structured file entries (fail-open per line).
+ *
+ * Conflicted files are sorted to the top while preserving jj's path order within each group.
+ */
+export function parsePanelDiffFiles(stdout: string, conflictPaths: ReadonlySet<string> = new Set()): JjPanelDiffFile[] {
+  const files: JjPanelDiffFile[] = [];
+  const seen = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    if (line.trim().length === 0) continue;
+    let parsed: Record<string, unknown> | undefined;
+    try {
+      parsed = asRecord(JSON.parse(line));
+    } catch {
+      parsed = undefined;
+    }
+    const path = parsed?.['path'];
+    if (typeof path !== 'string' || path.length === 0 || seen.has(path)) continue;
+    seen.add(path);
+    const added = typeof parsed?.['added'] === 'number' && Number.isFinite(parsed['added']) ? parsed['added'] : 0;
+    const removed =
+      typeof parsed?.['removed'] === 'number' && Number.isFinite(parsed['removed']) ? parsed['removed'] : 0;
+    files.push({
+      path,
+      status: normalizePanelDiffStatus(parsed?.['status']),
+      added,
+      removed,
+      conflict: conflictPaths.has(path),
+    });
+  }
+  for (const conflictPath of conflictPaths) {
+    if (seen.has(conflictPath)) continue;
+    files.push({ path: conflictPath, status: 'modified', added: 0, removed: 0, conflict: true });
+  }
+  files.sort((left, right) => Number(right.conflict) - Number(left.conflict));
+  return files;
 }

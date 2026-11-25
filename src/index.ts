@@ -34,7 +34,7 @@ import type { JjLiveSession } from './multi-session.ts';
 import { sniffVcsSync } from './detect.ts';
 import { canonicalWorkspacePath } from './policies.ts';
 import { readSessionHeartbeats, removeSessionHeartbeat, writeSessionHeartbeat } from './session-heartbeat.ts';
-import { registerJjPanelRoutes, type JjPanelRouteHost } from './panel-host.ts';
+import { registerJjPanelRoutes, type JjPanelLiveSession, type JjPanelRouteHost } from './panel-host.ts';
 import { installJjPromptContext } from './prompt-context.ts';
 import { JjService } from './service.ts';
 
@@ -597,6 +597,41 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
       }
       return false;
     };
+    /** Read-only snapshot of in-process top-level sessions for workspace status badges. */
+    const panelLiveSessions = (): readonly JjPanelLiveSession[] => {
+      const agents = readService<{ roots?: () => readonly { session?: unknown }[] }>('agents');
+      const workingDirectory = readService<{ get?: (session: unknown) => unknown }>('workingDirectory');
+      let roots: readonly { session?: unknown }[] | undefined;
+      try {
+        roots = agents?.roots?.();
+      } catch {
+        roots = [];
+      }
+      if (!Array.isArray(roots)) return [];
+      const observations: JjPanelLiveSession[] = [];
+      for (const entry of roots) {
+        const session = entry?.session;
+        if (session === undefined) continue;
+        let sessionCwd: unknown;
+        try {
+          sessionCwd = workingDirectory?.get?.(session);
+        } catch {
+          sessionCwd = undefined;
+        }
+        if (typeof sessionCwd !== 'string' || sessionCwd.length === 0) {
+          sessionCwd = (session as { header?: { cwd?: unknown } } | null | undefined)?.header?.cwd;
+        }
+        if (typeof sessionCwd !== 'string' || sessionCwd.length === 0) continue;
+        const id = sessionIdOf(session);
+        const active = sessionIsActive(session);
+        observations.push({
+          ...(id !== undefined ? { sessionId: id } : {}),
+          cwd: sessionCwd,
+          ...(active !== undefined ? { active } : {}),
+        });
+      }
+      return observations;
+    };
     const installPanelRoutes = (): (() => void) => {
       const connection = readService<JjPanelRouteHost>('connection');
       if (connection?.fetch === undefined || typeof connection.fetch.register !== 'function') {
@@ -607,6 +642,7 @@ export function apply(ctx: Context, config: JjPluginConfig = {}): void {
           service: jjService,
           enabled: true,
           isAllowedCwd: isAllowedPanelCwd,
+          liveSessions: panelLiveSessions,
         });
       } catch {
         return () => {};

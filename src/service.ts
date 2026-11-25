@@ -30,8 +30,12 @@ import {
   changeFromRecord,
   isRewritableChange,
   parseChangeLines,
-  parseWorkspaceStates,
   parseJsonLine,
+  parsePanelChanges,
+  parsePanelConflictPaths,
+  parsePanelDiffFiles,
+  parsePanelRevisionDetail,
+  parseWorkspaceStates,
   TemplateParseError,
   TPL_BOOKMARK_LIST,
   TPL_CHANGE,
@@ -39,10 +43,16 @@ import {
   TPL_DESCRIPTION,
   TPL_LOG,
   TPL_OP_LOG,
+  TPL_PANEL_CONFLICT_FILES,
+  TPL_PANEL_DIFF_FILES,
+  TPL_PANEL_LOG,
+  TPL_PANEL_REVISION_DETAIL,
   TPL_STATUS,
   TPL_WORKSPACE_LIST_STATE,
   TPL_WORKSPACE_LIST_TAB,
   type JjChangeRecord,
+  type JjPanelChangeRecord,
+  type JjPanelDiffFile,
 } from './jj-templates.ts';
 import type { JjOperation, JjRunResult, JjWorkspaceState } from './types.ts';
 
@@ -2329,6 +2339,83 @@ export class JjOperations {
     const argv = logArgv(revset, TPL_CHANGE, undefined, options.ignoreWorkingCopy === true);
     const result = await this.run(cwd, argv, signal);
     return readChangeRecord(result.stdout, argv);
+  }
+
+  /**
+   * Read an enriched revision list for the read-only Web panel.
+   *
+   * Always passes `--ignore-working-copy` so opening or refreshing the panel never
+   * triggers a working-copy snapshot or grows the operation log.
+   *
+   * @param cwd - workspace directory.
+   * @param revset - jj revset selecting the graph/history window.
+   * @param limit - maximum revisions to return.
+   * @param signal - cancellation signal.
+   * @returns enriched change records with shortest prefix, parents, author and timestamp.
+   */
+  async readPanelLog(
+    cwd: string,
+    revset: string,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<readonly JjPanelChangeRecord[]> {
+    const argv = logArgv(revset, TPL_PANEL_LOG, limit, true);
+    const result = await this.run(cwd, argv, signal);
+    try {
+      return parsePanelChanges(result.stdout, argv);
+    } catch (error) {
+      contractParseFailure(error);
+    }
+  }
+
+  /**
+   * Read one revision with its full multi-line description for the panel inspector.
+   *
+   * Always passes `--ignore-working-copy`.
+   *
+   * @param cwd - workspace directory.
+   * @param revset - validated single revision selector (`@`, change id or commit id).
+   * @param signal - cancellation signal.
+   * @returns enriched revision metadata.
+   */
+  async readPanelRevision(cwd: string, revset: string, signal?: AbortSignal): Promise<JjPanelChangeRecord> {
+    const argv = logArgv(revset, TPL_PANEL_REVISION_DETAIL, 1, true);
+    const result = await this.run(cwd, argv, signal);
+    try {
+      return parsePanelRevisionDetail(result.stdout, argv);
+    } catch (error) {
+      contractParseFailure(error);
+    }
+  }
+
+  /**
+   * Read per-file diff statistics (and optional conflict flags) for one revision.
+   *
+   * Always passes `--ignore-working-copy`. Conflict listing only runs when the caller
+   * already knows the revision is conflicted (`checkConflicts: true`).
+   *
+   * @param cwd - workspace directory.
+   * @param revset - revision selector.
+   * @param checkConflicts - whether to additionally query per-file conflict flags.
+   * @param signal - cancellation signal.
+   * @returns changed files with status, line counts and conflict marker.
+   */
+  async readPanelDiffFiles(
+    cwd: string,
+    revset: string,
+    checkConflicts: boolean,
+    signal?: AbortSignal,
+  ): Promise<readonly JjPanelDiffFile[]> {
+    const filesArgv = logArgv(revset, TPL_PANEL_DIFF_FILES, 1, true);
+    const [filesResult, conflictPaths] = await Promise.all([
+      this.run(cwd, filesArgv, signal),
+      checkConflicts
+        ? this.run(cwd, logArgv(revset, TPL_PANEL_CONFLICT_FILES, 1, true), signal)
+            .then((result) => parsePanelConflictPaths(result.stdout))
+            .catch(() => new Set<string>())
+        : Promise.resolve(new Set<string>()),
+    ]);
+    return parsePanelDiffFiles(filesResult.stdout, conflictPaths);
   }
 
   /** Read every revision selected by a revset (used to fold `@` and `@-` into one call). */
