@@ -1,11 +1,10 @@
 name: release
 
 # 推 v<version> tag 触发：校验 tag 与 package.json 版本一致、tag 提交在 main 上 →
-# 跑文档门禁 `pnpm test`（vp check 的 Oxfmt/Oxlint + tsc 类型检查 + node --test，
-# build.test.ts 负责构建 lib/）→ 显式 `pnpm run build` → 校验 pnpm pack 内容 →
+# 跑文档门禁 `vp run test`（vp check 的 Oxfmt/Oxlint + tsc 类型检查 + node --test，
+# build.test.ts 负责构建 lib/）→ 显式 `vp run build` → 校验 `vp pm pack` 内容 →
 # 用 npm 可信发布（GitHub OIDC，无需 NPM_TOKEN）发布，provenance 自动生成 →
 # 创建 GitHub Release（已存在则跳过，可用 workflow_dispatch 传已有 tag 重跑）。
-# 首次发布由本机 Bun 手动完成（Bun 不支持 npm OIDC）。
 
 on:
   push:
@@ -47,26 +46,24 @@ jobs:
           ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
-      - name: Set up pnpm
-        # No `version` input: the action installs the exact `packageManager`
-        # version pinned in package.json.
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4 (v4.4.0)
-
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 (v6.5.0)
+      - name: Set up Vite+
+        # Pinned to commit SHA (verified via `git ls-remote`); keep `# vX.Y.Z` in
+        # sync when upgrading. Installs Vite+, Node.js 24, and the pinned
+        # packageManager from package.json with dependency caching.
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-          cache: pnpm
+          cache: true
+          run-install: false
 
       - name: Install dependencies
         # Reproducible install from the committed pnpm-lock.yaml. The lockfile
         # pins the resolved DSH upstream tree (including the test-only
         # @deepseek-ai/dsh-session-projection type dependency), so no dynamic
         # version probe is needed. Upgrading that tree is a dependency change:
-        # refresh the devDependency + lockfile with `pnpm install` and re-check
-        # `pnpm peers check` instead of patching versions in this workflow.
-        run: pnpm install --frozen-lockfile
+        # refresh the devDependency + lockfile with `vp install` instead of
+        # patching versions in this workflow.
+        run: vp install --frozen-lockfile
 
       - name: Install Jujutsu (jj) for the test fixtures
         env:
@@ -121,20 +118,20 @@ jobs:
           echo "${RELEASE_TAG} is on main"
 
       - name: Run the documented test gate
-        # `pnpm test` = vp check（Oxfmt + Oxlint，warning 视为失败）+ tsc -p
+        # `vp run test` = vp check（Oxfmt + Oxlint，warning 视为失败）+ tsc -p
         # tsconfig.test.json + node --test；build.test.ts 会构建 lib/。
-        run: pnpm test
+        run: vp run test
 
       - name: Build the published output
         # lib/ 不入库。prepack 也会构建，但这里显式再构建一次，让下面的 pack
         # 校验与最终发布看到同一份确定的产物（tsc 构建 < 1s）。
-        run: pnpm run build
+        run: vp run build
 
       - name: Validate the publishable tarball
         # 用 --ignore-scripts 防止再次触发 prepack；缺失 lib/types 或 locale 的包
         # 对该版本不可挽回，所以显式断言内容而不是只信 package.json.files。
         run: |
-          pnpm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
+          vp pm pack --json -- --dry-run --ignore-scripts > "${RUNNER_TEMP}/pack.json"
           node - <<'NODE'
           const fs = require('node:fs');
           const manifest = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/pack.json`, 'utf8'));
@@ -164,12 +161,12 @@ jobs:
             console.error(`::error::publishable tarball is missing: ${missing.join(', ')}`);
             process.exit(1);
           }
-          console.log(`pnpm pack contains all ${required.length} required files (${manifest.files.length} entries)`);
+          console.log(`vp pm pack contains all ${required.length} required files (${manifest.files.length} entries)`);
           NODE
 
       - name: Publish to npm with OIDC
         # 已发布则跳过（warning），使重跑可恢复；prerelease 走 next dist-tag。
-        # 发布本身仍走 npm 的 trusted publishing（OIDC），pnpm 只负责本地工具链。
+        # 发布走 npm trusted publishing（OIDC，由 setup-vp 提供的 Node 24 npm 执行）。
         run: |
           version="${RELEASE_TAG#v}"
           if npm view "@aqian0/dsh-jj@${version}" version >/dev/null 2>&1; then
@@ -177,9 +174,9 @@ jobs:
             exit 0
           fi
           if [[ "${version}" == *-* ]]; then
-            npm publish --tag next
+            npm publish --registry https://registry.npmjs.org --tag next
           else
-            npm publish
+            npm publish --registry https://registry.npmjs.org
           fi
 
       - name: Create GitHub release

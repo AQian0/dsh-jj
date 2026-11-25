@@ -1,10 +1,10 @@
 name: ci
 
-# Push/PR quality gate for the documented pre-commit command (`pnpm test`).
+# Push/PR quality gate for the documented pre-commit command (`vp run test`).
 #
-# The repository is a pnpm project: `pnpm-lock.yaml` is committed, the static
-# toolchain (vite-plus / tsc) lives in devDependencies, and the public DSH peer
-# dependencies are installed by pnpm from the ranges declared in package.json.
+# Managed by Vite+ (`vp`) with `pnpm-lock.yaml` as the committed lockfile: the
+# static toolchain (vite-plus / tsc) lives in devDependencies, and the public
+# DSH peer dependencies are installed from the ranges declared in package.json.
 # Tests exercise the real jj/git toolchain (nothing is mocked).
 
 on:
@@ -31,21 +31,20 @@ jobs:
         # `git ls-remote`); keep the `# v6 (vX.Y.Z)` comment in sync when upgrading.
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 (v6.1.0)
 
-      - name: Set up pnpm
-        # No `version` input: the action installs the exact `packageManager`
-        # version pinned in package.json.
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4 (v4.4.0)
-
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 (v6.5.0)
+      - name: Set up Vite+
+        # Pinned to commit SHA (verified via `git ls-remote`); keep `# vX.Y.Z` in
+        # sync when upgrading. Installs Vite+, Node.js 24, and the pinned
+        # packageManager from package.json with dependency caching.
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
         with:
           node-version: '24'
-          cache: pnpm
+          cache: true
+          run-install: false
 
       - name: Install dependencies
         # Reproducible install from the committed pnpm-lock.yaml. DSH peer
-        # dependencies come from the ranges in package.json (pnpm installs them).
-        run: pnpm install --frozen-lockfile
+        # dependencies come from the ranges in package.json.
+        run: vp install --frozen-lockfile
 
       - name: Install Jujutsu (jj) for the test fixtures
         env:
@@ -79,17 +78,17 @@ jobs:
           esac
 
       - name: Run the documented pre-commit gate
-        # `pnpm test` = `vp check --deny-warnings` (Oxfmt + Oxlint) + tsc
+        # `vp run test` = `vp check --deny-warnings` (Oxfmt + Oxlint) + tsc
         # type-check + `node --test` against the real jj/git binaries;
         # build.test.ts builds lib/ as part of the run.
-        run: pnpm test
+        run: vp run test
 
       - name: Smoke-check the publishable tarball
         # release.yml asserts the full manifest; this catches a broken `files`
         # config without spending network time (lib/ was just built by the tests).
         # `--ignore-scripts` keeps prepack from rebuilding lib/ during the smoke check.
         run: |
-          pnpm pack --dry-run --ignore-scripts --json > "${RUNNER_TEMP}/pack.json"
+          vp pm pack --json -- --dry-run --ignore-scripts > "${RUNNER_TEMP}/pack.json"
           node -e "
             const manifest = require(process.env.RUNNER_TEMP + '/pack.json');
             const packaged = new Set(manifest.files.map((entry) => entry.path));

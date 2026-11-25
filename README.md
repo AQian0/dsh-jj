@@ -25,7 +25,7 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 
 也可在 Web GUI 的插件管理页面填入 `@aqian0/dsh-jj` 安装。
 
-**从本地安装**（需要 Node.js 24.11+、pnpm 12.16.1）：仓库根目录执行 `pnpm install && pnpm run build`，再以仓库绝对路径作为 spec 安装。
+**从本地安装**（需要 Node.js 24.11+ 与 [Vite+](https://viteplus.dev) CLI `vp`）：仓库根目录执行 `vp install && vp run build`，再以仓库绝对路径作为 spec 安装。
 
 安装后自动启用 `jj-runtime`、`jj-tools`、`jj-guard`、`jj-changes` 四个入口，并由 `jj-changes` 接管 Web 端内置的 `workspace-changes`。
 
@@ -127,10 +127,10 @@ dsh plugin --profile <profile> add @aqian0/dsh-jj
 ## 开发
 
 ```bash
-pnpm install        # 安装工具链与 peer 依赖
-pnpm test           # 门禁：vp check --deny-warnings → tsc 类型检查 → node --test
-pnpm run build      # 构建 lib/
-pnpm run check:fix  # Oxfmt 格式化 + Oxlint 自动修复
+vp install          # 安装工具链与 peer 依赖
+vp run test         # 门禁：vp check --deny-warnings → tsc 类型检查 → node --test
+vp run build        # 构建 lib/
+vp check --fix      # Oxfmt 格式化 + Oxlint 自动修复
 ```
 
 架构、约定与提交流程见 [AGENTS.md](./AGENTS.md)。

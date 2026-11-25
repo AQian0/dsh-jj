@@ -1,6 +1,6 @@
 # AGENTS.md
 
-面向本仓库 AI 代理与开发者的开发说明。用户文档见 [README.md](./README.md)；内容以代码和 `pnpm test` 为准。
+面向本仓库 AI 代理与开发者的开发说明。用户文档见 [README.md](./README.md)；内容以代码和 `vp run test` 为准。
 本仓库自身是 **jj-colocated** 工作区，版本控制一律使用 jj。
 
 ## 项目速览
@@ -14,21 +14,21 @@
 
 ## 环境与命令
 
-- **工具链版本**：Node.js 24.11+（CI 固定 Node 24）、`pnpm@12.16.1`、`jj` 0.47.1 + `git`（均需在 `PATH`，测试使用真实仓库夹具）、`vite-plus@1.4.0`、`typescript@7.0.2`、`@types/node@26.6.5`。
-- **测试专用 devDependency**：`@deepseek-ai/dsh-session-projection` 仅供 `test/guard-cwd.test.ts` 构造 `WorkingDirectoryService`，须与安装树中 `@deepseek-ai/dsh-working-directory` 的 exact peer 同步升级，更新后跑 `pnpm install` 并确认 `pnpm peers check` 无新告警。
-- **首次准备**：仓库根执行 `pnpm install`（`pnpm-lock.yaml` 已提交）；查询 DSH API 直接读本地 `node_modules/@deepseek-ai/*`。
-- **构建/测试分工**：构建用 `tsc`（主包 `tsconfig.json` + 客户端 `tsconfig.client.json`），测试用 `node --test`（Node 原生类型擦除）；`vite-plus` 仅负责 Oxfmt 与 Oxlint（配置见 `vite.config.ts`）。
+- **工具链版本**：通过全局 `vp`（Vite+）统一管理环境与依赖（底层锁文件由 `packageManager: pnpm@12.16.1` 驱动）：Node.js 24.11+（CI 固定 Node 24）、`jj` 0.47.1 + `git`（均需在 `PATH`，测试使用真实仓库夹具）、`vite-plus@1.4.0`、`typescript@7.0.2`、`@types/node@26.6.5`。
+- **测试专用 devDependency**：`@deepseek-ai/dsh-session-projection` 仅供 `test/guard-cwd.test.ts` 构造 `WorkingDirectoryService`，须与安装树中 `@deepseek-ai/dsh-working-directory` 的 exact peer 同步升级，更新后跑 `vp install` 刷新 `pnpm-lock.yaml`。
+- **首次准备**：仓库根执行 `vp install`（`pnpm-lock.yaml` 已提交）；查询 DSH API 直接读本地 `node_modules/@deepseek-ai/*`。
+- **构建/测试分工**：构建用 `tsc`（主包 `tsconfig.json` + 客户端 `tsconfig.client.json`），测试用 `node --test`（Node 原生类型擦除）；因此跑自定义脚本必须用 `vp run test` / `vp run build`（不要直接跑 `vp test` / `vp build`，它们是 Vite+ 内置的 Vitest/Vite 命令）。Oxfmt 与 Oxlint 配置见 `vite.config.ts`。
 
-| 命令                                        | 作用                                                                           |
-| ------------------------------------------- | ------------------------------------------------------------------------------ |
-| `pnpm test`                                 | 提交前完整门禁：`pnpm run check` → `pnpm run typecheck` → `pnpm run test:unit` |
-| `pnpm run build`                            | 编译 `src/` → `lib/`（含 `panel-client.js`，不入库）                           |
-| `pnpm run typecheck`                        | `tsc -p tsconfig.test.json`（覆盖 `src/`、`test/`、`vite.config.ts`）          |
-| `pnpm run check` / `pnpm run check:fix`     | `vp check --deny-warnings`（Oxfmt + Oxlint，警告即失败）/ 自动修复             |
-| `pnpm run format` / `pnpm run format:check` | Oxfmt 格式化 / 只检查                                                          |
-| `pnpm run test:unit` / `test:coverage`      | 运行真实夹具单元测试 / 覆盖率报告                                              |
+| 命令                                          | 作用                                                                             |
+| --------------------------------------------- | -------------------------------------------------------------------------------- |
+| `vp run test`                                 | 提交前完整门禁：`vp run check` → `vp run typecheck` → `vp run test:unit`         |
+| `vp run build`                                | 编译 `src/` → `lib/`（含 `panel-client.js`，不入库）                             |
+| `vp run typecheck`                            | `tsc -p tsconfig.test.json`（覆盖 `src/`、`test/`、`vite.config.ts`）            |
+| `vp check --deny-warnings` / `vp check --fix` | Oxfmt + Oxlint 检查（警告即失败）/ 自动修复（对应 `vp run check` / `check:fix`） |
+| `vp fmt` / `vp fmt --check`                   | Oxfmt 格式化 / 只检查                                                            |
+| `vp run test:unit` / `test:coverage`          | 运行真实夹具单元测试 / 覆盖率报告                                                |
 
-CI（`.github/workflows/ci.yml` / `release.yml`）均执行 `pnpm install --frozen-lockfile` → `pnpm test` → `pnpm pack --dry-run` 校验；`release.yml` 通过 npm OIDC 发布，actions 固定 commit SHA 且校验 jj 二进制 SHA-256。
+CI（`.github/workflows/ci.yml` / `release.yml`）均使用 `voidzero-dev/setup-vp`（固定 commit SHA）安装 `vp` 与 Node 24，执行 `vp install --frozen-lockfile` → `vp run test` → `vp pm pack --json -- --dry-run --ignore-scripts` 校验；`release.yml` 通过 npm OIDC 发布，并校验 jj 二进制 SHA-256。
 
 ## 仓库结构
 
@@ -75,7 +75,7 @@ CI（`.github/workflows/ci.yml` / `release.yml`）均执行 `pnpm install --froz
 ## 代码约定与打包守卫
 
 - TypeScript strict + `erasableSyntaxOnly` + `verbatimModuleSyntax`：禁用 `enum`/`namespace`/参数属性，类型导入用 `import type`，相对导入带 `.ts` 扩展名。
-- 格式与 lint 统一由 `vite.config.ts` 管理（`printWidth: 120`、`singleQuote`、2 空格、LF）。改动后运行 `pnpm run format` 与 `pnpm test`，禁止用注释绕过 lint 告警。源码与测试注释用英文，用户文档用中文。
+- 格式与 lint 统一由 `vite.config.ts` 管理（`printWidth: 120`、`singleQuote`、2 空格、LF）。改动后运行 `vp fmt` 与 `vp run test`，禁止用注释绕过 lint 告警。源码与测试注释用英文，用户文档用中文。
 - 测试夹具用 `mktemp` 隔离并显式传 `cwd`，自检 jj root 指向夹具目录，避免误操作真实仓库。
 - **新增公开子路径**时同步三处：`src/<name>.ts`、`package.json` 的 `exports`/`files` 与 `tsconfig.test.json` 的 `paths`（`./client` 为经典脚本不进 `paths`）；缺 `paths` 会在干净 checkout 的 typecheck 报 TS2307。
 - **新增工具或配置键**时同步：`policies.ts`（沙箱分类）/ `config.ts`（`Config` + `ROW_CONFIG_KEYS`）→ 对应测试 → `README.md` 与 `locale/*.json`。
@@ -89,7 +89,7 @@ CI（`.github/workflows/ci.yml` / `release.yml`）均执行 `pnpm install --froz
 
 ## 提交前检查
 
-- [ ] `pnpm test` 全绿（`vp check --deny-warnings` → `typecheck` → `test:unit`）
+- [ ] `vp run test` 全绿（`vp check --deny-warnings` → `typecheck` → `test:unit`）
 - [ ] `jj diff` 仅含预期改动，未混入构建产物或临时文件
 - [ ] 用户可见变更已同步 `README.md` 与对应 `locale/*.json`
 - [ ] 未新增运行时依赖，依赖变更已更新 `pnpm-lock.yaml`

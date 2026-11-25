@@ -4,8 +4,8 @@
  * This package ships no Vite application: `vite-plus` supplies the local
  * formatter (Oxfmt) and linter (Oxlint), so the `fmt` and `lint` blocks below
  * are the single source of truth for code style and lint rules. Run them
- * through the package scripts (`pnpm run format` / `pnpm run lint` /
- * `pnpm run check`); tests and the build stay on `node --test` and `tsc`.
+ * through Vite+ (`vp fmt` / `vp lint` / `vp check` or `vp run ...`);
+ * tests and the build stay on `node --test` and `tsc`.
  *
  * @module vite.config
  */

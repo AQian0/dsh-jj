@@ -94,7 +94,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
-    "prepack": "pnpm run build",
+    "prepack": "vp run build",
     "format": "vp fmt",
     "format:check": "vp fmt --check",
     "lint": "vp lint",
@@ -104,7 +104,7 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "test:unit": "node --test \"test/**/*.test.ts\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='lib/**' \"test/**/*.test.ts\"",
-    "test": "pnpm run check && pnpm run typecheck && pnpm run test:unit"
+    "test": "vp run check && vp run typecheck && vp run test:unit"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-session-projection": "0.2.1-rc.5",

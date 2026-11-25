@@ -25,10 +25,10 @@
     "noEmit": true,
     "skipLibCheck": true,
     // The package self-reference in the tests resolves to source here, so
-    // `pnpm run typecheck` works on a fresh clone before lib/ is built. Every
+    // `vp run typecheck` works on a fresh clone before lib/ is built. Every
     // component subpath the tests import must be listed: without a mapping tsc
     // follows `package.json` exports to `lib/types/*.d.ts`, which only exists
-    // after `pnpm run build` (locally a stale lib/ hides the gap, CI does not).
+    // after `vp run build` (locally a stale lib/ hides the gap, CI does not).
     // test/build.test.ts asserts the map covers the imports and stays in sync.
     "paths": {
       "@aqian0/dsh-jj": ["./src/index.ts"],

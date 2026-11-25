@@ -42,7 +42,7 @@ interface BuiltJjService {
  * Compiler the build test must use.
  *
  * Prefer the workspace-local `tsc` so a direct `node --test test/build.test.ts`
- * produces the same emit as `pnpm test`/CI (a different global compiler preserves
+ * produces the same emit as `vp run test`/CI (a different global compiler preserves
  * different string quotes and would make the committed lib/ look stale).
  */
 function tscCommand(): string {
@@ -206,13 +206,13 @@ function filesPatternCovers(pattern: string, target: string): boolean {
 const IMPLICIT_TARBALL_FILES = new Set(['package.json']);
 
 /**
- * Build `lib/` exactly like `pnpm run build`.
+ * Build `lib/` exactly like `vp run build`.
  *
  * Two projects, not one: `tsconfig.json` emits the ESM modules, and
  * `tsconfig.client.json` emits the classic-script client bundle that the main
  * project excludes. Building only the first leaves `lib/panel-client.js` (and its
  * declaration) missing, which every downstream assertion needs — and that gap is
- * invisible on a machine whose `lib/` came from a real `pnpm run build`.
+ * invisible on a machine whose `lib/` came from a real `vp run build`.
  */
 async function buildLib(): Promise<void> {
   for (const project of ['tsconfig.json', 'tsconfig.client.json']) {
@@ -424,11 +424,12 @@ test('pnpm and Vite+ are wired as the repository toolchain', () => {
   ]) {
     assert.ok((scripts[name] ?? '').length > 0, `package.json scripts.${name} is missing`);
   }
+  assert.equal(scripts.prepack, 'vp run build', 'prepack must invoke the build script through Vite+');
   assert.equal(scripts.format, 'vp fmt', 'formatting must go through the Vite+ CLI');
   assert.equal(scripts['format:check'], 'vp fmt --check', 'CI must check formatting through the Vite+ CLI');
   assert.equal(scripts.lint, 'vp lint', 'linting must go through the Vite+ CLI');
   assert.equal(scripts.check, 'vp check --deny-warnings', 'the static gate must deny Oxlint warnings');
-  assert.match(scripts.test ?? '', /pnpm run check/, 'the test gate must run the static checks');
+  assert.match(scripts.test ?? '', /vp run check/, 'the test gate must run the static checks');
 
   for (const file of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', 'vite.config.ts']) {
     assert.ok(existsSync(join(packageDir, file)), `${file} must exist at the repository root`);
@@ -496,7 +497,7 @@ test('the bare package name resolves each documented export', async () => {
 });
 
 test('the test project maps every self-referenced subpath to source', () => {
-  // `pnpm test` type-checks before this file builds lib/, so a bare
+  // `vp run test` type-checks before this file builds lib/, so a bare
   // `@aqian0/dsh-jj/<subpath>` import in the suite only resolves pre-build through
   // the tsconfig `paths` map. A subpath missing there still passes on a machine
   // that happens to have a stale `lib/types/*.d.ts` and fails on a clean checkout
